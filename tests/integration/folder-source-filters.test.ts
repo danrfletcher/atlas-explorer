@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { App, TFile } from "obsidian";
 import { App as MockApp } from "../mocks/obsidian";
 import { ViewsManager } from "../../src/views";
-import { FolderSourceConfig, ViewNode, unitRefKey } from "../../src/types";
+import { ApiSourceConfig, CsvSourceConfig, FolderSourceConfig, MarkdownTableSourceConfig, ViewNode, createEmptyView, unitRefKey } from "../../src/types";
 import { YamlFilterRule } from "../../src/folder-filter";
 
 /** PR-1.S1 integration: a Folder source with YAML file rules, reconciled through the real
@@ -32,7 +32,7 @@ function setup(files: Record<string, CacheEntry>): Fixture {
 	return { app, vm, viewId: vm.getViews()[0].id, caches, lookups };
 }
 
-function addSource(f: Fixture, label: string, rules?: YamlFilterRule[]): ViewNode {
+function addSource(f: Fixture, label: string, rules?: YamlFilterRule[], mode: FolderSourceConfig["mode"] = "merge"): ViewNode {
 	const folder = f.vm.addMetaFolder(f.viewId, null, label)!;
 	const source: FolderSourceConfig = {
 		type: "folder",
@@ -41,7 +41,7 @@ function addSource(f: Fixture, label: string, rules?: YamlFilterRule[]): ViewNod
 		showFiles: true,
 		showFolders: false,
 		refreshOnViewLoad: false,
-		mode: "merge",
+		mode,
 		...(rules ? { filters: { files: { yaml: { rules } } } } : {}),
 	};
 	f.vm.setFolderSource(f.viewId, folder.id, source);
@@ -208,5 +208,101 @@ describe("F4: filtering never writes removedRefs and leaves existing rows intact
 		const node = addSource(f, "Job search", [{ key: "status", value: "active" }]);
 		f.vm.onMetadataResolved();
 		expect(f.vm.getViews()[0].root.find((n) => n.id === node.id)!.folderSource!.removedRefs).toBeUndefined();
+	});
+});
+
+const API_SOURCE: ApiSourceConfig = {
+	url: "https://api.example.com/items",
+	method: "GET",
+	mapping: { idField: "id", labelField: "name" },
+	mode: "merge",
+	refreshOnViewLoad: false,
+	refreshEveryMinutesEnabled: false,
+};
+
+const CSV_SOURCE: CsvSourceConfig = {
+	path: "Data/items.csv",
+	mapping: { idField: "id", labelField: "name" },
+	mode: "append",
+	refreshOnViewLoad: false,
+};
+
+const TABLE_SOURCE: MarkdownTableSourceConfig = {
+	path: "Data/tables.md",
+	tableIndex: 0,
+	mapping: { idField: "id", labelField: "name" },
+	mode: "overwrite",
+	refreshOnViewLoad: false,
+};
+
+/** A single meta node carrying one non-Folder source, loaded through the real `ViewsManager` constructor. */
+function viewWithNode(node: Partial<ViewNode>): ViewManagerFixture {
+	const view = createEmptyView("v1", "View");
+	view.root.push({ id: "n1", type: "meta", label: "Data", children: [], ...node } as ViewNode);
+	const vm = new ViewsManager({} as App, [view], "v1", () => {});
+	return { vm, node: vm.getViews()[0].root[0] };
+}
+
+interface ViewManagerFixture {
+	vm: ViewsManager;
+	node: ViewNode;
+}
+
+describe("F6: API, Markdown Table and CSV source configs are untouched by sanitize and duplicate", () => {
+	it("sanitize (on load) keeps every saved field of each source config and adds no filters key", () => {
+		const cases = [
+			["apiSource", API_SOURCE],
+			["csvSource", CSV_SOURCE],
+			["markdownTableSource", TABLE_SOURCE],
+		] as const;
+		for (const [key, source] of cases) {
+			const loaded = viewWithNode({ [key]: source }).node[key] as unknown as Record<string, unknown>;
+			// `toMatchObject` rather than `toEqual`: sanitize fills in defaults (e.g. `type`), but must not drop or change a saved field.
+			expect(loaded).toMatchObject(source);
+			expect("filters" in loaded).toBe(false);
+		}
+	});
+
+	it("duplicate copies each source config equal to the original, with no shared reference and no filters key", () => {
+		for (const key of ["apiSource", "csvSource", "markdownTableSource"] as const) {
+			const source = key === "apiSource" ? API_SOURCE : key === "csvSource" ? CSV_SOURCE : TABLE_SOURCE;
+			const { vm, node } = viewWithNode({ [key]: source });
+			const clone = vm.duplicateNode("v1", node.id)!;
+			const original = node[key] as unknown as Record<string, unknown>;
+			const copy = clone[key] as unknown as Record<string, unknown>;
+			expect(copy).toEqual(original);
+			expect(copy).not.toBe(original);
+			expect("filters" in copy).toBe(false);
+		}
+	});
+});
+
+describe("F6: reconcileFolderSourceChildDelete behaves identically for filtered and unfiltered Folder sources", () => {
+	/** The placeholder rows a delete leaves on the owning Folder node, minus the generated child id and
+	 * the wall-clock `lastSeenAt`, which differ between any two runs. */
+	function placeholders(f: Fixture, node: ViewNode): Record<string, unknown>[] {
+		const owner = f.vm.getNode(f.viewId, node.id)!;
+		return Object.values(owner.apiItemState ?? {}).map(({ id: _id, lastSeenAt: _seen, ...rest }) => rest);
+	}
+
+	it.each(["merge", "append", "overwrite"] as const)("mode=%s: deleting a matching file leaves the same placeholder with or without rules", (mode) => {
+		const unfiltered = setup(GP1_FILES);
+		const unfilteredNode = addSource(unfiltered, "Job search", undefined, mode);
+		refresh(unfiltered, unfilteredNode);
+		unfiltered.vm.onMetadataResolved();
+
+		const filtered = setup(GP1_FILES);
+		const filteredNode = addSource(filtered, "Job search", [{ key: "status", value: "active" }], mode);
+		refresh(filtered, filteredNode);
+		filtered.vm.onMetadataResolved();
+
+		unfiltered.vm.onVaultDelete("Jobs/acme.md");
+		filtered.vm.onVaultDelete("Jobs/acme.md");
+
+		expect(rowPaths(filtered, filteredNode)).not.toContain("Jobs/acme.md");
+		expect(rowPaths(unfiltered, unfilteredNode)).not.toContain("Jobs/acme.md");
+		expect(placeholders(filtered, filteredNode)).toEqual(placeholders(unfiltered, unfilteredNode));
+		// Guard against a vacuous pass: merge and append keep a placeholder, overwrite keeps none (G14).
+		expect(placeholders(filtered, filteredNode)).toHaveLength(mode === "overwrite" ? 0 : 1);
 	});
 });
