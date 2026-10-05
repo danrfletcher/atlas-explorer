@@ -44,6 +44,20 @@ function ruleMatches(frontmatter: Record<string, unknown>, rule: YamlFilterRule)
 	});
 }
 
+/** PR-1.F2: how a managed Folder-source row shows under its source's rules. `shown` is an ordinary row,
+ * `filteredOut` is greyed with a Remove button (merge), and `hidden` is not rendered at all, its children
+ * lifted one level into its place (overwrite, or a hidden-at-save row in merge or overwrite). */
+export type FolderRowFilterState = "shown" | "filteredOut" | "hidden";
+
+/** PR-1.F2 (G4/G5/E11): the render-time state of one managed row. `matches` is whether its file currently
+ * satisfies the rules. Append never hides a row. Hidden-at-save rows stay hidden in merge and overwrite
+ * while they don't match, and a live drop-out shows "filtered out" in merge or is hidden in overwrite. */
+export function folderRowFilterState(node: { folderSourceHiddenAtSave?: true }, mode: "append" | "merge" | "overwrite", matches: boolean): FolderRowFilterState {
+	if (matches || mode === "append") return "shown";
+	if (node.folderSourceHiddenAtSave) return "hidden";
+	return mode === "overwrite" ? "hidden" : "filteredOut";
+}
+
 /** G3: whether `frontmatter` satisfies every rule (ANDed). Rules with an empty key are ignored, and
  * zero remaining rules means unfiltered, so everything passes. Missing or non-object frontmatter
  * (no cache entry, malformed YAML, body-only file) fails every rule that is left. Pure: reads only

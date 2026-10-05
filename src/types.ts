@@ -204,6 +204,10 @@ export interface ViewNode extends StatusGovernance {
 	 * what lets a refresh find a managed row again no matter where the user dragged or nested it,
 	 * instead of only looking at the source's own direct children. */
 	folderSourceOwnerId?: string;
+	/** PR-1.F2 (G4/G6): set on a managed row when Save with YAML rules found it not matching (merge and
+	 * overwrite only). Such a row is hidden silently, with no "filtered out" marker, until it matches
+	 * again, which clears this flag. A row that drops out live, after Save, never has this flag. */
+	folderSourceHiddenAtSave?: true;
 	/** PR-7 (G17-G19/G21-G23): a CSV-file source — unlike `folderSource`, this produces placeholder/
 	 * API-item rows exactly like `apiSource` (same `apiCache`/`apiItemState`/`apiItemOrder`/
 	 * `apiAwaitingConfirmation` fields below, shared with `apiSource` rather than duplicated), just

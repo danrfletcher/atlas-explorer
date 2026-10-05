@@ -1,7 +1,7 @@
 import { TAbstractFile, TFile, TFolder } from "obsidian";
 import { ApiItemState, FolderSourceConfig, PLACEHOLDER_ROW_KIND, UnitRef, ViewNode, unitRefKey } from "./types";
 import { listOutsideChildren, resolveOutsidePath } from "./folder-source-outside";
-import { matchesYamlRules } from "./folder-filter";
+import { matchesYamlRules, type YamlFilterRule } from "./folder-filter";
 
 /** PR-1.S1: what a rule-filtered Folder source needs from the plugin to decide whether a file joins.
  * Frontmatter comes from `app.metadataCache` only, never from file content. */
@@ -12,20 +12,32 @@ export interface FolderFileFilterContext {
 	frontmatterOf(file: TFile): unknown;
 }
 
+/** PR-1.F2: the rules a Folder source actually filters by. Empty-key rules are ignored, and none left
+ * means the source is unfiltered. */
+export function activeFolderRules(source: FolderSourceConfig): YamlFilterRule[] {
+	return (source.filters?.files?.yaml?.rules ?? []).filter((rule) => rule.key.trim() !== "");
+}
+
+/** PR-1.F2 (G3): whether one vault file satisfies a source's rules. Non-notes fail any rule, since they
+ * have no frontmatter. Frontmatter comes from the caller's `frontmatterOf`, which reads the metadata cache. */
+export function fileMatchesFolderRules(
+	file: TAbstractFile,
+	rules: YamlFilterRule[],
+	frontmatterOf: (file: TFile) => unknown
+): boolean {
+	if (!(file instanceof TFile) || file.extension !== "md") return false;
+	return matchesYamlRules(frontmatterOf(file), rules);
+}
+
 /** G3/G8: the per-file predicate for a rule-filtered Folder source. `undefined` means the source is
- * unfiltered (no valid rule left), so every file passes exactly as before. Non-notes fail any rule,
- * since they have no frontmatter. */
+ * unfiltered (no valid rule left), so every file passes exactly as before. */
 function fileFilterFor(
 	source: FolderSourceConfig,
 	context: FolderFileFilterContext | undefined
 ): ((file: TAbstractFile) => boolean) | undefined {
-	const rules = (source.filters?.files?.yaml?.rules ?? []).filter((rule) => rule.key.trim() !== "");
+	const rules = activeFolderRules(source);
 	if (rules.length === 0) return undefined;
-	return (file) => {
-		if (!context?.metadataResolved) return false;
-		if (!(file instanceof TFile) || file.extension !== "md") return false;
-		return matchesYamlRules(context.frontmatterOf(file), rules);
-	};
+	return (file) => context?.metadataResolved === true && fileMatchesFolderRules(file, rules, context.frontmatterOf);
 }
 
 /** G3/G4: the direct children of `folder`, filtered independently by `showFiles`/`showFolders` —
