@@ -18,9 +18,11 @@ interface Fixture {
 	lookups: string[];
 }
 
-function setup(files: Record<string, CacheEntry>): Fixture {
+function setup(files: Record<string, CacheEntry>, cacheIdle = false): Fixture {
 	const app = new MockApp();
 	app.vault.seedFolder("Jobs");
+	// A plugin enabled after the cache has already indexed (T1): no "resolved" event will fire.
+	if (cacheIdle) (app.metadataCache as unknown as { inProgressTaskCount: number }).inProgressTaskCount = 0;
 	const caches = new Map<string, CacheEntry>(Object.entries(files));
 	const lookups: string[] = [];
 	for (const path of caches.keys()) app.vault.seedFile(path);
@@ -106,6 +108,37 @@ describe("E10: files are held back until metadataCache has resolved", () => {
 		const node = addSource(f, "Job search");
 		refresh(f, node);
 		expect(rowPaths(f, node)).toHaveLength(4);
+	});
+});
+
+describe("T1: a plugin enabled after the cache has resolved does not hold files back", () => {
+	it("evaluates on refresh with no resolved event, and still skips non-matching files", () => {
+		const f = setup(GP1_FILES, true);
+		const node = addSource(f, "Job search", [{ key: "status", value: "active" }]);
+		refresh(f, node);
+		expect(rowPaths(f, node)).toEqual(["Jobs/acme.md", "Jobs/gamma.md"]);
+
+		f.app.vault.seedFile("Jobs/delta.md");
+		f.caches.set("Jobs/delta.md", { frontmatter: { status: "done" } });
+		f.app.vault.seedFile("Jobs/zeta.md");
+		f.caches.set("Jobs/zeta.md", { frontmatter: { status: "active" } });
+		refresh(f, node);
+		expect(rowPaths(f, node)).toContain("Jobs/zeta.md");
+		expect(rowPaths(f, node)).not.toContain("Jobs/delta.md");
+	});
+
+	it("a newly added filtered source has its matching rows at once", () => {
+		const f = setup(GP1_FILES, true);
+		const node = addSource(f, "Done jobs", [{ key: "status", value: "done" }]);
+		refresh(f, node);
+		expect(rowPaths(f, node)).toEqual(["Jobs/beta.md"]);
+	});
+
+	it("a cache that is still indexing keeps holding files back until resolved", () => {
+		const f = setup(GP1_FILES, false);
+		const node = addSource(f, "Job search", [{ key: "status", value: "active" }]);
+		refresh(f, node);
+		expect(rowPaths(f, node)).toEqual([]);
 	});
 });
 

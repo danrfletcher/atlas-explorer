@@ -27,6 +27,15 @@ import {
 	unitToRef,
 } from "./types";
 
+/** PR-1.S1 (T1): whether `metadataCache` had already finished indexing before this plugin instance
+ * loaded (e.g. the plugin was re-enabled mid-session). Obsidian fires "resolved" once per indexing
+ * pass, so without this a later instance would hold rule-filtered files back until some note changed.
+ * `inProgressTaskCount` is not in the public typings, so it is read defensively: when it is absent
+ * this stays false and the "resolved" event decides, as before. */
+function metadataCacheIdle(app: App): boolean {
+	return (app as unknown as { metadataCache?: { inProgressTaskCount?: unknown } }).metadataCache?.inProgressTaskCount === 0;
+}
+
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -505,13 +514,14 @@ export class ViewsManager {
 	private views: View[];
 	private activeViewId: string;
 	private changeListeners = new Set<() => void>();
-	/** PR-1.S1 (E10): false until `metadataCache` has resolved once this session. */
-	private metadataResolved = false;
+	/** PR-1.S1 (E10): false until `metadataCache` has resolved, seeded in the constructor (T1). */
+	private metadataResolved: boolean;
 
 	constructor(private app: App, initialViews: View[], initialActiveViewId: string, private persist: () => void) {
 		sanitizeViewsApiFields(initialViews);
 		this.views = initialViews.length > 0 ? initialViews : [createEmptyView(generateNodeId(), DEFAULT_VIEW_NAME)];
 		this.activeViewId = this.views.some((v) => v.id === initialActiveViewId) ? initialActiveViewId : this.views[0].id;
+		this.metadataResolved = metadataCacheIdle(app);
 	}
 
 	onChange(cb: () => void): () => void {
