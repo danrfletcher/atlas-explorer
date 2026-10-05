@@ -1394,17 +1394,14 @@ export class AtlasExplorerView extends ItemView {
 			status: StatusDefinition | null;
 			governor: StatusGovernance | null;
 			bypass: boolean;
+			ancestors: StatusGovernance[];
 			apiItem?: ApiItemState;
 		}
 		const resolved: Resolved[] = [];
-		for (const node of nodes) {
-			// R1/R2 fix: an Outside-Vault-managed child whose source doesn't currently resolve on this
-			// device renders as if it doesn't exist — the persisted tree keeps it intact (see
-			// `isOutsideManagedAndUnresolved`'s own doc comment) so it reappears exactly as it was the
-			// moment the path resolves again, with no separate "missing" row or hole in this list.
-			if (this.isOutsideManagedAndUnresolved(view, node)) continue;
-			const governor = sm.findGoverningAncestor(ancestors, node);
-			const status = governor ? sm.resolveNodeStatus(ancestors, node) : null;
+		for (const row of this.visibleFolderSourceRows(nodes, view, ancestors)) {
+			const { node, ancestors: rowAncestors } = row;
+			const governor = sm.findGoverningAncestor(rowAncestors, node);
+			const status = governor ? sm.resolveNodeStatus(rowAncestors, node) : null;
 			let bypass = false;
 			if (filterActive) {
 				if (node.type === "unit" && node.ref) {
@@ -1414,7 +1411,7 @@ export class AtlasExplorerView extends ItemView {
 				if (!bypass && node.type === "meta" && this.apiItemsMatchFilter(node)) bypass = true;
 				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children))) bypass = true;
 			}
-			resolved.push({ node, status, governor, bypass });
+			resolved.push({ node, status, governor, bypass, ancestors: rowAncestors });
 		}
 
 		// G25: a Folder's own API item rows (`apiItemOrder`/`apiItemState`) are folded into this same
@@ -1445,7 +1442,7 @@ export class AtlasExplorerView extends ItemView {
 				const pseudo = this.pseudoNodeForApiItem(item);
 				const governor = sm.findGoverningAncestor(ancestors, pseudo);
 				const status = governor ? sm.resolveNodeStatus(ancestors, pseudo) : null;
-				const entry: Resolved = { node: pseudo, status, governor, bypass: filterActive, apiItem: item };
+				const entry: Resolved = { node: pseudo, status, governor, bypass: filterActive, ancestors, apiItem: item };
 				if (item.folderSourceDeleted && typeof item.position === "number") {
 					positioned.push({ entry, position: Math.min(Math.max(item.position, 0), realCount) });
 				} else {
@@ -1495,7 +1492,7 @@ export class AtlasExplorerView extends ItemView {
 
 		const groupRowShown = new Set<string>();
 		for (const r of resolved) {
-			const { node, status, governor, bypass, apiItem } = r;
+			const { node, status, governor, bypass, apiItem, ancestors: rowAncestors } = r;
 			if (!bypass && status && governor && isHidden(status, governor)) continue; // hide wins outright
 
 			if (!bypass && status && governor) {
@@ -1517,9 +1514,41 @@ export class AtlasExplorerView extends ItemView {
 				// has API rows to merge, so it's always defined here).
 				this.renderApiItemRow(apiItem, container, view, apiOwner as ViewNode, depth, ancestors);
 			} else {
-				await this.renderNode(node, container, view, depth, ancestors);
+				await this.renderNode(node, container, view, depth, rowAncestors);
 			}
 		}
+	}
+
+	/** PR-1.F2 (E6/E9, hidden-row rules): the rows of one list that render, each with the ancestors that
+	 * govern it. A row hidden by its Folder source's YAML rules is dropped here, before the sort, hide and
+	 * truncate pass, so it never fills a truncation group. It is also pruned from the selection. Its
+	 * children lift one level into its place and stay governed by it too. A lifted child that is hidden
+	 * as well is dropped, and nothing renders under it. "Filtered out" rows are not hidden and stay in the
+	 * list, so filter-box search still finds them. */
+	private visibleFolderSourceRows(nodes: ViewNode[], view: View, ancestors: StatusGovernance[]): { node: ViewNode; ancestors: StatusGovernance[] }[] {
+		const isHiddenRow = (node: ViewNode): boolean => {
+			if (this.plugin.viewsManager.managedRowFilterState(view.id, node) !== "hidden") return false;
+			this.selectedBucketNodeIds.delete(node.id);
+			return true;
+		};
+		const rows: { node: ViewNode; ancestors: StatusGovernance[] }[] = [];
+		for (const node of nodes) {
+			// R1/R2 fix: an Outside-Vault-managed child whose source doesn't currently resolve on this
+			// device renders as if it doesn't exist — the persisted tree keeps it intact (see
+			// `isOutsideManagedAndUnresolved`'s own doc comment) so it reappears exactly as it was the
+			// moment the path resolves again, with no separate "missing" row or hole in this list.
+			if (this.isOutsideManagedAndUnresolved(view, node)) continue;
+			if (!isHiddenRow(node)) {
+				rows.push({ node, ancestors });
+				continue;
+			}
+			const liftedAncestors = [...ancestors, node];
+			for (const child of node.children) {
+				if (this.isOutsideManagedAndUnresolved(view, child) || isHiddenRow(child)) continue;
+				rows.push({ node: child, ancestors: liftedAncestors });
+			}
+		}
+		return rows;
 	}
 
 	/** PR 19: the group placeholder ("3 Done") when collapsed, or a small "Collapse" affordance
@@ -1911,12 +1940,18 @@ export class AtlasExplorerView extends ItemView {
 
 		const ref = node.ref;
 		if (!ref) return;
+		// PR-1.F2: a hidden row is never rendered here. `renderNodeList` already drops it and lifts its
+		// children, so this only guards any other caller.
+		const filterState = this.plugin.viewsManager.managedRowFilterState(view.id, node);
+		if (filterState === "hidden") return;
+		const filteredOut = filterState === "filteredOut";
 		const outsideManaged = this.isOutsideManagedUnit(view, node);
 		const info = outsideManaged ? this.resolveOutsideManagedRowInfo(ref) : await this.resolveRef(ref);
 		if (!this.matchesFilter(info.text)) return;
 
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		if (info.missing) row.addClass("atlas-missing");
+		row.toggleClass("atlas-filtered-out", filteredOut);
 		row.dataset.refKey = unitRefKey(ref);
 		row.dataset.selectKey = node.id;
 		row.toggleClass("is-selected", this.selectedBucketNodeIds.has(node.id));
@@ -1939,8 +1974,11 @@ export class AtlasExplorerView extends ItemView {
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
 		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
-		if (info.missing) {
-			row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
+		if (info.missing) row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
+		// PR-1.F2 (G5/G7): "filtered out" takes the place of "last seen". Remove works the same way as on a
+		// missing row, and it never blocks a later re-match.
+		if (filteredOut) row.createSpan({ cls: "atlas-row-secondary", text: "filtered out" });
+		if (info.missing || filteredOut) {
 			const removeBtn = row.createDiv({ cls: "atlas-row-action" });
 			setIcon(removeBtn, "x");
 			setTooltip(removeBtn, "Remove from view");

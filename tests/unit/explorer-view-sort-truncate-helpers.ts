@@ -49,7 +49,7 @@ const proto = AtlasExplorerView.prototype as unknown as ProtoMethods;
 export { proto };
 
 export interface FakeExplorer {
-	plugin: { statusesManager: StatusesManager; settings: typeof DEFAULT_SETTINGS; viewsManager: { setApiItemStatus: ReturnType<typeof vi.fn> } };
+	plugin: { statusesManager: StatusesManager; settings: typeof DEFAULT_SETTINGS; viewsManager: { setApiItemStatus: ReturnType<typeof vi.fn>; managedRowFilterState: ReturnType<typeof vi.fn> } };
 	filterText: string;
 	expandedTruncationGroups: Set<string>;
 	resolveRef: ReturnType<typeof vi.fn>;
@@ -62,6 +62,7 @@ export interface FakeExplorer {
 	renderNode: ReturnType<typeof vi.fn>;
 	renderApiItemRow: ((...args: unknown[]) => unknown) | ReturnType<typeof vi.fn>;
 	isOutsideManagedAndUnresolved: ReturnType<typeof vi.fn>;
+	visibleFolderSourceRows: (...args: unknown[]) => unknown;
 }
 
 /** Builds a fake `this` for `renderNodeList`. `renderNode`/`renderApiItemRow` are stubbed with
@@ -69,7 +70,7 @@ export interface FakeExplorer {
  * covered directly in `explorer-view-api-items.test.ts` by calling the real `renderApiItemRow`. */
 export function makeFakeExplorer(sm: StatusesManager, overrides: Partial<FakeExplorer> = {}): FakeExplorer {
 	const fake: FakeExplorer = {
-		plugin: { statusesManager: sm, settings: DEFAULT_SETTINGS, viewsManager: { setApiItemStatus: vi.fn() } },
+		plugin: { statusesManager: sm, settings: DEFAULT_SETTINGS, viewsManager: { setApiItemStatus: vi.fn(), managedRowFilterState: vi.fn(() => "shown") } },
 		filterText: "",
 		expandedTruncationGroups: new Set<string>(),
 		resolveRef: vi.fn(),
@@ -88,6 +89,7 @@ export function makeFakeExplorer(sm: StatusesManager, overrides: Partial<FakeExp
 			container.createDiv({ cls: "marker-api", attr: { "data-id": item.id } });
 		}),
 		isOutsideManagedAndUnresolved: vi.fn(() => false),
+		visibleFolderSourceRows: proto.visibleFolderSourceRows,
 		...overrides,
 	};
 	return fake;

@@ -20,7 +20,7 @@ function makeFakeExplorerForRenderNode(overrides: Record<string, unknown> = {}) 
 	const getNode = vi.fn((_viewId: string, nodeId: string) => (overrides.ownerNode as ViewNode | undefined) ?? null);
 	return {
 		plugin: {
-			viewsManager: { getNode, unplaceNode: vi.fn() },
+			viewsManager: { getNode, unplaceNode: vi.fn(), managedRowFilterState: vi.fn(() => "shown") },
 			folderSourcePathStore: { get: vi.fn(() => "") },
 		},
 		filterText: "",
@@ -172,7 +172,7 @@ describe("renderNodeList — R1/R2: render-time skip for an unresolved Outside-V
 		const fake = makeFakeExplorer(sm, { isOutsideManagedAndUnresolved: proto.isOutsideManagedAndUnresolved as never });
 		(fake as unknown as { plugin: Record<string, unknown> }).plugin = {
 			...fake.plugin,
-			viewsManager: { getNode },
+			viewsManager: { getNode, managedRowFilterState: vi.fn(() => "shown") },
 			folderSourcePathStore: { get: vi.fn(() => "") },
 		};
 
@@ -197,7 +197,7 @@ describe("renderNodeList — R1/R2: render-time skip for an unresolved Outside-V
 			const fake = makeFakeExplorer(sm, { isOutsideManagedAndUnresolved: proto.isOutsideManagedAndUnresolved as never });
 			(fake as unknown as { plugin: Record<string, unknown> }).plugin = {
 				...fake.plugin,
-				viewsManager: { getNode },
+				viewsManager: { getNode, managedRowFilterState: vi.fn(() => "shown") },
 				folderSourcePathStore: { get: vi.fn(() => tmpDir) },
 			};
 
