@@ -1,8 +1,14 @@
-import { App } from "obsidian";
+import { App, TFile } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
-import { basenameForDeletedRef, buildFolderSourceChildren, reconcileFolderSourceChildDelete } from "./folder-source";
-import type { YamlFilterRule } from "./folder-filter";
+import {
+	activeFolderRules,
+	basenameForDeletedRef,
+	buildFolderSourceChildren,
+	fileMatchesFolderRules,
+	reconcileFolderSourceChildDelete,
+} from "./folder-source";
+import { type FolderRowFilterState, folderRowFilterState, type YamlFilterRule } from "./folder-filter";
 import {
 	ApiClickAction,
 	ApiFieldMapping,
@@ -531,6 +537,10 @@ export class ViewsManager {
 
 	private save(): void {
 		this.persist();
+		this.notifyChange();
+	}
+
+	private notifyChange(): void {
 		for (const cb of this.changeListeners) cb();
 	}
 
@@ -739,12 +749,89 @@ export class ViewsManager {
 	 * or whose owning node no longer carries a Folder source. */
 	private rememberFolderSourceRemoval(view: View, node: ViewNode): void {
 		if (!node.folderSourceManaged || !node.ref || !node.folderSourceOwnerId) return;
+		// PR-1.F2 (F4/G7): removing a "filtered out" row never blocks it. If it matches again, it returns as
+		// a fresh row on the next refresh, so nothing is remembered.
+		if (this.managedRowFilterState(view.id, node) === "filteredOut") return;
 		const owner = this.findNode(view.root, node.folderSourceOwnerId);
 		const source = owner?.node.folderSource;
 		if (!source) return;
 		const key = unitRefKey(node.ref);
 		if (!source.removedRefs) source.removedRefs = [key];
 		else if (!source.removedRefs.includes(key)) source.removedRefs.push(key);
+	}
+
+	/** PR-1.F2 (G5/G6/E11): the render-time state of one managed row under its Folder source's YAML rules,
+	 * read from the metadata cache on every call and never stored. Before the cache resolves, a row of a
+	 * rule-filtered source is `hidden`, so no unfiltered row flashes (E10). A row whose file is gone keeps
+	 * its normal look, since the existing delete rule owns that case. */
+	managedRowFilterState(viewId: string, node: ViewNode): FolderRowFilterState {
+		if (!node.folderSourceManaged || node.type !== "unit" || node.ref?.kind !== "file" || !node.folderSourceOwnerId) return "shown";
+		const source = this.getNode(viewId, node.folderSourceOwnerId)?.folderSource;
+		const rules = source && source.location === "inside" ? activeFolderRules(source) : [];
+		if (!source || rules.length === 0) return "shown";
+		if (!this.metadataResolved) return "hidden";
+		const matches = this.rowMatches(node, rules);
+		if (matches === undefined) return "shown";
+		return folderRowFilterState(node, source.mode ?? "merge", matches);
+	}
+
+	/** PR-1.F2: whether a managed file row's file currently satisfies `rules`. `undefined` when the file is
+	 * not in the vault (deleted or missing), so the caller leaves the row alone. Frontmatter comes from
+	 * `metadataCache` only. */
+	private rowMatches(node: ViewNode, rules: YamlFilterRule[]): boolean | undefined {
+		const file = node.ref ? this.app.vault.getAbstractFileByPath(node.ref.path) : null;
+		if (!(file instanceof TFile)) return undefined;
+		return fileMatchesFolderRules(file, rules, (f) => this.app.metadataCache.getFileCache(f)?.frontmatter);
+	}
+
+	/** PR-1.F2 (G4): Save with changed rules sets or clears each managed row of this owner. A row that
+	 * doesn't match is flagged hidden-at-save in merge and overwrite, and append never hides a row. A row
+	 * that matches is unflagged, and every row is unflagged once no rules remain. Mode changes alone do
+	 * not re-flag anything, so E11's render-time mode switch stays as it is. */
+	private applyRulesToHiddenAtSave(view: View, ownerId: string, source: FolderSourceConfig | undefined): void {
+		const rules = source && source.location === "inside" ? activeFolderRules(source) : [];
+		const walk = (nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.folderSourceManaged && node.type === "unit" && node.ref?.kind === "file" && node.folderSourceOwnerId === ownerId) {
+					const matches = rules.length === 0 ? true : this.rowMatches(node, rules);
+					if (matches === true) delete node.folderSourceHiddenAtSave;
+					else if (matches === false && source?.mode !== "append") node.folderSourceHiddenAtSave = true;
+				}
+				walk(node.children);
+			}
+		};
+		walk(view.root);
+	}
+
+	/** PR-1.F2 (G6): unflags every managed file row that matches again, in every view or in one owner's
+	 * rows only. Returns whether anything changed, so a caller saves only when there is something to save. */
+	private clearMatchedHiddenAtSave(views: View[], ownerId?: string): boolean {
+		let changed = false;
+		for (const view of views) {
+			const owners = new Map<string, FolderSourceConfig>();
+			const index = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					if (node.folderSource?.location === "inside") owners.set(node.id, node.folderSource);
+					index(node.children);
+				}
+			};
+			index(view.root);
+			const walk = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					const source = node.folderSourceOwnerId ? owners.get(node.folderSourceOwnerId) : undefined;
+					if (node.folderSourceHiddenAtSave && source && (ownerId === undefined || node.folderSourceOwnerId === ownerId)) {
+						const rules = activeFolderRules(source);
+						if (rules.length === 0 || this.rowMatches(node, rules) === true) {
+							delete node.folderSourceHiddenAtSave;
+							changed = true;
+						}
+					}
+					walk(node.children);
+				}
+			};
+			walk(view.root);
+		}
+		return changed;
 	}
 
 	addMetaFolder(viewId: string, parentId: string | null, label: string): ViewNode | null {
@@ -1115,7 +1202,11 @@ export class ViewsManager {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found || found.node.type !== "meta") return;
+		// PR-1.F2 (G4): only a change to the rules is a definition that flags rows. An unchanged save, or a
+		// mode change alone, leaves every flag as it was.
+		const rulesBefore = JSON.stringify(found.node.folderSource?.filters ?? null);
 		found.node.folderSource = source;
+		if (view && rulesBefore !== JSON.stringify(source?.filters ?? null)) this.applyRulesToHiddenAtSave(view, nodeId, source);
 		this.save();
 	}
 
@@ -1152,6 +1243,7 @@ export class ViewsManager {
 			outsidePath
 		);
 		this.sweepFolderSourceDeletedPlaceholders(found.node);
+		this.clearMatchedHiddenAtSave([view], ownerId);
 		this.save();
 	}
 
@@ -1162,7 +1254,14 @@ export class ViewsManager {
 	 * metadata event would be wasted work. `refreshFolderSource` saves, which notifies the explorer
 	 * through the existing change path, so no second listener is needed. */
 	onMetadataResolved(): void {
-		if (this.metadataResolved) return;
+		if (this.metadataResolved) {
+			// PR-1.F2 (G5/G6): a later resolve re-evaluates rows only. It unflags rows that match again, and
+			// the render reads drop-outs from the cache. It never adds a file, so new files still join only
+			// on a refresh (F7). Notify even without a save, so a live drop-out repaints.
+			if (this.clearMatchedHiddenAtSave(this.views)) this.save();
+			else this.notifyChange();
+			return;
+		}
 		this.metadataResolved = true;
 		const filtered: { viewId: string; nodeId: string }[] = [];
 		const walk = (viewId: string, nodes: ViewNode[]): void => {

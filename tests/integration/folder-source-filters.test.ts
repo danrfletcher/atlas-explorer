@@ -232,7 +232,10 @@ describe("F4: filtering never writes removedRefs and leaves existing rows intact
 
 		expect(JSON.stringify(live().folderSource!.removedRefs)).toBe(removedBefore);
 		const betaAfter = live().children.find((c) => c.ref?.path === "Jobs/beta.md")!;
-		expect(JSON.stringify(betaAfter)).toBe(betaSnapshot);
+		// PR-1.F2 (G4): Save with rules is allowed to set the hidden-at-save flag. It is the only change.
+		expect(betaAfter.folderSourceHiddenAtSave).toBe(true);
+		const { folderSourceHiddenAtSave: _flag, ...rest } = betaAfter;
+		expect(JSON.stringify(rest)).toBe(betaSnapshot);
 		expect(betaAfter.id).toBe(beta.id);
 	});
 
