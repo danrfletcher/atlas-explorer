@@ -583,6 +583,21 @@ export class ViewsManager {
 		return this.views.some((v) => this.findUnitNode(v.root, ref) !== null);
 	}
 
+	/** PR-1.F1: every unit ref key placed in any view, collected in one walk. The "+" picker tests
+	 * each candidate against this Set rather than calling `isPlacedAnywhere` per folder (a tree walk
+	 * each time). Skips the same Outside-owned nodes `findUnitNode` skips. */
+	placedRefKeys(): Set<string> {
+		const keys = new Set<string>();
+		const collect = (nodes: ViewNode[], root: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.type === "unit" && node.ref && !this.isOutsideOwned(root, node)) keys.add(unitRefKey(node.ref));
+				collect(node.children, root);
+			}
+		};
+		for (const view of this.views) collect(view.root, view.root);
+		return keys;
+	}
+
 	/** Every placement of this ref across every view, as breadcrumb-able (view name, meta-folder
 	 * path) pairs. PR 13: one entry per *placement*, not per view — duplicating a unit can now put
 	 * it in more than one spot within the very same view, and the old first-match-only walk would

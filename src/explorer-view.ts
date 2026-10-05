@@ -1,5 +1,6 @@
-import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
+import { App, FuzzyMatch, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TAbstractFile, TFile, TFolder, WorkspaceLeaf, renderResults, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
+import type { AtlasSettings } from "./settings";
 import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import {
 	ApiSourceIdPair,
@@ -104,26 +105,35 @@ export class MetaFolderSuggestModal extends FuzzySuggestModal<MetaTarget> {
 
 /** PR-3 (G2): the "+" inbox-add modal. Deliberately broader than auto-promotion eligibility — its
  * list source is every vault file, not the "references outside the module" rule (F3) — narrowed only
- * by `candidateFilesForAdd`'s already-a-unit-somewhere exclusion. */
-export class AddFileSuggestModal extends FuzzySuggestModal<TFile> {
-	constructor(app: AtlasPlugin["app"], private files: TFile[], private onChoose: (file: TFile) => void) {
+ * by the candidate builders' already-a-unit-somewhere exclusion. PR-1.F1: one mixed list of files
+ * and sub-folders; a folder row shows as `path/` with a folder icon, a file row as `path` with a file icon. */
+export class AddFileSuggestModal extends FuzzySuggestModal<TFile | TFolder> {
+	constructor(app: AtlasPlugin["app"], private items: (TFile | TFolder)[], private onChoose: (item: TFile | TFolder) => void) {
 		super(app);
 	}
-	getItems(): TFile[] {
-		return this.files;
+	getItems(): (TFile | TFolder)[] {
+		return this.items;
 	}
-	getItemText(file: TFile): string {
-		return file.path;
+	getItemText(item: TFile | TFolder): string {
+		return item instanceof TFolder ? `${item.path}/` : item.path;
 	}
-	onChooseItem(file: TFile): void {
-		this.onChoose(file);
+	onChooseItem(item: TFile | TFolder): void {
+		this.onChoose(item);
+	}
+	renderSuggestion(match: FuzzyMatch<TFile | TFolder>, el: HTMLElement): void {
+		el.addClass("atlas-add-suggest-item");
+		const iconEl = el.createSpan({ cls: "atlas-add-suggest-icon" });
+		setIcon(iconEl, match.item instanceof TFolder ? "folder" : "file");
+		const textEl = el.createSpan({ cls: "atlas-add-suggest-text" });
+		renderResults(textEl, this.getItemText(match.item), match.match);
 	}
 }
 
 /** PR-3 (G2, E4): every vault file minus any file already a unit somewhere (auto-promoted, manually
  * promoted, already added) or already placed/nested as a node in any view — so picking one from the
  * modal can never produce a duplicate inbox row. List-level exclusion only: no runtime dedupe is
- * exercised once a file is chosen. */
+ * exercised once a file is chosen. PR-1.F1 (G12): an added folder's interface note (`<Folder>/<Folder>.md`)
+ * is excluded too; a promoted folder's note is still offered. */
 export function candidateFilesForAdd(allFiles: TFile[], units: Unit[], isPlacedAnywhere: (ref: UnitRef) => boolean): TFile[] {
 	// R2: only a *file-kind* ref counts as "the file already present as a unit" (G2) — a promoted-block
 	// unit's `.path` is its containing file's path even though it's kind "block" (per `unitToRef`), so
@@ -131,9 +141,39 @@ export function candidateFilesForAdd(allFiles: TFile[], units: Unit[], isPlacedA
 	const fileRefKeys = new Set(
 		units.filter((unit) => unitToRef(unit).kind === "file").map((unit) => unitRefKey(unitToRef(unit)))
 	);
+	for (const unit of units) {
+		if (unit.type !== "added-folder") continue;
+		const folderName = unit.path.slice(unit.path.lastIndexOf("/") + 1);
+		fileRefKeys.add(unitRefKey({ kind: "file", path: `${unit.path}/${folderName}.md` }));
+	}
 	return allFiles.filter(
 		(file) => !fileRefKeys.has(unitRefKey({ kind: "file", path: file.path })) && !isPlacedAnywhere({ kind: "file", path: file.path })
 	);
+}
+
+/** PR-1.F1 (G1, F2, E9): every sub-folder the "+" picker may offer. Lists the folders itself from
+ * `allLoaded` (`vault.getAllLoadedFiles()`). A folder is offered only when it is not a vault-root
+ * folder, not already a unit (folder-units, promoted, Folder-source-managed or added folders), not
+ * placed in any view (bucket or inbox), not the pool folder or inside it, and not inside an excluded
+ * folder. Unit and placed lookups are Sets built once per call, so the cost is linear in the vault. */
+export function candidateFoldersForAdd(
+	allLoaded: TAbstractFile[],
+	units: Unit[],
+	placedRefKeys: Set<string>,
+	settings: Pick<AtlasSettings, "poolFolder" | "excludedFolders">
+): TFolder[] {
+	const unitFolderKeys = new Set(
+		units.filter((unit) => unitToRef(unit).kind === "folder").map((unit) => unitRefKey(unitToRef(unit)))
+	);
+	const { poolFolder, excludedFolders } = settings;
+	const isWithin = (path: string, parent: string): boolean => path === parent || path.startsWith(`${parent}/`);
+	return allLoaded.filter((entry): entry is TFolder => entry instanceof TFolder).filter((folder) => {
+		const key = unitRefKey({ kind: "folder", path: folder.path });
+		if (folder.isRoot() || !folder.path.includes("/")) return false;
+		if (unitFolderKeys.has(key) || placedRefKeys.has(key)) return false;
+		if (isWithin(folder.path, poolFolder)) return false;
+		return !excludedFolders.some((excluded) => isWithin(folder.path, excluded));
+	});
 }
 
 /** PR 9 (issue 2): replaces inline fold/unfold for modules with a browsable read-only tree of the
@@ -2094,12 +2134,18 @@ export class AtlasExplorerView extends ItemView {
 	 * placed somewhere, and on selection marks it "added" (terminal state — see `markAdded`) and
 	 * persists immediately, matching the click-driven-action convention `promoteAndPlace` uses. */
 	private openAddFileModal(): void {
-		const units = this.plugin.unitIndex.getUnits();
-		const candidates = candidateFilesForAdd(this.plugin.app.vault.getFiles(), units, (ref) =>
-			this.plugin.viewsManager.isPlacedAnywhere(ref)
-		);
-		new AddFileSuggestModal(this.plugin.app, candidates, (file) => {
-			this.plugin.unitIndex.markAdded({ kind: "file", path: file.path });
+		const { app, settings, unitIndex, viewsManager } = this.plugin;
+		const units = unitIndex.getUnits();
+		// PR-1.F1: one placed-set per open, shared by the file and folder candidate lists.
+		const placed = viewsManager.placedRefKeys();
+		const isPlacedAnywhere = (ref: UnitRef): boolean => placed.has(unitRefKey(ref));
+		const candidates: (TFile | TFolder)[] = [
+			...candidateFilesForAdd(app.vault.getFiles(), units, isPlacedAnywhere),
+			...candidateFoldersForAdd(app.vault.getAllLoadedFiles(), units, placed, settings),
+		];
+		new AddFileSuggestModal(app, candidates, (item) => {
+			const ref: UnitRef = item instanceof TFolder ? { kind: "folder", path: item.path } : { kind: "file", path: item.path };
+			unitIndex.markAdded(ref);
 			void this.plugin.flushSave();
 			void this.render();
 		}).open();
