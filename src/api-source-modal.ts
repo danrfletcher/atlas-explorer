@@ -97,6 +97,8 @@ export class ApiSourceModal extends Modal {
 	 * saving after only changing a toggle or path must not forget them and let reconcile resurrect
 	 * rows the user deliberately removed. */
 	private removedRefs: string[] | undefined;
+	/** PR-1.S1: stored file filters, carried through Save unchanged until the filter UI (PR-1.F1) lands. */
+	private folderFilters: FolderSourceConfig["filters"];
 	/** PR-7 (G18): CSV's own vault-relative file path — CSV otherwise reuses the API mapping/fill-mode/
 	 * guard/refresh fields verbatim below, since only one type is ever selected at a time. */
 	private csvPath: string;
@@ -166,6 +168,7 @@ export class ApiSourceModal extends Modal {
 			this.refreshEveryMinutesRaw =
 				initialFolderSource.refreshEveryMinutes !== undefined ? String(initialFolderSource.refreshEveryMinutes) : "";
 			this.removedRefs = initialFolderSource.removedRefs;
+			this.folderFilters = initialFolderSource.filters;
 			this.mode = initialFolderSource.mode ?? "merge";
 		}
 		if (initialCsvSource) {
@@ -1265,6 +1268,9 @@ export class ApiSourceModal extends Modal {
 				refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
 				removedRefs: this.removedRefs,
 				mode: this.mode,
+				// PR-1.S1: the filter UI is PR-1.F1, so until then carry any stored rules through Save
+				// unchanged rather than silently dropping them.
+				filters: this.folderFilters,
 			};
 			this.close();
 			this.onSave({ type: "folder", source, outsidePath: this.folderLocation === "outside" ? this.outsidePath.trim() : "" });

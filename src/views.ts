@@ -2,6 +2,7 @@ import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
 import { basenameForDeletedRef, buildFolderSourceChildren, reconcileFolderSourceChildDelete } from "./folder-source";
+import type { YamlFilterRule } from "./folder-filter";
 import {
 	ApiClickAction,
 	ApiFieldMapping,
@@ -208,6 +209,7 @@ function sanitizeFolderSource(node: ViewNode): void {
 	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
 	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
 	const rawRemoved = raw.removedRefs;
+	const filters = sanitizeFolderFilters(raw.filters);
 	node.folderSource = {
 		type: "folder",
 		location: raw.location === "outside" ? "outside" : "inside",
@@ -222,7 +224,34 @@ function sanitizeFolderSource(node: ViewNode): void {
 		removedRefs: Array.isArray(rawRemoved) ? rawRemoved.filter((key): key is string => typeof key === "string") : undefined,
 		// PR-6: same three-value `mode` as `ApiSourceConfig`, same "merge" default on anything else.
 		mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
+		// PR-1.S1: absent (not `undefined`-valued) when no valid rule survives, so the source is unfiltered.
+		...(filters ? { filters } : {}),
 	};
+}
+
+/** PR-1.S1 (G3): `data.json` is free-form JSON, so only well-formed YAML rules are kept. A rule
+ * needs a string `key` and a string `value` (a non-string is malformed); the key is trimmed and an
+ * empty key is dropped; the value is trimmed, so a whitespace-only value becomes "key present".
+ * Anything else (non-object `filters`, non-array `rules`, `null`, non-object entries) is dropped, and
+ * when no rule survives `filters` is omitted, which leaves the source unfiltered without throwing. */
+function sanitizeFolderFilters(raw: unknown): FolderSourceConfig["filters"] {
+	if (!raw || typeof raw !== "object") return undefined;
+	const files = (raw as { files?: unknown }).files;
+	if (!files || typeof files !== "object") return undefined;
+	const yaml = (files as { yaml?: unknown }).yaml;
+	if (!yaml || typeof yaml !== "object") return undefined;
+	const rawRules = (yaml as { rules?: unknown }).rules;
+	if (!Array.isArray(rawRules)) return undefined;
+	const rules: YamlFilterRule[] = [];
+	for (const entry of rawRules) {
+		if (!entry || typeof entry !== "object") continue;
+		const { key, value } = entry as { key?: unknown; value?: unknown };
+		if (typeof key !== "string" || typeof value !== "string") continue;
+		const trimmedKey = key.trim();
+		if (trimmedKey === "") continue;
+		rules.push({ key: trimmedKey, value: value.trim() });
+	}
+	return rules.length > 0 ? { files: { yaml: { rules } } } : undefined;
 }
 
 /** PR-7 (G17-G19): `data.json` is free-form JSON — hand-edited or corrupted, `csvSource.path`/
@@ -353,6 +382,17 @@ function cloneApiSource(source: ApiSourceConfig): ApiSourceConfig {
 	};
 }
 
+/** PR-1.S1: same deep-copy reasoning as `cloneApiSource`, applied to `folderSource`. `filters` must
+ * not share its rule objects with the original, and `removedRefs` is copied too, since it is the same
+ * kind of list. */
+function cloneFolderSource(source: FolderSourceConfig): FolderSourceConfig {
+	return {
+		...source,
+		removedRefs: source.removedRefs ? [...source.removedRefs] : undefined,
+		filters: source.filters ? structuredClone(source.filters) : undefined,
+	};
+}
+
 /** PR-7: same deep-copy reasoning as `cloneApiSource` above, applied to `csvSource`. */
 function cloneCsvSource(source: CsvSourceConfig): CsvSourceConfig {
 	return {
@@ -465,6 +505,8 @@ export class ViewsManager {
 	private views: View[];
 	private activeViewId: string;
 	private changeListeners = new Set<() => void>();
+	/** PR-1.S1 (E10): false until `metadataCache` has resolved once this session. */
+	private metadataResolved = false;
 
 	constructor(private app: App, initialViews: View[], initialActiveViewId: string, private persist: () => void) {
 		sanitizeViewsApiFields(initialViews);
@@ -793,7 +835,7 @@ export class ViewsManager {
 
 		// PR-4: same reference-sharing hazard as `apiSource` above — a shallow `{...node}` spread
 		// would leave both nodes' `folderSource` pointing at the very same object.
-		clone.folderSource = node.folderSource ? { ...node.folderSource } : node.folderSource;
+		clone.folderSource = node.folderSource ? cloneFolderSource(node.folderSource) : node.folderSource;
 
 		return clone;
 	}
@@ -1091,11 +1133,36 @@ export class ViewsManager {
 				folderSourceManaged: true,
 				folderSourceOwnerId: ownerId,
 			}),
-			{ sourceNodeId: ownerId, viewRoot: view.root },
+			{
+				sourceNodeId: ownerId,
+				viewRoot: view.root,
+				// PR-1.S1: frontmatter comes from the metadata cache only (never file content).
+				filter: { metadataResolved: this.metadataResolved, frontmatterOf: (file) => this.app.metadataCache.getFileCache(file)?.frontmatter },
+			},
 			outsidePath
 		);
 		this.sweepFolderSourceDeletedPlaceholders(found.node);
 		this.save();
+	}
+
+	/** PR-1.S1 (E10): called from `main.ts`'s existing `metadataCache "resolved"` listener, before
+	 * `UnitIndex.onMetadataResolved`. On the first resolve only, it flips the held-back flag and
+	 * re-reconciles every rule-filtered Folder source, so files held back at startup appear now.
+	 * Later resolves do nothing: new files join only on a refresh (G8/F7), and re-saving on every
+	 * metadata event would be wasted work. `refreshFolderSource` saves, which notifies the explorer
+	 * through the existing change path, so no second listener is needed. */
+	onMetadataResolved(): void {
+		if (this.metadataResolved) return;
+		this.metadataResolved = true;
+		const filtered: { viewId: string; nodeId: string }[] = [];
+		const walk = (viewId: string, nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.type === "meta" && node.folderSource?.filters) filtered.push({ viewId, nodeId: node.id });
+				walk(viewId, node.children);
+			}
+		};
+		for (const view of this.views) walk(view.id, view.root);
+		for (const { viewId, nodeId } of filtered) this.refreshFolderSource(viewId, nodeId);
 	}
 
 	/** PR-6: the "next reconciliation pass" half of the mode-switch edge cases — re-applies
