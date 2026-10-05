@@ -133,8 +133,14 @@ export class AddFileSuggestModal extends FuzzySuggestModal<TFile | TFolder> {
  * promoted, already added) or already placed/nested as a node in any view — so picking one from the
  * modal can never produce a duplicate inbox row. List-level exclusion only: no runtime dedupe is
  * exercised once a file is chosen. PR-1.F1 (G12): an added folder's interface note (`<Folder>/<Folder>.md`)
- * is excluded too; a promoted folder's note is still offered. */
-export function candidateFilesForAdd(allFiles: TFile[], units: Unit[], isPlacedAnywhere: (ref: UnitRef) => boolean): TFile[] {
+ * is excluded too, until that folder is dismissed for good (`isGloballyDismissed`); a promoted folder's
+ * note is still offered. */
+export function candidateFilesForAdd(
+	allFiles: TFile[],
+	units: Unit[],
+	isPlacedAnywhere: (ref: UnitRef) => boolean,
+	isGloballyDismissed: (ref: UnitRef) => boolean = () => false
+): TFile[] {
 	// R2: only a *file-kind* ref counts as "the file already present as a unit" (G2) — a promoted-block
 	// unit's `.path` is its containing file's path even though it's kind "block" (per `unitToRef`), so
 	// comparing bare paths wrongly excluded a file whose only unit is a promoted block from this list.
@@ -143,6 +149,7 @@ export function candidateFilesForAdd(allFiles: TFile[], units: Unit[], isPlacedA
 	);
 	for (const unit of units) {
 		if (unit.type !== "added-folder") continue;
+		if (isGloballyDismissed({ kind: "folder", path: unit.path })) continue;
 		const folderName = unit.path.slice(unit.path.lastIndexOf("/") + 1);
 		fileRefKeys.add(unitRefKey({ kind: "file", path: `${unit.path}/${folderName}.md` }));
 	}
@@ -2140,7 +2147,7 @@ export class AtlasExplorerView extends ItemView {
 		const placed = viewsManager.placedRefKeys();
 		const isPlacedAnywhere = (ref: UnitRef): boolean => placed.has(unitRefKey(ref));
 		const candidates: (TFile | TFolder)[] = [
-			...candidateFilesForAdd(app.vault.getFiles(), units, isPlacedAnywhere),
+			...candidateFilesForAdd(app.vault.getFiles(), units, isPlacedAnywhere, (ref) => unitIndex.isDismissed(ref, "global")),
 			...candidateFoldersForAdd(app.vault.getAllLoadedFiles(), units, placed, settings),
 		];
 		new AddFileSuggestModal(app, candidates, (item) => {

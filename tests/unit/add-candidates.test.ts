@@ -4,6 +4,8 @@ import { candidateFilesForAdd, candidateFoldersForAdd } from "../../src/explorer
 import type { Unit, UnitRef } from "../../src/types";
 import { unitRefKey } from "../../src/types";
 import { seedRoot } from "../helpers";
+import { DEFAULT_SETTINGS } from "../../src/settings";
+import { UnitIndex } from "../../src/unit-index";
 
 /** One helper builds the mock vault for every case here: each path's ancestor folders are seeded
  * first, so `TFolder`/`TFile` objects always have a real parent in the vault tree. */
@@ -130,11 +132,16 @@ describe("interface-note exclusion from the '+' file list (G12, E6)", () => {
 		expect(offered(app, units)).toContain("Jobs/Acme");
 	});
 
-	it("the note is offered again once the added folder is removed", () => {
+	it("the note is offered again once the added folder is dismissed for good (real UnitIndex)", () => {
 		const app = vaultWith(["Jobs/Acme"], ["Jobs/Acme/Acme.md"]);
-		expect(candidateFilesForAdd(app.vault.getFiles(), [addedFolder("Jobs/Acme")], () => false)).toEqual([]);
-		const afterRemoval = candidateFilesForAdd(app.vault.getFiles(), [], () => false).map((f) => f.path);
-		expect(afterRemoval).toEqual(["Jobs/Acme/Acme.md"]);
+		const index = new UnitIndex(app, DEFAULT_SETTINGS, [], {}, [], []);
+		index.markAdded(folderRef("Jobs/Acme"));
+		const isGloballyDismissed = (ref: UnitRef) => index.isDismissed(ref, "global");
+		expect(candidateFilesForAdd(app.vault.getFiles(), index.getUnits(), () => false, isGloballyDismissed)).toEqual([]);
+		index.setDismissed(folderRef("Jobs/Acme"), "global", true);
+		expect(index.getUnits()).toContainEqual(addedFolder("Jobs/Acme"));
+		const afterDismiss = candidateFilesForAdd(app.vault.getFiles(), index.getUnits(), () => false, isGloballyDismissed).map((f) => f.path);
+		expect(afterDismiss).toEqual(["Jobs/Acme/Acme.md"]);
 	});
 
 	it("a note in a different folder whose name only shares a prefix is not excluded", () => {
