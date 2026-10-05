@@ -243,7 +243,7 @@ function sanitizeFolderSource(node: ViewNode): void {
  * empty key is dropped; the value is trimmed, so a whitespace-only value becomes "key present".
  * Anything else (non-object `filters`, non-array `rules`, `null`, non-object entries) is dropped, and
  * when no rule survives `filters` is omitted, which leaves the source unfiltered without throwing. */
-function sanitizeFolderFilters(raw: unknown): FolderSourceConfig["filters"] {
+export function sanitizeFolderFilters(raw: unknown): FolderSourceConfig["filters"] {
 	if (!raw || typeof raw !== "object") return undefined;
 	const files = (raw as { files?: unknown }).files;
 	if (!files || typeof files !== "object") return undefined;
