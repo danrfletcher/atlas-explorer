@@ -321,6 +321,12 @@ export interface FolderSourceConfig {
 	 * cleared, "overwrite" removes it immediately with no placeholder. Defaults to "merge" when absent
 	 * (sanitized in `sanitizeFolderSource`), matching `ApiSourceConfig`'s own default. */
 	mode?: "append" | "merge" | "overwrite";
+	/** PR-1.S1 (G3/G8): file filters. A file joins this source only if every YAML rule in
+	 * `files.yaml.rules` matches its frontmatter (ANDed). Absent means unfiltered. A `folders` slot is
+	 * reserved for Folder filters (not in v1): code comment only, no type member, no logic and no UI. */
+	filters?: {
+		files?: { yaml?: { rules: { key: string; value: string }[] } };
+	};
 }
 
 /** PR-8 (G17-G20/G22-G24): a markdown pipe-table inside a vault `.md` file, parsed from scratch
