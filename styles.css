@@ -460,8 +460,9 @@
 }
 
 /* PR-1.F1 (E5): a File filters rule whose key is empty is outlined red; its "Key required" text is
- * the atlas-api-field-error line directly beneath it. */
-.atlas-yaml-key-invalid {
+ * the atlas-api-field-error line directly beneath it. The extra terms outrank Obsidian's
+ * `input[type=text] { outline: none }` and its hover/focus rules, which otherwise hide the outline. */
+input.atlas-yaml-key-invalid[type="text"]:not(:disabled) {
 	outline: 1px solid var(--text-error, #e53935);
 	outline-offset: -1px;
 }
