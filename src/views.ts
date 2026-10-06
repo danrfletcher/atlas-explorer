@@ -432,6 +432,13 @@ export function nodeHasApiRows(node: Pick<ViewNode, "apiSource" | "csvSource" | 
 	);
 }
 
+/** PR-1 (G11a): every bucket node can hold a data source — an Atlas folder (meta), a unit (file, module,
+ * block or promoted folder). One predicate serves every source setter, `refreshFolderSource`, and the
+ * explorer's source walks, so no call site needs to know which kind of node it was handed. */
+export function canHoldSource(node: Pick<ViewNode, "type">): boolean {
+	return node.type === "meta" || node.type === "unit";
+}
+
 export interface MetaTarget {
 	id: string | null;
 	label: string;
@@ -995,7 +1002,7 @@ export class ViewsManager {
 	setApiSource(viewId: string, nodeId: string, source: ApiSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!found || !canHoldSource(found.node)) return;
 		const hadOtherSource = found.node.csvSource !== undefined || found.node.markdownTableSource !== undefined;
 		found.node.apiSource = source;
 		if (source) {
@@ -1017,7 +1024,7 @@ export class ViewsManager {
 	setCsvSource(viewId: string, nodeId: string, source: CsvSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!found || !canHoldSource(found.node)) return;
 		const hadOtherSource = found.node.apiSource !== undefined || found.node.markdownTableSource !== undefined;
 		found.node.csvSource = source;
 		if (source) {
@@ -1040,7 +1047,7 @@ export class ViewsManager {
 	setMarkdownTableSource(viewId: string, nodeId: string, source: MarkdownTableSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!found || !canHoldSource(found.node)) return;
 		const hadOtherSource = found.node.apiSource !== undefined || found.node.csvSource !== undefined;
 		found.node.markdownTableSource = source;
 		if (source) {
@@ -1062,7 +1069,7 @@ export class ViewsManager {
 	setFolderSource(viewId: string, nodeId: string, source: FolderSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!found || !canHoldSource(found.node)) return;
 		found.node.folderSource = source;
 		this.save();
 	}
@@ -1077,7 +1084,7 @@ export class ViewsManager {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const found = this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta" || !found.node.folderSource) return;
+		if (!found || !canHoldSource(found.node) || !found.node.folderSource) return;
 		const ownerId = found.node.id;
 		found.node.children = buildFolderSourceChildren(
 			this.app.vault,
