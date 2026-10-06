@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { App, TFile } from "obsidian";
 import type { CachedMetadata } from "obsidian";
-import { DEFAULT_SETTINGS } from "../../src/settings";
+import { DEFAULT_SETTINGS, isCoveredByNoAutoPromote, normalizeNoAutoPromoteFolders } from "../../src/settings";
 import type { AtlasSettings } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
 import { ViewsManager } from "../../src/views";
@@ -413,5 +413,63 @@ describe("UnitIndex dismiss state vs. re-promotion — dismiss always wins (G10)
 		const views = new ViewsManager(app, [], "v1", () => {});
 		expect(views.getInboxUnits(index.getUnits(), "v1", "global", index).map((u) => u.path)).not.toContain("ModuleB/Target.md");
 		expect(views.getDismissedInboxUnits(index.getUnits(), "v1", "global", index).map((u) => u.path)).toContain("ModuleB/Target.md");
+	});
+});
+
+// --- noAutoPromoteFolders: normalising and covering (G2, E3, E7, lookalike) ----------------------
+
+describe("normalizeNoAutoPromoteFolders and isCoveredByNoAutoPromote (G2, E3, E7)", () => {
+	const normalise: Array<[string, unknown, string, string[]]> = [
+		["trims spaces and strips a trailing slash (E3)", ["  Attachments/ "], "_pool", ["Attachments"]],
+		["strips leading slashes too", ["/Attachments"], "_pool", ["Attachments"]],
+		["drops blank and whitespace-only lines (E3)", ["", "   ", "Attachments"], "_pool", ["Attachments"]],
+		["keeps nested paths intact", ["Projects/Old/assets/"], "_pool", ["Projects/Old/assets"]],
+		["drops the pool folder, even after normalising (E7)", ["Pool/"], "Pool", []],
+		["drops the pool folder written with spaces (E7)", [" _pool "], "_pool", []],
+		["drops duplicates after normalising", ["Attachments", "Attachments/"], "_pool", ["Attachments"]],
+		["ignores non-string entries from a hand-edited data.json", ["Attachments", 3, null, { x: 1 }], "_pool", ["Attachments"]],
+		["yields [] for anything that isn't an array", "Attachments", "_pool", []],
+		["yields [] for a missing value", undefined, "_pool", []],
+	];
+	it.each(normalise)("%s", (_label, raw, pool, expected) => {
+		expect(normalizeNoAutoPromoteFolders(raw, pool)).toEqual(expected);
+	});
+
+	it("always returns a new array, never the input", () => {
+		const input = ["Attachments"];
+		expect(normalizeNoAutoPromoteFolders(input, "_pool")).not.toBe(input);
+	});
+
+	const cover: Array<[string, string, string[], boolean]> = [
+		["an exact match is covered (G2)", "Attachments", ["Attachments"], true],
+		["a file under the folder is covered (G2)", "Attachments/a.png", ["Attachments"], true],
+		["a deeper file under the folder is covered (G2)", "Attachments/Sub/a.png", ["Attachments"], true],
+		["a prefix lookalike is not covered", "Attachments2/x.png", ["Attachments"], false],
+		["matching is case-sensitive, like isExcluded", "attachments/a.png", ["Attachments"], false],
+		["a nested entry covers only its own sub-tree (E6)", "Projects/Old/assets/a.png", ["Projects/Old/assets"], true],
+		["the rest of the parent is not covered (E6)", "Projects/Other/x.png", ["Projects/Old/assets"], false],
+		["the parent of a nested entry is not covered", "Projects/Old/notes.md", ["Projects/Old/assets"], false],
+		["an empty list covers nothing", "Attachments/a.png", [], false],
+	];
+	it.each(cover)("%s", (_label, path, folders, expected) => {
+		expect(isCoveredByNoAutoPromote(path, folders)).toBe(expected);
+	});
+});
+
+describe("noAutoPromoteFolders does not change computePromotions (G3, G4, G7)", () => {
+	it("computePromotions output is identical with and without the setting", () => {
+		const files = ["Hartley Haulage.md", "Attachments/tacho-sheet.png", "Attachments/Readme.md", "Clients/Target.md"];
+		const folders = ["Attachments", "Clients"];
+		const caches: Record<string, CachedMetadata> = {
+			"Hartley Haulage.md": { embeds: [{ link: "Attachments/tacho-sheet.png", original: "" }] } as never,
+			"Attachments/Readme.md": { links: [{ link: "Clients/Target", original: "" }] } as never,
+		};
+		const resolve = { "Attachments/tacho-sheet.png": "Attachments/tacho-sheet.png", "Clients/Target": "Clients/Target.md" };
+		const { index: without } = makeIndex(files, folders, caches, resolve);
+		const { index: withList } = makeIndex(files, folders, caches, resolve, [], { noAutoPromoteFolders: ["Attachments"] });
+		const key = (u: { type: string; path: string }) => `${u.type}:${u.path}`;
+		const sorted = (index: UnitIndex) => index.getUnits().map(key).sort();
+		expect(sorted(withList)).toEqual(sorted(without));
+		expect(sorted(withList)).toContain("promoted-file:Attachments/tacho-sheet.png");
 	});
 });
