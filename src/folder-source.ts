@@ -218,6 +218,13 @@ export function reconcileFolderSourceChildDelete(
 	};
 }
 
+/** PR-1 (G5): the vault folder a path sits directly inside — `""` for a vault-root path. Pure string
+ * work, so it answers "is this a direct child of that folder" for a path that no longer exists. */
+export function parentFolderPath(path: string): string {
+	const slash = path.lastIndexOf("/");
+	return slash === -1 ? "" : path.slice(0, slash);
+}
+
 /** PR-6 (R3 fix): the display text a Folder-source child's row showed while its file still
  * existed — a file's bare basename with its extension stripped (matching how a real `unit` row
  * displays it before deletion), or the raw last path segment for a folder (nothing to strip).

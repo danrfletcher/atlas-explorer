@@ -161,10 +161,6 @@ export class ApiSourceModal extends Modal {
 			this.outsidePath = initialFolderSource.location === "outside" ? initialOutsidePath : "";
 			this.showFiles = initialFolderSource.showFiles ?? true;
 			this.showFolders = initialFolderSource.showFolders ?? true;
-			this.refreshOnViewLoad = initialFolderSource.refreshOnViewLoad ?? false;
-			this.refreshEveryMinutesEnabled = initialFolderSource.refreshEveryMinutesEnabled ?? false;
-			this.refreshEveryMinutesRaw =
-				initialFolderSource.refreshEveryMinutes !== undefined ? String(initialFolderSource.refreshEveryMinutes) : "";
 			this.removedRefs = initialFolderSource.removedRefs;
 			this.mode = initialFolderSource.mode ?? "merge";
 		}
@@ -172,12 +168,8 @@ export class ApiSourceModal extends Modal {
 			this.csvPath = initialCsvSource.path ?? "";
 			this.mapping = initialCsvSource.mapping ? { ...initialCsvSource.mapping } : this.mapping;
 			this.mode = initialCsvSource.mode ?? "merge";
-			this.refreshOnViewLoad = initialCsvSource.refreshOnViewLoad ?? false;
 			this.keepOnEmpty = initialCsvSource.keepOnEmpty ?? true;
 			this.confirmBeforeDelete = initialCsvSource.confirmBeforeDelete ?? true;
-			this.refreshEveryMinutesEnabled = initialCsvSource.refreshEveryMinutesEnabled ?? false;
-			this.refreshEveryMinutesRaw =
-				initialCsvSource.refreshEveryMinutes !== undefined ? String(initialCsvSource.refreshEveryMinutes) : "";
 			this.mappingMode = initialCsvSource.mappingMode === "js" ? "js" : "drag";
 			this.jsSource = initialCsvSource.jsSource ?? "";
 			const rawExtras = initialCsvSource.mapping?.extraFields;
@@ -190,12 +182,8 @@ export class ApiSourceModal extends Modal {
 			this.mdTableIndex = initialMarkdownTableSource.tableIndex ?? 0;
 			this.mapping = initialMarkdownTableSource.mapping ? { ...initialMarkdownTableSource.mapping } : this.mapping;
 			this.mode = initialMarkdownTableSource.mode ?? "merge";
-			this.refreshOnViewLoad = initialMarkdownTableSource.refreshOnViewLoad ?? false;
 			this.keepOnEmpty = initialMarkdownTableSource.keepOnEmpty ?? true;
 			this.confirmBeforeDelete = initialMarkdownTableSource.confirmBeforeDelete ?? true;
-			this.refreshEveryMinutesEnabled = initialMarkdownTableSource.refreshEveryMinutesEnabled ?? false;
-			this.refreshEveryMinutesRaw =
-				initialMarkdownTableSource.refreshEveryMinutes !== undefined ? String(initialMarkdownTableSource.refreshEveryMinutes) : "";
 			this.mappingMode = initialMarkdownTableSource.mappingMode === "js" ? "js" : "drag";
 			this.jsSource = initialMarkdownTableSource.jsSource ?? "";
 			const rawExtras = initialMarkdownTableSource.mapping?.extraFields;
@@ -693,7 +681,6 @@ export class ApiSourceModal extends Modal {
 
 		this.renderMappingFieldsUI(contentEl);
 		this.renderFillModeAndGuardsUI(contentEl);
-		this.renderRefreshToggles(contentEl);
 	}
 
 	/** G18: a filterable list of every `.csv` file in the vault, vault-relative paths only — mirrors
@@ -816,7 +803,6 @@ export class ApiSourceModal extends Modal {
 		if (!needsPrompt || this.mdTableIndex !== null) {
 			this.renderMappingFieldsUI(contentEl);
 			this.renderFillModeAndGuardsUI(contentEl);
-			this.renderRefreshToggles(contentEl);
 		}
 	}
 
@@ -906,8 +892,8 @@ export class ApiSourceModal extends Modal {
 		this.testResult = null;
 	}
 
-	/** G5a/G5b/G10: shared verbatim between "api" and "folder" — same two toggles, same fields, same
-	 * validation. Factored out so Folder reuses the exact existing refresh machinery rather than a copy. */
+	/** G5a/G5b/G10: the API source's two refresh toggles. PR-1 (G1): only API sources show these — Folder,
+	 * CSV and markdown-table sources always refresh (on load and live), so they have no toggles. */
 	private renderRefreshToggles(contentEl: HTMLElement): void {
 		new Setting(contentEl)
 			.setName("Refresh when Atlas view loads")
@@ -1006,8 +992,6 @@ export class ApiSourceModal extends Modal {
 						this.mode = value as "append" | "merge" | "overwrite";
 					})
 			);
-
-		this.renderRefreshToggles(contentEl);
 	}
 
 	/** PR-5 (G6/G11): the Outside-Vault raw path field — no vault-folder suggester (there is nothing
@@ -1108,7 +1092,6 @@ export class ApiSourceModal extends Modal {
 			// e.g. a drive remounting) — only blank/whitespace-only is rejected outright, same contract
 			// Inside Vault already has for a path that doesn't currently resolve to a real folder.
 			if (this.folderLocation === "outside" ? !this.outsidePath.trim() : !this.folderPath.trim()) return false;
-			if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
 			return true;
 		}
 		if (this.selectedType === "csv") {
@@ -1118,7 +1101,6 @@ export class ApiSourceModal extends Modal {
 			} else if (!canSaveApiSource(this.csvPath, this.mapping)) {
 				return false;
 			}
-			if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
 			for (let i = 0; i < this.extraFields.length; i++) {
 				const extra = this.extraFields[i];
 				if (!isValidExtraFieldName(extra.name)) return false;
@@ -1135,7 +1117,6 @@ export class ApiSourceModal extends Modal {
 			} else if (!canSaveApiSource(this.mdTablePath, this.mapping)) {
 				return false;
 			}
-			if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
 			for (let i = 0; i < this.extraFields.length; i++) {
 				const extra = this.extraFields[i];
 				if (!isValidExtraFieldName(extra.name)) return false;
@@ -1249,9 +1230,6 @@ export class ApiSourceModal extends Modal {
 	private save(): void {
 		if (!this.canSave()) return;
 		if (this.selectedType === "folder") {
-			const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled
-				? validateRefreshMinutes(this.refreshEveryMinutesRaw)
-				: null;
 			const source: FolderSourceConfig = {
 				type: "folder",
 				location: this.folderLocation,
@@ -1260,9 +1238,6 @@ export class ApiSourceModal extends Modal {
 				path: this.folderLocation === "inside" ? this.folderPath.trim() : "",
 				showFiles: this.showFiles,
 				showFolders: this.showFolders,
-				refreshOnViewLoad: this.refreshOnViewLoad,
-				refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
-				refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
 				removedRefs: this.removedRefs,
 				mode: this.mode,
 			};
@@ -1271,7 +1246,6 @@ export class ApiSourceModal extends Modal {
 			return;
 		}
 		if (this.selectedType === "csv") {
-			const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
 			const extraFieldsRecord = this.buildExtraFieldsRecord();
 			const source: CsvSourceConfig = {
 				type: "csv",
@@ -1281,9 +1255,6 @@ export class ApiSourceModal extends Modal {
 					extraFields: Object.keys(extraFieldsRecord).length > 0 ? extraFieldsRecord : undefined,
 				},
 				mode: this.mode,
-				refreshOnViewLoad: this.refreshOnViewLoad,
-				refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
-				refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
 				keepOnEmpty: this.keepOnEmpty,
 				confirmBeforeDelete: this.confirmBeforeDelete,
 				mappingMode: this.mappingMode === "js" ? "js" : undefined,
@@ -1294,7 +1265,6 @@ export class ApiSourceModal extends Modal {
 			return;
 		}
 		if (this.selectedType === "markdown-table") {
-			const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
 			const extraFieldsRecord = this.buildExtraFieldsRecord();
 			const source: MarkdownTableSourceConfig = {
 				type: "markdown-table",
@@ -1307,9 +1277,6 @@ export class ApiSourceModal extends Modal {
 					extraFields: Object.keys(extraFieldsRecord).length > 0 ? extraFieldsRecord : undefined,
 				},
 				mode: this.mode,
-				refreshOnViewLoad: this.refreshOnViewLoad,
-				refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
-				refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
 				keepOnEmpty: this.keepOnEmpty,
 				confirmBeforeDelete: this.confirmBeforeDelete,
 				mappingMode: this.mappingMode === "js" ? "js" : undefined,

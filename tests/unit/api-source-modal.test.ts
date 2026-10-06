@@ -666,9 +666,9 @@ describe("PR-4 — Folder source config section", () => {
 		expect(folderField.value).toBe("");
 		expect(settingNamed(modal, "Show files").components[0].value).toBe(true);
 		expect(settingNamed(modal, "Show folders").components[0].value).toBe(true);
-		// G10: the same shared refresh toggles as "api", both off by default.
-		expect(settingNamed(modal, "Refresh when Atlas view loads").components[0].value).toBe(false);
-		expect(settingNamed(modal, "Refresh every").components[0].value).toBe(false);
+		// PR-1 (G1): Folder sources have no refresh toggles at all — they always refresh.
+		expect(settingNamed(modal, "Refresh when Atlas view loads")).toBeUndefined();
+		expect(settingNamed(modal, "Refresh every")).toBeUndefined();
 	});
 
 	it("PR-5: selecting Outside vault shows a raw path field instead of the vault-folder suggester, but keeps the shared Show toggles", () => {
@@ -715,8 +715,6 @@ describe("PR-4 — Folder source config section", () => {
 			path: "Archive",
 			showFiles: false,
 			showFolders: true,
-			refreshOnViewLoad: true,
-			refreshEveryMinutesEnabled: false,
 		};
 		const modal = new ApiSourceModal({} as any, null, [], vi.fn(), folderSource);
 		(modal as any).onOpen();
@@ -725,6 +723,58 @@ describe("PR-4 — Folder source config section", () => {
 		expect(settingNamed(modal, "Folder").components[0].value).toBe("Archive");
 		expect(settingNamed(modal, "Show files").components[0].value).toBe(false);
 		expect(settingNamed(modal, "Show folders").components[0].value).toBe(true);
-		expect(settingNamed(modal, "Refresh when Atlas view loads").components[0].value).toBe(true);
+		expect(settingNamed(modal, "Refresh when Atlas view loads")).toBeUndefined();
+	});
+});
+
+describe("PR-1 (G1) — refresh toggles per source type", () => {
+	const TOGGLE_NAMES = ["Refresh when Atlas view loads", "Refresh every"];
+
+	function openWithType(type: "api" | "folder" | "csv" | "markdown-table", onSave = vi.fn()) {
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select(type);
+		return modal;
+	}
+
+	it("API sources show both refresh toggles", () => {
+		const modal = openWithType("api");
+		for (const name of TOGGLE_NAMES) expect(settingNamed(modal, name)).toBeTruthy();
+	});
+
+	it.each(["folder", "csv", "markdown-table"] as const)("%s sources hide both refresh toggles, in create mode", (type) => {
+		const modal = openWithType(type);
+		for (const name of TOGGLE_NAMES) expect(settingNamed(modal, name)).toBeUndefined();
+	});
+
+	it("CSV canSave ignores refresh settings: a valid path and mapping is savable with no refresh fields", () => {
+		const modal = openWithType("csv");
+		(modal as any).csvPath = "data.csv";
+		(modal as any).mapping = { idField: "id", labelField: "name" };
+		expect((modal as any).canSave()).toBe(true);
+	});
+
+	it("CSV save writes no removed refresh fields", () => {
+		const onSave = vi.fn();
+		const modal = openWithType("csv", onSave);
+		(modal as any).csvPath = "data.csv";
+		(modal as any).mapping = { idField: "id", labelField: "name" };
+		(modal as any).render();
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledTimes(1);
+		const saved = JSON.stringify(onSave.mock.calls[0][0]);
+		expect(saved).toContain("data.csv");
+		expect(saved).not.toMatch(/refreshEveryMinutes|refreshOnViewLoad/);
+	});
+
+	it("Folder save writes no removed refresh fields", () => {
+		const onSave = vi.fn();
+		const modal = openWithType("folder", onSave);
+		settingNamed(modal, "Folder").components[0].type("Projects/Active");
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledTimes(1);
+		expect(JSON.stringify(onSave.mock.calls[0][0])).not.toMatch(/refreshEveryMinutes|refreshOnViewLoad/);
 	});
 });

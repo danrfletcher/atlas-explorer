@@ -12,7 +12,6 @@ describe("PR-3 — DataSourceConfig type discriminant", () => {
 			method: "GET",
 			mapping: { idField: "id", labelField: "name" },
 			mode: "merge",
-			refreshOnViewLoad: false,
 		};
 
 		const config: DataSourceConfig = apiSource;
@@ -31,7 +30,6 @@ describe("PR-3 — DataSourceConfig type discriminant", () => {
 			method: "GET",
 			mapping: { idField: "id", labelField: "name" },
 			mode: "merge",
-			refreshOnViewLoad: false,
 		};
 		expect(legacyApiSource.type).toBeUndefined();
 
