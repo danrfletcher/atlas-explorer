@@ -1,11 +1,16 @@
 import { App, Menu, PluginSettingTab, Setting } from "obsidian";
 import type AtlasPlugin from "./main";
+import { rewritePathString } from "./types";
 import { normalizeHexColor } from "./statuses";
 import { closeActivePopup, openColorPickerPopup } from "./status-popup";
 
 export interface AtlasSettings {
 	poolFolder: string;
 	excludedFolders: string[];
+	/** Folders whose files are never auto-promoted into the inbox by a link or embed. Files there
+	 * still show in the explorer and can still be added by hand with "+". Read through
+	 * `normalizeNoAutoPromoteFolders`, never directly, so a hand-edited `data.json` is covered too. */
+	noAutoPromoteFolders: string[];
 	interfaceNoteAcceptAltNames: boolean;
 	replaceNativeExplorerOnStartup: boolean;
 	blockDisplayLength: number;
@@ -33,6 +38,7 @@ export const DEFAULT_POOL_FOLDER = "_pool";
 export const DEFAULT_SETTINGS: AtlasSettings = {
 	poolFolder: DEFAULT_POOL_FOLDER,
 	excludedFolders: [],
+	noAutoPromoteFolders: [],
 	interfaceNoteAcceptAltNames: false,
 	replaceNativeExplorerOnStartup: true,
 	blockDisplayLength: 80,
@@ -42,6 +48,40 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	retainIcons: false,
 	retainIconMatchBackground: false,
 };
+
+/** Turns a raw `noAutoPromoteFolders` value (a textarea's lines, or whatever `data.json` holds) into
+ * clean vault-relative folder paths: trims, strips leading/trailing `/`, drops blanks, and drops the
+ * pool folder (free blocks are never auto-promoted anyway, so it can't be listed). Anything that
+ * isn't an array of strings yields `[]`. Always returns a new array. */
+export function normalizeNoAutoPromoteFolders(raw: unknown, poolFolder: string): string[] {
+	if (!Array.isArray(raw)) return [];
+	const pool = normalizeFolderPath(poolFolder);
+	const result: string[] = [];
+	for (const entry of raw) {
+		if (typeof entry !== "string") continue;
+		const folder = normalizeFolderPath(entry);
+		if (folder === "" || folder === pool || result.includes(folder)) continue;
+		result.push(folder);
+	}
+	return result;
+}
+
+/** Rewrites listed folders for a vault rename or move (exact path or `old/` prefix, the same rule
+ * `rewritePathString` applies to refs). Returns the new list only when something changed, so the
+ * caller can skip a save. Callers assign and persist the result before any index rebuild runs. */
+export function rewriteNoAutoPromoteFolders(folders: readonly string[], oldPath: string, newPath: string): string[] | null {
+	const rewritten = folders.map((folder) => rewritePathString(folder, oldPath, newPath));
+	return rewritten.some((folder, i) => folder !== folders[i]) ? rewritten : null;
+}
+
+function normalizeFolderPath(path: string): string {
+	return path.trim().replace(/^\/+|\/+$/g, "");
+}
+
+/** True when `path` is a listed folder or sits under one. Case-sensitive, like `isExcluded`. */
+export function isCoveredByNoAutoPromote(path: string, folders: readonly string[]): boolean {
+	return folders.some((folder) => path === folder || path.startsWith(`${folder}/`));
+}
 
 /** Dot-folders + the pool folder + `_to_delete`, computed once against the live vault root. */
 export function computeDefaultExcludedFolders(app: App, poolFolder: string): string[] {
@@ -120,6 +160,26 @@ export class AtlasSettingTab extends PluginSettingTab {
 							.split("\n")
 							.map((line) => line.trim())
 							.filter((line) => line.length > 0);
+						await this.plugin.saveSettings();
+						this.plugin.unitIndex.rebuild();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Never auto-promote from these folders")
+			.setDesc(
+				"One per line. Files here still show in the explorer and can be added with +, but links and embeds never promote them into the inbox. The pool folder can't be listed."
+			)
+			.addTextArea((text) =>
+				text
+					.setPlaceholder("Attachments")
+					.setValue(this.plugin.settings.noAutoPromoteFolders.join("\n"))
+					.onChange(async (value) => {
+						// Always a fresh array: the shared DEFAULT_SETTINGS entry must never change.
+						this.plugin.settings.noAutoPromoteFolders = normalizeNoAutoPromoteFolders(
+							value.split("\n"),
+							this.plugin.settings.poolFolder
+						);
 						await this.plugin.saveSettings();
 						this.plugin.unitIndex.rebuild();
 					})
