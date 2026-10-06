@@ -63,6 +63,11 @@ describe("buildSwapCandidates (PR-2 G6): the candidate rules", () => {
 			expectPaths: ["_pool/20260101000000-aaaa.md"],
 		},
 		{
+			name: "the pool folder itself is never a folder candidate, though its files stay offered (T8)",
+			input: input({ files: [file("_pool/20260101000000-aaaa.md")], folderPaths: ["_pool", "_pool/nested", "Boat"] }),
+			expectPaths: ["_pool/20260101000000-aaaa.md", "Boat"],
+		},
+		{
 			name: "the item being replaced is not offered back",
 			input: input({ files: [file("Old.md"), file("New.md")], replacedRef: { kind: "file", path: "Old.md" } }),
 			expectPaths: ["New.md"],

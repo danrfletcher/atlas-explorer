@@ -80,7 +80,9 @@ export function buildSwapCandidates(input: SwapCandidateInput): SwapCandidate[] 
 		add({ kind: "file", ref, name: file.name, path: file.path, known: input.knownKeys.has(unitRefKey(ref)) });
 	}
 	for (const folderPath of input.folderPaths) {
-		if (hidden(folderPath)) continue;
+		// The pool exemption covers block and file candidates only: the pool folder is never a folder candidate (T8).
+		const inPool = folderPath === input.poolFolder || folderPath.startsWith(`${input.poolFolder}/`);
+		if (inPool || hidden(folderPath)) continue;
 		const ref: UnitRef = { kind: "folder", path: folderPath };
 		add({ kind: "folder", ref, name: basename(folderPath), path: folderPath, known: input.knownKeys.has(unitRefKey(ref)) });
 	}
