@@ -127,3 +127,39 @@ describe("outside folder live refresh — what must never trigger a rescan", () 
 		expect(persist).not.toHaveBeenCalled();
 	}, WAIT_MS + 2000);
 });
+
+/** F3: every entry under `root` with its size, change times and content, so any write Atlas made would show. */
+function snapshotFolder(root: string): string[] {
+	const out: string[] = [];
+	const walk = (dir: string) => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+			const full = path.join(dir, entry.name);
+			const st = fs.statSync(full);
+			const content = entry.isDirectory() ? "" : fs.readFileSync(full, "utf8");
+			out.push(`${path.relative(root, full)}|${entry.isDirectory() ? "dir" : "file"}|${st.size}|${st.mtimeMs}|${st.ctimeMs}|${content}`);
+			if (entry.isDirectory()) walk(full);
+		}
+	};
+	walk(root);
+	return out;
+}
+
+describe("outside folder is only ever read (F3)", () => {
+	it("Atlas's rescans of a changing folder leave its contents unchanged", async () => {
+		fs.mkdirSync(path.join(dir, "Sub"));
+		fs.writeFileSync(path.join(dir, "Sub", "inner.md"), "inner");
+		// The test makes every change; Atlas only reads. The snapshot is taken after the last change.
+		fs.writeFileSync(path.join(dir, "new.pdf"), "x");
+		fs.renameSync(path.join(dir, "start.pdf"), path.join(dir, "moved.pdf"));
+		const afterTestWrites = snapshotFolder(dir);
+
+		// The rows reach the final state only once Atlas has rescanned past every change.
+		await vi.waitFor(() => expect(rowNames()).toEqual(expect.arrayContaining(["new.pdf", "moved.pdf"])), { timeout: WAIT_MS });
+		expect(rowNames()).not.toContain("start.pdf");
+		expect(rescans.length).toBeGreaterThan(0);
+		// Let any late event fire its rescan before the final comparison.
+		await new Promise((resolve) => setTimeout(resolve, 1500));
+
+		expect(snapshotFolder(dir)).toEqual(afterTestWrites);
+	}, WAIT_MS * 2 + 2000);
+});
