@@ -124,9 +124,9 @@ describe("UT-11 the menu builders", () => {
 
 	it("a meta folder's menu gains Create between Rename and the rest, in the old order otherwise", () => {
 		const empty = metaMenu(meta("m", "Empty"));
-		expect(empty.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Create", "Data source…", "Delete folder"]);
+		expect(empty.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Create", "Swap with…", "Data source…", "Delete folder"]);
 		const full = metaMenu(meta("m", "Full", [unit("u", file("Existing.md"))]));
-		expect(full.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Create", "Statuses", "Data source…", "Delete folder"]);
+		expect(full.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Create", "Swap with…", "Statuses", "Data source…", "Delete folder"]);
 	});
 
 	it("choosing Block, File or Module in the chooser starts that flow for this folder", () => {
