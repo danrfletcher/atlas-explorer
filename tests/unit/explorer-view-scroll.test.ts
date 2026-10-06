@@ -303,4 +303,39 @@ describe("PR-1.S1 — G11/E8: a dragged inbox row survives virtual redraws", () 
 		scrollTo(h, ROW * 1000); // with no drag left, the stale row is removed on redraw
 		expect(row.isConnected).toBe(false);
 	});
+
+	it("has the dragged row and the bucket in the one scroll body, so native edge auto-scroll moves both", async () => {
+		// Edge auto-scroll is the browser's own drag behaviour (not in src/), so it can't run under jsdom.
+		// What it needs from us is structural: the body that scrolls is the body the inbox redraws from,
+		// and the bucket and the inbox both live inside it, with no inner scroller in between.
+		const units = fileUnits(2000);
+		const h = setup(units);
+		const registered: (() => void)[] = [];
+		const explorer = h.explorer as unknown as {
+			registerEvent: (ref: unknown) => void;
+			registerDomEvent: (el: Element | Window, type: string, cb: () => void) => void;
+			dragPayload: unknown;
+			onOpen: () => Promise<void>;
+		};
+		explorer.registerEvent = vi.fn();
+		explorer.registerDomEvent = (el, type, cb) => {
+			el.addEventListener(type, cb);
+			registered.push(() => el.removeEventListener(type, cb));
+		};
+		cleanups.push(() => registered.forEach((fn) => fn()));
+		await explorer.onOpen();
+
+		const body = h.scrollBody();
+		expect(body.querySelector(".atlas-section.atlas-bucket")).not.toBeNull();
+		const row = body.querySelector<HTMLElement>(`.atlas-inbox [data-ref-key="${keyAt(units, 5)}"]`)!;
+		expect(row.closest(".atlas-explorer-scroll")).toBe(body);
+
+		row.dispatchEvent(new Event("dragstart"));
+		// Native auto-scroll scrolls the body element itself and fires its scroll event.
+		scrollTo(h, ROW * 1000);
+		scrollTo(h, ROW * 400);
+		expect(row.closest(".atlas-explorer-scroll")).toBe(body);
+		expect(explorer.dragPayload).not.toBeNull();
+		expect(h.inboxRowKeys()).toContain(keyAt(units, 400));
+	});
 });
