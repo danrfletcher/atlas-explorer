@@ -1936,8 +1936,6 @@ export class AtlasExplorerView extends ItemView {
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		this.renderRowIcon(iconEl, view, node, ancestors, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
-		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
-		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) {
 			row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
