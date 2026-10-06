@@ -768,6 +768,80 @@ describe("PR-1 (G1) — refresh toggles per source type", () => {
 		expect(saved).not.toMatch(/refreshEveryMinutes|refreshOnViewLoad/);
 	});
 
+	it.each([
+		["folder", { location: "inside" as const, path: "Projects", showFiles: true, showFolders: true }, undefined, undefined],
+		["csv", undefined, { type: "csv" as const, path: "data.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge" as const }, undefined],
+		[
+			"markdown-table",
+			undefined,
+			undefined,
+			{ type: "markdown-table" as const, path: "notes/table.md", tableIndex: 0, mapping: { idField: "id", labelField: "name" }, mode: "merge" as const },
+		],
+	])("%s sources hide both refresh toggles, in edit mode too", (type, folder, csv, md) => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn(), folder ?? null, "", csv ?? null, md ?? null);
+		(modal as any).onOpen();
+		expect(settingNamed(modal, "Source type").components[0].value).toBe(type);
+		for (const name of TOGGLE_NAMES) expect(settingNamed(modal, name)).toBeUndefined();
+	});
+
+	it("API sources show both refresh toggles in edit mode, pre-filled from the saved source", () => {
+		const modal = new ApiSourceModal(
+			{} as any,
+			{ url: "https://example.com/items", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: true, refreshEveryMinutesEnabled: true, refreshEveryMinutes: 15 },
+			[],
+			vi.fn()
+		);
+		(modal as any).onOpen();
+		expect(settingNamed(modal, "Refresh when Atlas view loads").components[0].value).toBe(true);
+		expect(settingNamed(modal, "Refresh every").components[0].value).toBe(true);
+		expect(settingNamed(modal, "Refresh every").components[1].value).toBe("15");
+	});
+
+	it("API save still writes its refresh settings (F1: API sources are unchanged)", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal(
+			{} as any,
+			{ url: "https://example.com/items", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: true },
+			[],
+			onSave
+		);
+		(modal as any).onOpen();
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledTimes(1);
+		expect(onSave.mock.calls[0][0].source).toEqual(expect.objectContaining({ refreshOnViewLoad: true, refreshEveryMinutesEnabled: false }));
+	});
+
+	it("Folder canSave needs only a path and ignores refresh state", () => {
+		const modal = openWithType("folder");
+		expect((modal as any).canSave()).toBe(false);
+		settingNamed(modal, "Folder").components[0].type("Projects");
+		expect((modal as any).canSave()).toBe(true);
+		(modal as any).refreshEveryMinutesEnabled = true;
+		(modal as any).refreshEveryMinutesRaw = "";
+		expect((modal as any).canSave()).toBe(true);
+	});
+
+	it("Markdown-table canSave ignores refresh state, and its save writes no removed refresh fields", () => {
+		const onSave = vi.fn();
+		const modal = openWithType("markdown-table", onSave);
+		(modal as any).mdTablePath = "notes/table.md";
+		(modal as any).mdTables = [{ headers: ["id", "name"], rows: [{ id: "1", name: "One" }], skippedCount: 0 }];
+		(modal as any).mdTableIndex = 0;
+		(modal as any).mapping = { idField: "id", labelField: "name" };
+		(modal as any).refreshEveryMinutesEnabled = true;
+		(modal as any).refreshEveryMinutesRaw = "";
+		(modal as any).render();
+
+		expect((modal as any).canSave()).toBe(true);
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledTimes(1);
+		const saved = JSON.stringify(onSave.mock.calls[0][0]);
+		expect(saved).toContain("notes/table.md");
+		expect(saved).not.toMatch(/refreshEveryMinutes|refreshOnViewLoad/);
+	});
+
 	it("Folder save writes no removed refresh fields", () => {
 		const onSave = vi.fn();
 		const modal = openWithType("folder", onSave);
