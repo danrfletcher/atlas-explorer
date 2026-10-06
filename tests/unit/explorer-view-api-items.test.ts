@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiItemState } from "../../src/types";
 import {
 	callRenderApiItemRow,
@@ -113,5 +113,77 @@ describe("PR-6 R3 fix: a Folder-source-demoted row renders back at its recorded 
 		await callRenderNodeList(fake, realChildren, container, view, 1, [folder], folder);
 
 		expect(rowOrder(container)).toEqual(["a-real", "demoted-z"]);
+	});
+});
+
+// PR-1 (G11d/G11c/E-b): a sourced unit gets the same filter bypass as an Atlas folder, and a unit's
+// rows come from `apiOwner`, not only from a meta node.
+describe("PR-1 G11d — the filter bypass shows a sourced unit when one of its rows matches", () => {
+	const apiSource = { url: "https://x", method: "GET" as const, mapping: { idField: "id", labelField: "name" }, mode: "merge" as const, refreshOnViewLoad: false };
+
+	it("a unit whose API row matches the filter is handed to renderNode (bypass path)", async () => {
+		const sm = makeStatusesManager();
+		const sourced = realNode("sourced-unit", {
+			ref: { kind: "file", path: "Linear.md" },
+			apiSource,
+			apiItemState: { "api-1": { id: "api-1", label: "Zed bug", explicitStatusId: "todo" } },
+			apiItemOrder: ["api-1"],
+		} as Partial<ViewNode>);
+		const plain = realNode("plain-unit", { ref: { kind: "file", path: "Other.md" } } as Partial<ViewNode>);
+		const fake = makeFakeExplorer(sm, {
+			filterText: "zed",
+			resolveRef: vi.fn((ref: { path: string }) => ({ text: ref.path })),
+			apiItemsMatchFilter: proto.apiItemsMatchFilter,
+			matchesFilter: proto.matchesFilter,
+			pseudoNodeForApiItem: proto.pseudoNodeForApiItem,
+		});
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [plain, sourced], container, view, 0, []);
+		const shown = Array.from(container.querySelectorAll("[data-id]")).map((el) => (el as HTMLElement).dataset.id);
+		expect(shown).toContain("sourced-unit");
+	});
+});
+
+describe("PR-1 E-b — a unit with neither source nor children draws no row container", () => {
+	it("apiItemsMatchFilter is false for a unit with no rows, so it is never bypassed", () => {
+		const sm = makeStatusesManager();
+		const fake = makeFakeExplorer(sm, { filterText: "zed", apiItemsMatchFilter: proto.apiItemsMatchFilter });
+		expect(fake.apiItemsMatchFilter(realNode("bare", { ref: { kind: "file", path: "B.md" } } as Partial<ViewNode>))).toBe(false);
+	});
+});
+
+describe("PR-1 G11c — a unit with source rows renders them via apiOwner, with no children", () => {
+	it("passing a unit as apiOwner draws each of its rows, in apiItemOrder", async () => {
+		const sm = makeStatusesManager();
+		const unit = realNode("unit-owner", {
+			ref: { kind: "file", path: "Linear.md" },
+			apiSource: { url: "https://x", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false },
+			apiItemState: {
+				a: { id: "a", label: "A", explicitStatusId: "todo" },
+				b: { id: "b", label: "B", explicitStatusId: "todo" },
+			},
+			apiItemOrder: ["b", "a"],
+		} as Partial<ViewNode>);
+		const fake = makeFakeExplorer(sm, { renderApiItemRow: proto.renderApiItemRow });
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [], container, view, 0, [], unit);
+		const text = container.textContent ?? "";
+		expect(text).toContain("A");
+		expect(text).toContain("B");
+		expect(text.indexOf("B")).toBeLessThan(text.indexOf("A"));
+	});
+
+	it("E-b: a source with zero rows and no children draws no empty container", async () => {
+		const sm = makeStatusesManager();
+		const unit = realNode("empty-owner", {
+			ref: { kind: "file", path: "Empty.md" },
+			apiSource: { url: "https://x", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false },
+			apiItemState: {},
+			apiItemOrder: [],
+		} as Partial<ViewNode>);
+		const fake = makeFakeExplorer(sm, { renderApiItemRow: proto.renderApiItemRow });
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [], container, view, 0, [], unit);
+		expect(container.children).toHaveLength(0);
 	});
 });

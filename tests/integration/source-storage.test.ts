@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { App as MockApp } from "../../tests/mocks/obsidian";
 import { ViewsManager } from "../../src/views";
 import { ApiSourceConfig, View, ViewNode } from "../../src/types";
 import type { App } from "obsidian";
@@ -132,5 +133,62 @@ describe("Cache shape is unchanged by JS mode — G3: fetchedAt/ok/error/rows/sk
 		const persistedJson = JSON.stringify(vm.getViews());
 		expect(persistedJson).toContain("\"fetchedAt\":123");
 		expect(persistedJson).toContain("\"extra\":{\"count\":1}");
+	});
+});
+
+// PR-1 (GP5a, F2a/b, E-f): a node that holds a source keeps its rows, statuses, notes, order and
+// refresh when Create turns it into a unit, with the same node id; and a sourced unit duplicates with
+// its source. Data layer only: the device-local stores are keyed by this same id, so nothing moves.
+describe("PR-1 GP5a/F2 — a sourced node keeps its rows through Create (meta -> unit, same id)", () => {
+	function seededSource(): ApiSourceConfig {
+		return { url: "https://api.example.com/items", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false };
+	}
+
+	it("40 rows keep their statuses, notes and order, and the node id, after Create turns it into a file unit", () => {
+		const vm = new ViewsManager({} as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Linear issues")!;
+		vm.setApiSource(view.id, folder.id, seededSource());
+		const node = vm.getNode(view.id, folder.id)!;
+		const ids = Array.from({ length: 40 }, (_, i) => `row-${i}`);
+		node.apiItemState = Object.fromEntries(
+			ids.map((id, i) => [id, { id, label: `Issue ${i}`, explicitStatusId: i % 2 ? "doing" : "todo", noteRef: { kind: "file" as const, path: `Notes/${id}.md` } }])
+		);
+		node.apiItemOrder = [...ids];
+
+		expect(vm.replaceMetaNodeWithUnit(view.id, folder.id, { kind: "file", path: "Linear issues.md" })).toBe(true);
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.id).toBe(folder.id);
+		expect(after.type).toBe("unit");
+		expect(after.label).toBeUndefined();
+		expect(after.apiSource).toEqual(seededSource());
+		expect(after.apiItemOrder).toEqual(ids);
+		expect(Object.keys(after.apiItemState!)).toHaveLength(40);
+		expect(after.apiItemState!["row-3"]).toMatchObject({ explicitStatusId: "doing", noteRef: { kind: "file", path: "Notes/row-3.md" } });
+	});
+
+	it("a refresh of the converted unit still reaches it: its managed folder-source children are rebuilt from the vault", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder source")!;
+		vm.setFolderSource(view.id, folder.id, { location: "inside", path: "Projects", showFiles: true, showFolders: true, refreshOnViewLoad: false });
+		expect(vm.replaceMetaNodeWithUnit(view.id, folder.id, { kind: "file", path: "Folder source.md" })).toBe(true);
+		vm.refreshFolderSource(view.id, folder.id);
+		expect(vm.getNode(view.id, folder.id)!.children.some((c) => c.folderSourceManaged && c.ref.kind === "file" && c.ref.path === "Projects/a.md")).toBe(true);
+	});
+
+	it("duplicating a sourced unit copies its source to the clone, with a new id", () => {
+		const vm = new ViewsManager({} as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Linear issues")!;
+		vm.setApiSource(view.id, folder.id, seededSource());
+		vm.replaceMetaNodeWithUnit(view.id, folder.id, { kind: "file", path: "Linear issues.md" });
+		const clone = vm.duplicateNode(view.id, folder.id)!;
+		expect(clone.id).not.toBe(folder.id);
+		expect(clone.apiSource).toEqual(seededSource());
 	});
 });

@@ -136,3 +136,38 @@ describe("R8 — switching API->CSV drops the API source's device-local headers,
 		expect(apiHeadersStore.delete).not.toHaveBeenCalled();
 	});
 });
+
+// PR-1 (G11b/E-a): the four source walks visit every node and recurse into every node's children,
+// including unit children, so a sourced folder nested under a unit still refreshes at load and on timers.
+describe("PR-1 G11b/E-a — source walks reach a sourced node nested under units and meta folders", () => {
+	type Walk = "collectApiSourceNodes" | "collectFolderSourceNodes" | "collectCsvSourceNodes" | "collectMarkdownTableSourceNodes";
+	const proto = AtlasExplorerView.prototype as unknown as Record<Walk, (nodes: ViewNode[]) => ViewNode[]>;
+	const WALKS: Array<{ walk: Walk; field: keyof ViewNode; sourced: Partial<ViewNode> }> = [
+		{ walk: "collectApiSourceNodes", field: "apiSource", sourced: { apiSource: { url: "https://x", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false } } },
+		{ walk: "collectFolderSourceNodes", field: "folderSource", sourced: { folderSource: { location: "inside", path: "P", showFiles: true, showFolders: true, refreshOnViewLoad: false } } },
+		{ walk: "collectCsvSourceNodes", field: "csvSource", sourced: { csvSource: { path: "d.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false } } },
+		{
+			walk: "collectMarkdownTableSourceNodes",
+			field: "markdownTableSource",
+			sourced: { markdownTableSource: { path: "t.md", tableIndex: 0, mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false } },
+		},
+	];
+
+	for (const { walk, field, sourced } of WALKS) {
+		it(`${walk} finds a source under unit > unit > meta and under unit > unit`, () => {
+			const deep: ViewNode = { id: "deep", type: "unit", ref: { kind: "folder", path: "Deep" }, children: [], ...sourced };
+			const middle: ViewNode = { id: "mid", type: "unit", ref: { kind: "file", path: "Mid.md" }, children: [deep] };
+			const metaWrap: ViewNode = { id: "m", type: "meta", label: "Wrap", children: [middle] };
+			const unitUnder: ViewNode = { id: "u2", type: "unit", ref: { kind: "file", path: "Top.md" }, children: [{ ...deep, id: "deep2" }] };
+			const found = proto[walk].call(AtlasExplorerView.prototype, [metaWrap, unitUnder]);
+			expect(found.map((n) => n.id)).toEqual(["deep", "deep2"]);
+			expect(found.every((n) => n[field] !== undefined)).toBe(true);
+		});
+
+		it(`${walk} visits a sourced unit that has no children and skips unsourced nodes`, () => {
+			const leaf: ViewNode = { id: "leaf", type: "unit", ref: { kind: "file", path: "L.md" }, children: [], ...sourced };
+			const plain: ViewNode = { id: "plain", type: "unit", ref: { kind: "file", path: "P.md" }, children: [] };
+			expect(proto[walk].call(AtlasExplorerView.prototype, [plain, leaf]).map((n) => n.id)).toEqual(["leaf"]);
+		});
+	}
+});
