@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { App } from "obsidian";
+import { App as MockApp } from "../../tests/mocks/obsidian";
 import { ViewsManager, nodeHasApiRows } from "../../src/views";
-import { ApiSourceConfig, CsvSourceConfig } from "../../src/types";
+import { ApiSourceConfig, CsvSourceConfig, FolderSourceConfig, ViewNode } from "../../src/types";
 
 /** G4/G7/E6/E7: exercises `ViewsManager`'s source-lifecycle operations — "Remove data source" (G4),
  * "Duplicate Folder" (G7), Folder deletion's itemState cleanup (E6), and E7's promotion carry-over
@@ -69,13 +70,126 @@ describe("G4 — Remove data source keeps rows as static, drops source+cache, st
 		expect(vm.getNode(view.id, folder.id)!.apiItemState?.["1"].noteRef).toEqual({ kind: "file", path: "Notes/x.md" });
 	});
 
-	it("setApiSource can only target a meta node, not a unit node", () => {
+	it("setApiSource accepts a unit node (G11a: the old meta-only refusal is gone)", () => {
 		const vm = makeManager();
 		const view = vm.getViews()[0];
 		vm.placeUnit(view.id, { kind: "file", path: "A.md" }, null);
 		const unitNode = view.root[0];
 		vm.setApiSource(view.id, unitNode.id, makeSource());
-		expect(vm.getNode(view.id, unitNode.id)!.apiSource).toBeUndefined();
+		expect(vm.getNode(view.id, unitNode.id)!.apiSource).toEqual(makeSource());
+	});
+});
+
+function folderSource(overrides: Partial<FolderSourceConfig> = {}): FolderSourceConfig {
+	return { location: "inside", path: "Projects", showFiles: true, showFolders: true, refreshOnViewLoad: false, ...overrides };
+}
+
+/** G11a/E-d/E-e: every bucket node kind the tree can hold — an Atlas folder (meta), a unit file, a unit
+ * folder and a unit block (free or promoted blocks are both `unit` nodes with a block ref). */
+const NODE_KINDS: Array<{ name: string; make: (vm: ViewsManager, viewId: string) => string }> = [
+	{ name: "meta folder", make: (vm, viewId) => vm.addMetaFolder(viewId, null, "Folder")!.id },
+	{
+		name: "unit file",
+		make: (vm, viewId) => {
+			vm.placeUnit(viewId, { kind: "file", path: "A.md" }, null);
+			return vm.getViews()[0].root.at(-1)!.id;
+		},
+	},
+	{
+		name: "unit folder",
+		make: (vm, viewId) => {
+			vm.placeUnit(viewId, { kind: "folder", path: "Alpha" }, null);
+			return vm.getViews()[0].root.at(-1)!.id;
+		},
+	},
+	{
+		name: "unit block",
+		make: (vm, viewId) => {
+			vm.placeUnit(viewId, { kind: "block", path: "_pool/20260925143012-k3xq.md", subpath: "^abc" }, null);
+			return vm.getViews()[0].root.at(-1)!.id;
+		},
+	},
+];
+
+const SETTERS: Array<{ name: string; set: (vm: ViewsManager, viewId: string, nodeId: string) => void; field: keyof ViewNode }> = [
+	{ name: "setApiSource", set: (vm, v, n) => vm.setApiSource(v, n, makeSource()), field: "apiSource" },
+	{ name: "setCsvSource", set: (vm, v, n) => vm.setCsvSource(v, n, makeCsvSource()), field: "csvSource" },
+	{
+		name: "setMarkdownTableSource",
+		set: (vm, v, n) => vm.setMarkdownTableSource(v, n, { path: "Notes/t.md", tableIndex: 0, mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false }),
+		field: "markdownTableSource",
+	},
+	{ name: "setFolderSource", set: (vm, v, n) => vm.setFolderSource(v, n, folderSource()), field: "folderSource" },
+];
+
+describe("G11a — every source setter accepts every bucket node kind", () => {
+	for (const kind of NODE_KINDS) {
+		for (const setter of SETTERS) {
+			it(`${setter.name} stores its source on a ${kind.name}`, () => {
+				const vm = makeManager();
+				const viewId = vm.getViews()[0].id;
+				const nodeId = kind.make(vm, viewId);
+				setter.set(vm, viewId, nodeId);
+				expect(vm.getNode(viewId, nodeId)![setter.field]).toBeDefined();
+			});
+		}
+	}
+});
+
+describe("E-d — one source type per node, on a unit as on a meta node", () => {
+	// R1 covers API, CSV and markdown-table only; a folder source may sit alongside them (types.ts `folderSourceDeleted`).
+	const R1_SETTERS = SETTERS.filter((s) => s.field !== "folderSource");
+	for (const kind of NODE_KINDS) {
+		it(`setting each R1 source clears the other two on a ${kind.name}`, () => {
+			const vm = makeManager();
+			const viewId = vm.getViews()[0].id;
+			const nodeId = kind.make(vm, viewId);
+			for (const setter of R1_SETTERS) {
+				setter.set(vm, viewId, nodeId);
+				const node = vm.getNode(viewId, nodeId)!;
+				expect(node[setter.field]).toBeDefined();
+				for (const other of R1_SETTERS) {
+					if (other !== setter) expect(node[other.field]).toBeUndefined();
+				}
+			}
+		});
+	}
+});
+
+describe("E-e — a source setter on a missing view or node id is a silent no-op", () => {
+	for (const setter of SETTERS) {
+		it(`${setter.name} does nothing for an unknown node id`, () => {
+			const vm = makeManager();
+			const viewId = vm.getViews()[0].id;
+			const before = JSON.stringify(vm.getViews());
+			expect(() => setter.set(vm, viewId, "no-such-node")).not.toThrow();
+			expect(JSON.stringify(vm.getViews())).toBe(before);
+		});
+
+		it(`${setter.name} does nothing for an unknown view id`, () => {
+			const vm = makeManager();
+			const viewId = vm.getViews()[0].id;
+			const nodeId = NODE_KINDS[1].make(vm, viewId);
+			const before = JSON.stringify(vm.getViews());
+			expect(() => setter.set(vm, "no-such-view", nodeId)).not.toThrow();
+			expect(JSON.stringify(vm.getViews())).toBe(before);
+		});
+	}
+});
+
+describe("G11a — refreshFolderSource reaches a unit node (no early return on type)", () => {
+	it("a unit holding a folder source gets its managed children built from the vault", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const viewId = vm.getViews()[0].id;
+		vm.placeUnit(viewId, { kind: "folder", path: "Projects" }, null);
+		const unitId = vm.getViews()[0].root.at(-1)!.id;
+		vm.setFolderSource(viewId, unitId, folderSource());
+		vm.refreshFolderSource(viewId, unitId);
+		const children = vm.getNode(viewId, unitId)!.children;
+		expect(children.some((c) => c.folderSourceManaged && c.ref.kind === "file" && c.ref.path === "Projects/a.md")).toBe(true);
 	});
 });
 

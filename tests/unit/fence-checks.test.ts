@@ -54,7 +54,7 @@ describe("F5 static check — Folder-source code touches no disk-write API", () 
 	});
 
 	it("AtlasExplorerView.refreshFolderSource (the render-side wrapper) has no disk-write call", () => {
-		const body = folderSourceSlice("src/explorer-view.ts", "private refreshFolderSource(view: View", "\n\t}");
+		const body = folderSourceSlice("src/explorer-view.ts", "refreshFolderSource(view: View", "\n\t}");
 		expect(body).not.toMatch(DISK_WRITE_CALL);
 	});
 });
