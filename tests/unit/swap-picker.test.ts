@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { App } from "obsidian";
+import * as obsidianMock from "obsidian";
+import { App, FuzzyMatch } from "obsidian";
 import {
 	SWAP_BLOCK_TEXT_LIMIT,
+	SWAP_KIND_ICON,
 	SWAP_RESULT_CAP,
+	SwapCandidate,
 	SwapCandidateInput,
 	SwapPickerModal,
 	buildSwapCandidates,
@@ -169,6 +172,32 @@ describe("SwapPickerModal", () => {
 		const modal = new SwapPickerModal(new App(), candidates, vi.fn());
 		expect(modal.getItems()).toEqual(candidates);
 		expect(modal.getItemText(candidates[0])).toBe("A.md A.md");
+	});
+
+	it("is titled 'Swap with…'", () => {
+		const modal = new SwapPickerModal(new App(), candidates, vi.fn());
+		expect(modal.titleEl.textContent).toBe("Swap with…");
+	});
+
+	it("draws a type icon for each result: file, folder or block (G6)", () => {
+		const setIconSpy = vi.spyOn(obsidianMock, "setIcon");
+		const modal = new SwapPickerModal(new App(), candidates, vi.fn());
+		const kinds = buildSwapCandidates(
+			input({
+				files: [file("A.md")],
+				folderPaths: ["Boat"],
+				blocks: [{ ref: { kind: "block", path: "Notes.md", subpath: "^a" }, text: "Hi" }],
+			})
+		);
+		for (const candidate of kinds) {
+			const el = document.createElement("div");
+			modal.renderSuggestion({ item: candidate, match: { score: 0, matches: [] } } as FuzzyMatch<SwapCandidate>, el);
+			expect(setIconSpy).toHaveBeenLastCalledWith(expect.any(HTMLElement), SWAP_KIND_ICON[candidate.kind]);
+			expect(el.querySelector(".atlas-swap-name")?.textContent).toBe(candidate.name);
+			expect(el.querySelector(".atlas-swap-path")?.textContent).toBe(`${candidate.kind} · ${candidate.path}`);
+		}
+		expect(SWAP_KIND_ICON).toEqual({ file: "file", folder: "folder", block: "text-quote" });
+		setIconSpy.mockRestore();
 	});
 
 	it("a double pick applies the swap once", () => {

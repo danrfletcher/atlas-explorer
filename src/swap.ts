@@ -1,4 +1,4 @@
-import { App, FuzzyMatch, FuzzySuggestModal } from "obsidian";
+import { App, FuzzyMatch, FuzzySuggestModal, setIcon } from "obsidian";
 import { UnitRef, ViewNode, unitRefKey } from "./types";
 
 /** PR-2 (G6): the picker shows at most this many matches. */
@@ -99,6 +99,13 @@ export function canSwapNode(node: ViewNode): boolean {
 	return !node.folderSourceManaged;
 }
 
+/** PR-2 (G6): the lucide icon drawn beside each picker result, by kind. */
+export const SWAP_KIND_ICON: Record<SwapCandidateKind, string> = {
+	file: "file",
+	folder: "folder",
+	block: "text-quote",
+};
+
 /** PR-2 (G4): "Swap for Atlas folder" is offered on any swappable item that isn't already an Atlas folder. */
 export function canSwapForAtlasFolder(node: ViewNode): boolean {
 	return canSwapNode(node) && node.type === "unit";
@@ -111,6 +118,7 @@ export class SwapPickerModal extends FuzzySuggestModal<SwapCandidate> {
 
 	constructor(app: App, private candidates: SwapCandidate[], private onChoose: (candidate: SwapCandidate) => void) {
 		super(app);
+		this.setTitle("Swap with…");
 	}
 
 	getItems(): SwapCandidate[] {
@@ -126,8 +134,12 @@ export class SwapPickerModal extends FuzzySuggestModal<SwapCandidate> {
 	}
 
 	renderSuggestion(match: FuzzyMatch<SwapCandidate>, el: HTMLElement): void {
-		el.createDiv({ cls: "atlas-swap-name", text: match.item.name });
-		el.createDiv({ cls: "atlas-swap-path", text: `${match.item.kind} · ${match.item.path}` });
+		const { item } = match;
+		el.addClass("atlas-swap-suggestion");
+		setIcon(el.createDiv({ cls: "atlas-swap-icon" }), SWAP_KIND_ICON[item.kind]);
+		const text = el.createDiv({ cls: "atlas-swap-text" });
+		text.createDiv({ cls: "atlas-swap-name", text: item.name });
+		text.createDiv({ cls: "atlas-swap-path", text: `${item.kind} · ${item.path}` });
 	}
 
 	onChooseItem(candidate: SwapCandidate): void {
