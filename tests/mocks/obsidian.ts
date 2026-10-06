@@ -372,6 +372,8 @@ export class Setting {
 	constructor(public containerEl: HTMLElement) {}
 }
 
+export const Platform = { isMobile: false, isDesktop: true };
+
 export function setIcon(_el: HTMLElement, _icon: string): void {}
 export function setTooltip(_el: HTMLElement, _tip: string): void {}
 
