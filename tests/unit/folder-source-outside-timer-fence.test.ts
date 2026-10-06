@@ -4,7 +4,10 @@ import { join } from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { EventEmitter } from "node:events";
 import { listOutsideChildren, resolveOutsidePath } from "../../src/folder-source-outside";
+import { FolderSourceOutsideWatchers, OUTSIDE_WATCH_DEBOUNCE_MS } from "../../src/folder-source-outside-watcher";
+import { FOLDER_LIVE_REFRESH_MAX_WAIT_MS } from "../../src/folder-live-refresh";
 import { FolderSourcePathStore } from "../../src/folder-source-path-store";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { buildFolderSourceChildren } from "../../src/folder-source";
@@ -196,5 +199,59 @@ describe("F4 behavioural check — driving every Outside-Vault connection-check 
 		expect(result).toBe(false);
 		expect(setIntervalSpy).not.toHaveBeenCalled();
 		expect(setTimeoutSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe("F4 behavioural check — the watcher schedules only the debounce setTimeout", () => {
+	let setIntervalSpy: ReturnType<typeof vi.spyOn>;
+	let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
+	let registry: FolderSourceOutsideWatchers | undefined;
+
+	beforeEach(() => {
+		setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+		setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+	});
+
+	afterEach(() => {
+		registry?.closeAll();
+		registry = undefined;
+		setIntervalSpy.mockRestore();
+		setTimeoutSpy.mockRestore();
+	});
+
+	it("opening and retrying a watcher schedules no timer; one event schedules only the debounce and max-wait pair", () => {
+		const listeners: ((eventType: string, filename: string | null) => void)[] = [];
+		registry = new FolderSourceOutsideWatchers({
+			watch: (_path, listener) => {
+				listeners.push(listener);
+				return Object.assign(new EventEmitter(), { close: vi.fn() });
+			},
+			isResolved: () => true,
+			onRescan: vi.fn(),
+		});
+
+		registry.sync(new Map([["node-a", "/Docs/Invoices"]]));
+		registry.retry();
+		expect(setIntervalSpy).not.toHaveBeenCalled();
+		expect(setTimeoutSpy).not.toHaveBeenCalled();
+
+		listeners[0]("rename", "new.pdf");
+		expect(setIntervalSpy).not.toHaveBeenCalled();
+		const delays = setTimeoutSpy.mock.calls.map((call) => call[1]).sort((a, b) => a - b);
+		expect(delays).toEqual([OUTSIDE_WATCH_DEBOUNCE_MS, FOLDER_LIVE_REFRESH_MAX_WAIT_MS]);
+	});
+
+	it("releasing the watcher schedules no further timer", () => {
+		registry = new FolderSourceOutsideWatchers({
+			watch: () => Object.assign(new EventEmitter(), { close: vi.fn() }),
+			isResolved: () => true,
+			onRescan: vi.fn(),
+		});
+		registry.sync(new Map([["node-a", "/Docs/Invoices"]]));
+		const scheduledBeforeClose = setTimeoutSpy.mock.calls.length;
+
+		registry.closeAll();
+		expect(setTimeoutSpy).toHaveBeenCalledTimes(scheduledBeforeClose);
+		expect(setIntervalSpy).not.toHaveBeenCalled();
 	});
 });
