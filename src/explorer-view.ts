@@ -330,6 +330,15 @@ export class AtlasExplorerView extends ItemView {
 	/** The inbox row being dragged, kept alive across virtual redraws so an auto-scroll can't drop the
 	 * drag source out from under the browser. */
 	private inboxDragRowEl: HTMLElement | null = null;
+	/** PR-1.S1: the scroll position the newest in-flight render must restore. Set when a render starts
+	 * and cleared once that render has restored it. A render that starts while another is still
+	 * awaiting reads this, because the body it would otherwise read from the DOM is brand-new and
+	 * still at 0. */
+	private pendingScrollTop: number | null = null;
+	/** PR-1.S1: bumped on every `render()`. A render whose number is no longer the latest has been
+	 * superseded (its container was emptied by the newer one) and must stop after each await rather
+	 * than register its redraw/observer against the newer render's DOM. */
+	private renderSeq = 0;
 	/** PR-5 (G7/G8): whether dismissed inbox rows render inline, tagged "hidden". Mirrors
 	 * `inboxCollapsed` — a single instance field rather than per-view, matching this view's existing
 	 * convention that transient section-header UI state is shared across view switches within the
@@ -1091,11 +1100,14 @@ export class AtlasExplorerView extends ItemView {
 
 	private async render(): Promise<void> {
 		const container = this.containerEl.children[1] as HTMLElement;
+		const renderId = ++this.renderSeq;
+		const isCurrent = () => renderId === this.renderSeq;
 		// PR-1.S1: the bucket and inbox share one scroll body (`.atlas-explorer-scroll`) under a
 		// fixed toolbar. Capturing its scrollTop here means a click-driven re-render (multi-select,
 		// status change, drag drop) doesn't snap the panel back to the top; it's restored after the
-		// body is rebuilt, and reset to 0 only on a genuine view switch (below).
-		const scrollTop = container.querySelector<HTMLElement>(".atlas-explorer-scroll")?.scrollTop ?? 0;
+		// body is rebuilt, and reset to 0 only on a genuine view switch (below). If another render is
+		// still in flight, its target wins: the live body may not have been restored yet.
+		const scrollTop = this.pendingScrollTop ?? container.querySelector<HTMLElement>(".atlas-explorer-scroll")?.scrollTop ?? 0;
 		this.inboxLayoutObserver?.disconnect();
 		this.inboxLayoutObserver = null;
 		this.inboxRedraw = null;
@@ -1131,6 +1143,7 @@ export class AtlasExplorerView extends ItemView {
 		this.unitsByRefKey = new Map(allUnits.map((u) => [unitRefKey(unitToRef(u)), u]));
 		// G8/E7: a view switch resets the scroll to the top; every other re-render keeps it.
 		const restoreScrollTop = view.id === this.lastRenderedViewId ? scrollTop : 0;
+		this.pendingScrollTop = restoreScrollTop;
 
 		// PR 20: bucket node ids are only meaningful within the view that minted them — switching to
 		// a different view and keeping the old selection around would (extremely unlikely id
@@ -1160,6 +1173,7 @@ export class AtlasExplorerView extends ItemView {
 		const scrollBody = container.createDiv({ cls: "atlas-explorer-scroll" });
 		const bucketEl = scrollBody.createDiv({ cls: "atlas-section atlas-bucket" });
 		await this.renderBucketSection(bucketEl, view);
+		if (!isCurrent()) return;
 
 		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
 		// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
@@ -1169,7 +1183,11 @@ export class AtlasExplorerView extends ItemView {
 			? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
 			: [];
 		const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
-		await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop);
+		await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
+		if (!isCurrent()) return;
+		// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
+		// so later renders can read it from the DOM again.
+		this.pendingScrollTop = null;
 		this.observeInboxLayout(container, scrollBody, bucketEl);
 
 		if (activeRowKey) {
@@ -2037,7 +2055,8 @@ export class AtlasExplorerView extends ItemView {
 		units: Unit[],
 		dismissedUnits: Unit[],
 		scrollBody: HTMLElement,
-		restoreScrollTop: number
+		restoreScrollTop: number,
+		isCurrent: () => boolean = () => true
 	): Promise<void> {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
@@ -2096,6 +2115,8 @@ export class AtlasExplorerView extends ItemView {
 		const resolved = await Promise.all(
 			combined.map(async ({ unit, hidden }) => ({ unit, ref: unitToRef(unit), hidden, info: await this.resolveRef(unitToRef(unit)) }))
 		);
+		// A superseded render must not draw its window or register its redraw against the newer DOM.
+		if (!isCurrent()) return;
 		const filtered = resolved.filter((r) => this.matchesFilter(r.info.text));
 		const sorted =
 			this.sortMode === "alphabetical"
