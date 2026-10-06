@@ -813,3 +813,28 @@ input.atlas-name-input.atlas-name-invalid[type="text"]:not(:disabled) {
 	opacity: 0.5;
 	pointer-events: none; /* pointer events land on the wrapper, which keeps focus in the box */
 }
+
+/* Swap picker (PR-2 G6): a type icon beside each result's name and path. */
+.atlas-swap-suggestion {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.atlas-swap-icon {
+	display: flex;
+	flex-shrink: 0;
+	color: var(--text-muted);
+}
+
+.atlas-swap-text {
+	min-width: 0;
+}
+
+.atlas-swap-path {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
