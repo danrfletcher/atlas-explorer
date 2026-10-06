@@ -462,6 +462,12 @@ export class ViewsManager {
 
 	private save(): void {
 		this.persist();
+		this.notifyChange();
+	}
+
+	/** Re-renders listeners without persisting anything — for a change that is only visible on screen
+	 * (e.g. an Outside-Vault source's unresolved/reconnected state), which `save` alone would skip. */
+	private notifyChange(): void {
 		for (const cb of this.changeListeners) cb();
 	}
 
@@ -1081,7 +1087,10 @@ export class ViewsManager {
 		this.sweepFolderSourceDeletedPlaceholders(found.node);
 		// PR-1 (F2): a refresh that finds nothing new writes nothing — every view load and every live
 		// folder event runs through here, so an unchanged source must not cost a `data.json` write.
+		// PR-1 (R1): but it still re-renders, because an unchanged Outside-Vault source can change what
+		// the explorer shows (unplugged or reconnected drive) without any stored data changing.
 		if (JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]) !== before) this.save();
+		else this.notifyChange();
 	}
 
 	/** PR-1 (G5): the ids of this view's Inside-Vault Folder sources whose target folder is one of
