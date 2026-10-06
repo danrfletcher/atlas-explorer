@@ -1261,8 +1261,12 @@ export class ViewsManager {
 		// folder's path is first rewritten here (a renamed source folder still counts as "still inside").
 		const leftSource = (owner: ViewNode | undefined): boolean => {
 			if (!owner?.folderSource) return true;
-			const sourcePath = rewritePathString(owner.folderSource.path, oldPath, newPath);
-			return parentFolderPath(newPath) !== sourcePath;
+			const sourcePath = owner.folderSource.path;
+			// R2: a renamed parent folder's child can arrive before the folder's own rename event, so the
+			// source path is still the old one here. A source folder that no longer exists at its old path
+			// means its parent was renamed — the child is still inside, so it must not be detached.
+			if (parentFolderPath(oldPath) === sourcePath && !this.app.vault.getAbstractFileByPath(sourcePath)) return false;
+			return parentFolderPath(newPath) !== rewritePathString(sourcePath, oldPath, newPath);
 		};
 		for (const view of this.views) {
 			if (this.reconcileFolderSourceDeletesForPath(view.root, oldPath, nowIso, leftSource, false)) changed = true;

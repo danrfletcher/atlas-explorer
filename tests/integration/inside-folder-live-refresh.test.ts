@@ -344,6 +344,32 @@ describe("PR-1 (G5): inside-vault live trigger", () => {
 			});
 		}
 
+		it("R2: renaming the source folder keeps a child's row when the child's event arrives first", () => {
+			const { plugin, vault, viewsManager, refreshSpy, old } = populated("merge");
+			const source = viewsManager.getNode("v1", "src");
+			const child = source?.children[0];
+			if (!child) throw new Error("expected a managed child row");
+			child.explicitStatusId = "status-kept";
+			const childId = child.id;
+
+			// The folder is renamed on disk: the child's event arrives before the folder's own event.
+			const renamedChild = fileAt("Projects/Clients2/Old.md");
+			vault.remove("Projects/Clients/Old.md");
+			vault.remove("Projects/Clients");
+			vault.put(folderAt("Projects/Clients2", [renamedChild]));
+			plugin.onVaultRenameEvent(renamedChild, old.path);
+			plugin.onVaultRenameEvent(folderAt("Projects/Clients2"), "Projects/Clients");
+			settle();
+
+			const after = viewsManager.getNode("v1", "src");
+			expect(after?.folderSource?.path).toBe("Projects/Clients2");
+			expect(after?.children).toHaveLength(1);
+			expect(after?.children[0].id).toBe(childId);
+			expect(after?.children[0].explicitStatusId).toBe("status-kept");
+			expect(after?.children[0].ref?.path).toBe("Projects/Clients2/Old.md");
+			expect(refreshSpy).toHaveBeenCalled();
+		});
+
 		it("a file renamed within the source folder stays a row, with its ref rewritten", () => {
 			const { plugin, vault, viewsManager, old } = populated("merge");
 			vault.remove("Projects/Clients/Old.md");
