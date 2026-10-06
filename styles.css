@@ -17,6 +17,9 @@
 	flex: 1 1 auto;
 	min-height: 0;
 	overflow-y: auto;
+	/* PR-1.F1: browser scroll anchoring fights the header click scrolls and the collapse settle
+	 * (it shifts scrollTop when sections expand above the viewport). The JS owns these positions. */
+	overflow-anchor: none;
 }
 
 .atlas-toolbar {
