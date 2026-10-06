@@ -107,16 +107,25 @@
 	margin: 6px 0;
 }
 
+/* PR-1.F1: the headers are moved by a transform as the one scroll body scrolls (see
+ * `updateStickyHeaders` in explorer-view.ts). They sit above the rows they pass over and need an
+ * opaque background so those rows don't show through. Only the chevron and title are clickable. */
 .atlas-section-header {
+	position: relative;
+	z-index: 1;
 	display: flex;
 	align-items: center;
 	gap: 4px;
 	padding: 4px 8px;
-	cursor: pointer;
+	background: var(--background-primary);
 	font-weight: 600;
 	color: var(--text-muted);
 	text-transform: uppercase;
 	font-size: var(--font-ui-smaller);
+}
+
+.atlas-section-title {
+	cursor: pointer;
 }
 
 .atlas-inbox-mode {
@@ -171,6 +180,11 @@
 
 .atlas-meta-children.is-collapsed {
 	grid-template-rows: 0fr;
+}
+
+/* PR-1.F1 (E10): under reduced motion the section collapse/expand lands at once. */
+.atlas-meta-children.is-instant {
+	transition: none;
 }
 
 .atlas-meta-children-inner {
@@ -237,6 +251,7 @@
 	width: 14px;
 	flex-shrink: 0;
 	color: var(--text-faint);
+	cursor: pointer;
 }
 
 .atlas-chevron-inline {

@@ -61,14 +61,69 @@ export function computeInboxWindow(
 	return { start, end };
 }
 
+export interface StickyHeaderInput {
+	scrollTop: number;
+	viewportHeight: number;
+	/** Natural top of the bucket section, in scroll-body coordinates. */
+	bucketTop: number;
+	bucketHeaderHeight: number;
+	/** Natural top of the inbox section (where its header sits when not stuck). */
+	inboxTop: number;
+	inboxHeaderHeight: number;
+}
+
+export interface StickyHeaderLayout {
+	/** False when the panel is too short to hold both headers and a row (E2): both stay in flow. */
+	stuck: boolean;
+	/** Scroll-body position of the bucket header. It stays at the top edge for the whole scroll. */
+	bucketY: number;
+	/** Scroll-body position of the inbox header. */
+	inboxY: number;
+	inboxPosition: "flow" | "stacked" | "pinned";
+}
+
+/** PR-1.F1 (G3, G4, E2): where the two section headers sit for a given scroll. The bucket header
+ * always stays at the top edge. The inbox header stays at its natural position, unless that lies
+ * below the bottom edge (pinned there) or above the line directly under the bucket header (stacked
+ * there). Pure, so the boundaries are tested without a layout engine. */
+export function computeStickyHeaders(input: StickyHeaderInput): StickyHeaderLayout {
+	const { scrollTop, viewportHeight, bucketTop, bucketHeaderHeight, inboxTop, inboxHeaderHeight } = input;
+	const inFlow: StickyHeaderLayout = { stuck: false, bucketY: bucketTop, inboxY: inboxTop, inboxPosition: "flow" };
+	if (viewportHeight < bucketHeaderHeight + inboxHeaderHeight + INBOX_ROW_HEIGHT) return inFlow;
+	const bucketY = Math.max(bucketTop, scrollTop);
+	const stackY = scrollTop + bucketHeaderHeight;
+	const pinY = scrollTop + viewportHeight - inboxHeaderHeight;
+	if (inboxTop > pinY) return { stuck: true, bucketY, inboxY: pinY, inboxPosition: "pinned" };
+	if (inboxTop < stackY) return { stuck: true, bucketY, inboxY: stackY, inboxPosition: "stacked" };
+	return { stuck: true, bucketY, inboxY: inboxTop, inboxPosition: "flow" };
+}
+
+/** PR-1.F1 (G5, G7): the scroll position that puts a section's header at its stuck position, with
+ * the headers above it stacked at the top. Title clicks and collapse settles both land here. */
+export function stuckScrollTarget(headerTop: number, stackOffset: number, maxScrollTop: number): number {
+	return Math.min(Math.max(0, maxScrollTop), Math.max(0, headerTop - stackOffset));
+}
+
 /** Must match `.atlas-meta-children`'s and `.atlas-filter-wrap`'s `transition-duration` in
- * styles.css — every state-persisting toggle that triggers a full re-render (meta-folder collapse,
- * the bucket/inbox section headers, the filter-reveal toggle) delays that re-render by this long so
- * the CSS collapse/expand transition finishes playing before the DOM gets rebuilt out from under
- * it. PR 11: originally only the meta-folder chevron used this trick (hence the old name); the
- * bucket/inbox/filter toggles shipped in PR 9 without it, which is why none of them actually
- * animated despite having the CSS for it — same fix, applied to the rest of the collapse toggles. */
+ * styles.css. Toggles that re-render the whole panel (meta-folder collapse, the filter-reveal toggle)
+ * delay that re-render by this long so the CSS collapse/expand transition finishes first. The bucket
+ * and inbox sections don't re-render on collapse (PR-1.F1): both always render their content, so the
+ * click flips the state in place, and the one scroll body keeps its position. Title clicks on a
+ * collapsed section wait this long for the expansion before they scroll. */
 const COLLAPSE_TRANSITION_MS = 160;
+
+type SectionKey = "bucket" | "inbox";
+
+/** The DOM a section's chevron and title act on, passed to the click handlers. */
+interface SectionParts {
+	section: HTMLElement;
+	wrap: HTMLElement;
+	chevron: HTMLElement;
+}
+
+function prefersReducedMotion(): boolean {
+	return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+}
 /** PR 9 (issue 2, point 5): how long a drag has to hover a module (without dropping) before its
  * Contents modal opens automatically, mirroring the "hover a folder while dragging to expand it"
  * pattern most native file managers use. */
@@ -321,6 +376,19 @@ export class AtlasExplorerView extends ItemView {
 	/** Both sections start open on every load and are never persisted (PR-1.S1 / F8). */
 	private bucketCollapsed = false;
 	private inboxCollapsed = false;
+	/** PR-1.F1: the one scroll body and the section parts the sticky headers and title clicks act on.
+	 * Set by `render()` after each rebuild; null before the first render. */
+	private stickyEls: {
+		body: HTMLElement;
+		bucketEl: HTMLElement;
+		bucketHeader: HTMLElement;
+		inboxEl: HTMLElement;
+		inboxHeader: HTMLElement;
+	} | null = null;
+	/** PR-1.F1: bumped by every header click, so a title scroll still waiting for an expansion is
+	 * dropped once a newer click supersedes it (E4, chevron-then-title). */
+	private sectionClickSeq = 0;
+	private stickyFrameQueued = false;
 	/** Redraws the inbox's virtual window for the current render. Null between renders and after
 	 * close, so a stale scroll/resize callback from a previous render can never draw into the DOM. */
 	private inboxRedraw: (() => void) | null = null;
@@ -1188,7 +1256,12 @@ export class AtlasExplorerView extends ItemView {
 		// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
 		// so later renders can read it from the DOM again.
 		this.pendingScrollTop = null;
+		// Both sections always render their header; a render without them has nothing to stack.
+		const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+		const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+		this.stickyEls = bucketHeader && inboxHeader ? { body: scrollBody, bucketEl, bucketHeader, inboxEl, inboxHeader } : null;
 		this.observeInboxLayout(container, scrollBody, bucketEl);
+		this.updateStickyHeaders();
 
 		if (activeRowKey) {
 			const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
@@ -1207,13 +1280,121 @@ export class AtlasExplorerView extends ItemView {
 	 * are the things whose size or position moves the inbox without any scroll (bucket collapse
 	 * animation, folder fold, filter row, toolbar wrap), so each one redraws the inbox window. */
 	private observeInboxLayout(container: HTMLElement, scrollBody: HTMLElement, bucketEl: HTMLElement): void {
-		const observer = new ResizeObserver(() => this.inboxRedraw?.());
+		// PR-1.F1: header heights and panel height move the stacked headers as well, so they re-measure here.
+		const observer = new ResizeObserver(() => {
+			this.inboxRedraw?.();
+			this.updateStickyHeaders();
+		});
 		observer.observe(scrollBody);
 		observer.observe(bucketEl);
 		for (const child of Array.from(container.children)) {
 			if (child !== scrollBody) observer.observe(child);
 		}
+		if (this.stickyEls) {
+			observer.observe(this.stickyEls.bucketHeader);
+			observer.observe(this.stickyEls.inboxHeader);
+		}
 		this.inboxLayoutObserver = observer;
+		scrollBody.addEventListener("scroll", () => this.scheduleStickyUpdate());
+	}
+
+	private scheduleStickyUpdate(): void {
+		if (this.stickyFrameQueued) return;
+		this.stickyFrameQueued = true;
+		window.requestAnimationFrame(() => {
+			this.stickyFrameQueued = false;
+			this.updateStickyHeaders();
+		});
+	}
+
+	/** PR-1.F1 (G3, G4, E2): moves the two section headers for the body's current scroll. Headers stay
+	 * in normal flow and are shifted with a transform, so section layout and the inbox window never
+	 * change. Also keeps `scroll-padding-top` at the stacked header height, so a programmatic scroll
+	 * never hides a row behind them. */
+	private updateStickyHeaders(): void {
+		const s = this.stickyEls;
+		if (!s || !s.body.isConnected) return;
+		const bodyTop = s.body.getBoundingClientRect().top;
+		// Section rects are untransformed, so this is the section's layout position at any scroll.
+		const layoutTop = (el: HTMLElement) => el.getBoundingClientRect().top - bodyTop + s.body.scrollTop;
+		const bucketTop = layoutTop(s.bucketEl);
+		const inboxTop = layoutTop(s.inboxEl);
+		const bucketHeaderHeight = s.bucketHeader.getBoundingClientRect().height;
+		const inboxHeaderHeight = s.inboxHeader.getBoundingClientRect().height;
+		const layout = computeStickyHeaders({
+			scrollTop: s.body.scrollTop,
+			viewportHeight: s.body.clientHeight,
+			bucketTop,
+			bucketHeaderHeight,
+			inboxTop,
+			inboxHeaderHeight,
+		});
+		s.bucketHeader.style.transform = layout.bucketY === bucketTop ? "" : `translateY(${layout.bucketY - bucketTop}px)`;
+		s.inboxHeader.style.transform = layout.inboxY === inboxTop ? "" : `translateY(${layout.inboxY - inboxTop}px)`;
+		s.body.style.scrollPaddingTop = layout.stuck ? `${bucketHeaderHeight + inboxHeaderHeight}px` : "0px";
+	}
+
+	/** PR-1.F1 (G5): where a section's header belongs once stuck: the bucket at the top, the inbox
+	 * directly under the bucket header. Clamped to the scrollable range. */
+	private sectionStuckTarget(key: SectionKey): number {
+		const s = this.stickyEls;
+		if (!s) return 0;
+		const bodyTop = s.body.getBoundingClientRect().top;
+		const sectionEl = key === "bucket" ? s.bucketEl : s.inboxEl;
+		const headerTop = sectionEl.getBoundingClientRect().top - bodyTop + s.body.scrollTop;
+		const stackOffset = key === "bucket" ? 0 : s.bucketHeader.getBoundingClientRect().height;
+		return stuckScrollTarget(headerTop, stackOffset, s.body.scrollHeight - s.body.clientHeight);
+	}
+
+	/** Smooth by default, instant under reduced motion. Skips a scroll that wouldn't move. */
+	private scrollSectionsTo(top: number, instant: boolean): void {
+		const s = this.stickyEls;
+		if (!s || Math.abs(s.body.scrollTop - top) < 1) return;
+		s.body.scrollTo({ top, behavior: instant ? "auto" : "smooth" });
+	}
+
+	private isSectionCollapsed(key: SectionKey): boolean {
+		return key === "bucket" ? this.bucketCollapsed : this.inboxCollapsed;
+	}
+
+	/** Flips a section's state in place. The CSS transition on its wrapper does the animation. */
+	private setSectionCollapsed(key: SectionKey, collapsed: boolean, parts: SectionParts): void {
+		if (key === "bucket") this.bucketCollapsed = collapsed;
+		else this.inboxCollapsed = collapsed;
+		setIcon(parts.chevron, collapsed ? "chevron-right" : "chevron-down");
+		parts.section.toggleClass("is-collapsed", collapsed);
+		parts.wrap.toggleClass("is-collapsed", collapsed);
+		parts.wrap.toggleClass("is-instant", prefersReducedMotion());
+	}
+
+	/** PR-1.F1 (G6, G7): only the chevron collapses or expands its section. Collapsing while the panel
+	 * is scrolled past the section's stuck position settles it there, so no landing mid-inbox. Expanding
+	 * doesn't scroll. */
+	private onSectionChevronClick(key: SectionKey, parts: SectionParts): void {
+		this.sectionClickSeq++;
+		const collapsed = !this.isSectionCollapsed(key);
+		this.setSectionCollapsed(key, collapsed, parts);
+		if (!collapsed) return;
+		// `min`: a section collapsed while the panel is above its stuck position stays where it is.
+		const current = this.stickyEls?.body.scrollTop ?? 0;
+		this.scrollSectionsTo(Math.min(current, this.sectionStuckTarget(key)), prefersReducedMotion());
+	}
+
+	/** PR-1.F1 (G5, E4, GP4-GP7): a title click scrolls its section to the stuck position. A collapsed
+	 * section expands first and scrolls once the expansion has played. A newer click cancels the wait. */
+	private onSectionTitleClick(key: SectionKey, parts: SectionParts): void {
+		const seq = ++this.sectionClickSeq;
+		const reduced = prefersReducedMotion();
+		const scroll = () => {
+			if (seq === this.sectionClickSeq) this.scrollSectionsTo(this.sectionStuckTarget(key), reduced);
+		};
+		if (!this.isSectionCollapsed(key)) {
+			scroll();
+			return;
+		}
+		this.setSectionCollapsed(key, false, parts);
+		if (reduced) scroll();
+		else window.setTimeout(scroll, COLLAPSE_TRANSITION_MS);
 	}
 
 	// --- toolbar -------------------------------------------------------------------------------
@@ -1393,15 +1574,13 @@ export class AtlasExplorerView extends ItemView {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.bucketCollapsed ? "chevron-right" : "chevron-down");
-		header.createSpan({ text: "Bucket" });
+		const title = header.createSpan({ cls: "atlas-section-title", text: "Bucket" });
 
 		// PR 11: the whole section's content used to only render at all when expanded (`if
-		// (this.bucketCollapsed) return`), and the header click handler triggered an immediate full
-		// re-render — so there was never a persisting DOM node for the CSS transition to animate
-		// from/to, just a hard snap between "rendered" and "not rendered". Same fix as the
-		// meta-folder chevron: content always renders into a dedicated wrapper, the collapse is a
-		// CSS transition on that wrapper, and the state-persisting re-render is delayed until the
-		// transition has had time to play.
+		// (this.bucketCollapsed) return`), so there was never a DOM node for the CSS transition to
+		// animate. Content always renders into a dedicated wrapper, and the collapse is a CSS
+		// transition on that wrapper. PR-1.F1: the click no longer re-renders the panel, since that
+		// would rebuild the scroll body mid-animation.
 		const sectionWrap = container.createDiv({ cls: "atlas-meta-children" });
 		sectionWrap.toggleClass("is-collapsed", this.bucketCollapsed);
 		const sectionInner = sectionWrap.createDiv({ cls: "atlas-meta-children-inner" });
@@ -1421,19 +1600,9 @@ export class AtlasExplorerView extends ItemView {
 		// it exactly the same way any other item resolves against its parent node, no special-casing.
 		await this.renderNodeList(view.root, listEl, view, 0, [view]);
 
-		let localCollapsed = this.bucketCollapsed;
-		let pendingPersist: number | undefined;
-		header.addEventListener("click", () => {
-			localCollapsed = !localCollapsed;
-			setIcon(chevron, localCollapsed ? "chevron-right" : "chevron-down");
-			sectionWrap.toggleClass("is-collapsed", localCollapsed);
-			if (pendingPersist !== undefined) window.clearTimeout(pendingPersist);
-			pendingPersist = window.setTimeout(() => {
-				pendingPersist = undefined;
-				this.bucketCollapsed = localCollapsed;
-				void this.render();
-			}, COLLAPSE_TRANSITION_MS);
-		});
+		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
+		chevron.addEventListener("click", () => this.onSectionChevronClick("bucket", parts));
+		title.addEventListener("click", () => this.onSectionTitleClick("bucket", parts));
 	}
 
 	/** PR 19: wires PR 17's hide-completed/hide-cancelled/truncate-statuses settings (captured but
@@ -2061,7 +2230,7 @@ export class AtlasExplorerView extends ItemView {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.inboxCollapsed ? "chevron-right" : "chevron-down");
-		header.createSpan({ text: "Inbox" });
+		const title = header.createSpan({ cls: "atlas-section-title", text: "Inbox" });
 		// PR-5: the count badge reflects the real (undismissed) inbox size regardless of whether
 		// dismissed rows are currently revealed — "Show Dismissed" is a temporary peek, not a change
 		// to what's actually in the inbox, so the count shouldn't jump around as it's toggled.
@@ -2142,20 +2311,9 @@ export class AtlasExplorerView extends ItemView {
 		// inbox row is now fixed-height and the virtualized path always applies.
 		this.renderVirtualizedInboxRows(listEl, sorted, view, scrollBody, restoreScrollTop);
 
-		let localCollapsed = this.inboxCollapsed;
-		let pendingPersist: number | undefined;
-		header.addEventListener("click", () => {
-			localCollapsed = !localCollapsed;
-			setIcon(chevron, localCollapsed ? "chevron-right" : "chevron-down");
-			container.toggleClass("is-collapsed", localCollapsed);
-			sectionWrap.toggleClass("is-collapsed", localCollapsed);
-			if (pendingPersist !== undefined) window.clearTimeout(pendingPersist);
-			pendingPersist = window.setTimeout(() => {
-				pendingPersist = undefined;
-				this.inboxCollapsed = localCollapsed;
-				void this.render();
-			}, COLLAPSE_TRANSITION_MS);
-		});
+		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
+		chevron.addEventListener("click", () => this.onSectionChevronClick("inbox", parts));
+		title.addEventListener("click", () => this.onSectionTitleClick("inbox", parts));
 	}
 
 	/** PR-3 (G2, G3): opens the "+" modal over every vault file minus whatever's already a unit or
