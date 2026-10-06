@@ -1,7 +1,14 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
-import { basenameForDeletedRef, buildFolderSourceChildren, parentFolderPath, reconcileFolderSourceChildDelete } from "./folder-source";
+import {
+	basenameForDeletedRef,
+	buildFolderSourceChildren,
+	diffOutsideChildren,
+	parentFolderPath,
+	reconcileFolderSourceChildDelete,
+} from "./folder-source";
+import { listOutsideChildren, resolveOutsidePath } from "./folder-source-outside";
 import {
 	ApiClickAction,
 	ApiFieldMapping,
@@ -437,6 +444,10 @@ interface FoundNode {
 	siblings: ViewNode[];
 	index: number;
 }
+
+/** A managed row found by `ViewsManager.collectManagedMatches`: its parent list, its slot there, and how
+ * deep it sits in the view. */
+type ManagedMatch = { list: ViewNode[]; index: number; node: ViewNode; depth: number };
 
 /**
  * F9 — views (named arrangements of units into a bucket tree) with storage/integrity. The bucket
@@ -1069,6 +1080,12 @@ export class ViewsManager {
 		if (!found || found.node.type !== "meta" || !found.node.folderSource) return;
 		const ownerId = found.node.id;
 		const before = JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]);
+		// PR-2 (R2-Q2): an Outside-Vault source's deletes and renames are reconciled before the add pass,
+		// so a renamed row keeps its node and a deleted one is demoted per mode. An unresolved path is
+		// left alone, as it always was.
+		if (found.node.folderSource.location === "outside" && outsidePath && resolveOutsidePath(outsidePath)) {
+			this.reconcileOutsideChildChanges(view.root, found.node, found.node.folderSource, listOutsideChildren(outsidePath, found.node.folderSource));
+		}
 		found.node.children = buildFolderSourceChildren(
 			this.app.vault,
 			found.node.folderSource,
@@ -1386,6 +1403,56 @@ export class ViewsManager {
 		detaches: (owner: ViewNode | undefined) => boolean = () => true,
 		deleted = true
 	): boolean {
+		const matches = this.collectManagedMatches(root, (node) => node.type === "unit" && node.ref?.path === path);
+		if (matches.length === 0) return false;
+		const byId = this.indexNodesById(root);
+		// Outside-Vault-owned rows are skipped: their refs are root-relative names, never vault paths.
+		const applicable = matches.filter(({ node }) => {
+			const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
+			return owner?.folderSource?.location !== "outside" && detaches(owner);
+		});
+		this.demoteManagedMatches(applicable, byId, nowIso, deleted);
+		return true;
+	}
+
+	/** PR-2 (R2-Q2): the Outside-Vault half of delete and rename reconciliation, run by `refreshFolderSource`
+	 * before its ordinary add pass. An outside source's refs are bare root-relative names, so only this
+	 * owner's own managed rows are considered. A rename keeps the same node, with its children, status
+	 * and position, and changes only its ref. A delete is demoted per the source's current mode, with no
+	 * `noteRef`, since there is no vault file for it to link to. */
+	private reconcileOutsideChildChanges(root: ViewNode[], owner: ViewNode, source: FolderSourceConfig, listed: UnitRef[]): void {
+		const shown = (ref: UnitRef): boolean => (ref.kind === "folder" ? source.showFolders : source.showFiles);
+		const matches = this.collectManagedMatches(root, (node) => node.folderSourceOwnerId === owner.id && !!node.ref && shown(node.ref));
+		if (matches.length === 0) return;
+		const managedRefs = matches.map(({ node }) => node.ref as UnitRef);
+		const { renamed, gone } = diffOutsideChildren(managedRefs, listed, new Set(source.removedRefs ?? []));
+		const byKey = new Map(matches.map((match) => [unitRefKey(match.node.ref as UnitRef), match]));
+		for (const { from, to } of renamed) {
+			const match = byKey.get(unitRefKey(from));
+			if (match) match.node.ref = to;
+		}
+		const goneKeys = new Set(gone.map(unitRefKey));
+		const goneMatches = matches.filter(({ node }) => goneKeys.has(unitRefKey(node.ref as UnitRef)));
+		this.demoteManagedMatches(goneMatches, this.indexNodesById(root), new Date().toISOString(), false);
+	}
+
+	/** Every managed `unit` node under `root` that `isMatch` accepts, with the list it sits in, its slot
+	 * there, and its depth. Recurses into each match's own children too, since a managed row can be
+	 * nested anywhere in the view. */
+	private collectManagedMatches(root: ViewNode[], isMatch: (node: ViewNode) => boolean): ManagedMatch[] {
+		const matches: ManagedMatch[] = [];
+		const collect = (list: ViewNode[], depth: number): void => {
+			for (let i = 0; i < list.length; i++) {
+				const node = list[i];
+				if (node.folderSourceManaged && isMatch(node)) matches.push({ list, index: i, node, depth });
+				collect(node.children, depth + 1);
+			}
+		};
+		collect(root, 0);
+		return matches;
+	}
+
+	private indexNodesById(root: ViewNode[]): Map<string, ViewNode> {
 		const byId = new Map<string, ViewNode>();
 		const indexIds = (nodes: ViewNode[]): void => {
 			for (const node of nodes) {
@@ -1394,27 +1461,16 @@ export class ViewsManager {
 			}
 		};
 		indexIds(root);
+		return byId;
+	}
 
-		type Match = { list: ViewNode[]; index: number; node: ViewNode };
-		const matches: Match[] = [];
-		const collect = (list: ViewNode[]): void => {
-			for (let i = 0; i < list.length; i++) {
-				const node = list[i];
-				if (node.type === "unit" && node.folderSourceManaged && node.ref && node.ref.path === path) {
-					matches.push({ list, index: i, node });
-				}
-				collect(node.children);
-			}
-		};
-		collect(root);
-		if (matches.length === 0) return false;
-
-		// Highest index first within each list, so splicing one match never shifts another's index.
-		matches.sort((a, b) => b.index - a.index);
-		for (const { list, index, node } of matches) {
+	/** Demotes each match in turn. Deepest first, then highest index first within a depth: a nested match
+	 * is spliced out of its parent's children before the parent lifts them, so no splice ever works on a
+	 * stale list, and no splice shifts another match's index. */
+	private demoteManagedMatches(matches: ManagedMatch[], byId: Map<string, ViewNode>, nowIso: string, deleted: boolean): void {
+		const ordered = [...matches].sort((a, b) => b.depth - a.depth || b.index - a.index);
+		for (const { list, index, node } of ordered) {
 			const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
-			if (owner?.folderSource?.location === "outside") continue;
-			if (!detaches(owner)) continue;
 			const ref = node.ref as UnitRef;
 			const mode = owner?.folderSource?.mode ?? "merge";
 			// R3 fix: strip the extension off a file's basename (matching what the row displayed while
@@ -1436,7 +1492,21 @@ export class ViewsManager {
 				if (!owner.apiItemOrder.includes(placeholder.id)) owner.apiItemOrder.push(placeholder.id);
 			}
 		}
-		return true;
+	}
+
+	/** PR-2 (G9): the active view's Outside-Vault Folder source node ids, for the watcher registry. */
+	getOutsideFolderSourceNodeIds(viewId: string): string[] {
+		const view = this.getView(viewId);
+		if (!view) return [];
+		const ids: string[] = [];
+		const walk = (nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.type === "meta" && node.folderSource?.location === "outside") ids.push(node.id);
+				walk(node.children);
+			}
+		};
+		walk(view.root);
+		return ids;
 	}
 
 	private clearNoteRefsForPath(nodes: ViewNode[], path: string): boolean {
