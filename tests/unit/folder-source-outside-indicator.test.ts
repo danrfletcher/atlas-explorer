@@ -26,15 +26,14 @@ function folderMeta(id: string, folderSource: Partial<ViewNode["folderSource"]> 
 		path: "",
 		showFiles: true,
 		showFolders: true,
-		refreshOnViewLoad: false,
 		...folderSource,
 	};
 	return node;
 }
 
 describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is unconditional, independent of the refreshOnViewLoad toggle", () => {
-	it("an Outside-Vault source with refreshOnViewLoad OFF is still refreshed on view load", () => {
-		const outside = folderMeta("outside-off", { location: "outside", refreshOnViewLoad: false });
+	it("an Outside-Vault source is refreshed on view load with no refresh setting at all", () => {
+		const outside = folderMeta("outside-off", { location: "outside" });
 		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [outside] };
 		const refreshFolderSource = vi.fn();
 		const fake = {
