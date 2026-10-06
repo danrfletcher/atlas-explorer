@@ -187,3 +187,51 @@ describe("PR-1 G11c — a unit with source rows renders them via apiOwner, with 
 		expect(container.children).toHaveLength(0);
 	});
 });
+
+// PR-1 (G11c, T1/T4): a unit whose rows came from a CSV or markdown-table source renders them through
+// `apiOwner` exactly as an API unit does — all three source kinds store their rows in `apiItemState`/`apiItemOrder`.
+describe("PR-1 G11c — a unit with CSV or markdown-table rows renders them via apiOwner", () => {
+	const mapping = { idField: "id", labelField: "name" };
+	const sourceKinds: { kind: string; source: Partial<ViewNode> }[] = [
+		{ kind: "API", source: { apiSource: { url: "https://x", method: "GET", mapping, mode: "merge", refreshOnViewLoad: false } } },
+		{ kind: "CSV", source: { csvSource: { path: "Rows.csv", mapping, mode: "merge", refreshOnViewLoad: false } } },
+		{
+			kind: "markdown-table",
+			source: { markdownTableSource: { path: "Rows.md", tableIndex: 0, mapping, mode: "merge", refreshOnViewLoad: false } },
+		},
+	];
+
+	it.each(sourceKinds)("a unit holding a $kind source draws each of its rows, in apiItemOrder", async ({ source }) => {
+		const sm = makeStatusesManager();
+		const unit = realNode("unit-owner", {
+			ref: { kind: "file", path: "Rows.md" },
+			...source,
+			apiItemState: {
+				a: { id: "a", label: "Alpha row", explicitStatusId: "todo" },
+				b: { id: "b", label: "Bravo row", explicitStatusId: "doing" },
+			},
+			apiItemOrder: ["b", "a"],
+		} as Partial<ViewNode>);
+		const fake = makeFakeExplorer(sm, { renderApiItemRow: proto.renderApiItemRow });
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [], container, view, 0, [], unit);
+		const text = container.textContent ?? "";
+		expect(text).toContain("Alpha row");
+		expect(text).toContain("Bravo row");
+		expect(text.indexOf("Bravo row")).toBeLessThan(text.indexOf("Alpha row"));
+	});
+
+	it.each(sourceKinds)("a unit holding a $kind source with zero rows draws no row container", async ({ source }) => {
+		const sm = makeStatusesManager();
+		const unit = realNode("empty-unit", {
+			ref: { kind: "file", path: "Empty.md" },
+			...source,
+			apiItemState: {},
+			apiItemOrder: [],
+		} as Partial<ViewNode>);
+		const fake = makeFakeExplorer(sm, { renderApiItemRow: proto.renderApiItemRow });
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [], container, view, 0, [], unit);
+		expect(container.children).toHaveLength(0);
+	});
+});
