@@ -1,53 +1,22 @@
+/* PR-1.S1: the panel is a fixed toolbar (plus filter row) and ONE scroll body, `.atlas-explorer-scroll`,
+ * that holds the bucket and the inbox. Only the scroll body scrolls; nothing inside it does. */
 .atlas-explorer {
 	display: flex;
 	flex-direction: column;
 	height: 100%;
-	/* Safety net, not the normal path: the inbox section below flex-grows to fill remaining space
-	 * and scrolls internally on its own in the common case. This only kicks in if the bucket alone
-	 * (not virtualized, expected to stay small/user-curated) somehow exceeds the panel's height. */
-	overflow-y: auto;
+	overflow: hidden;
 	font-size: var(--font-ui-small);
 }
 
-/* PR 9 (issue 3): the inbox previously had a fixed `max-height: 45vh` on its viewport, which read
- * as "cut off halfway down the page" on a tall sidebar — it was capped at a fraction of the whole
- * window, not the actual space left after the toolbar/bucket. The inbox section now flex-grows to
- * fill whatever's left in the panel, and only *it* scrolls internally — the bucket keeps its
- * natural height above it instead of the whole page scrolling as one blob. */
-.atlas-section.atlas-inbox {
-	display: flex;
-	flex-direction: column;
-	flex: 1 1 auto;
-	min-height: 0;
-}
-
-/* PR 11: while collapsed, the section should shrink to its header's natural height instead of
- * continuing to claim all remaining vertical space as blank void — the flex-grow above is only
- * correct while there's content filling it. */
-.atlas-section.atlas-inbox.is-collapsed {
+.atlas-explorer > .atlas-toolbar,
+.atlas-explorer > .atlas-filter-row {
 	flex: 0 0 auto;
 }
 
-/* PR 11: the inbox's own fold wrapper needs to participate in the same "fill remaining space" flex
- * chain `.atlas-inbox-viewport` already relies on (PR 9 issue 3) — the generic `.atlas-meta-children`
- * rule below is shared with the bucket section and meta-folders, none of which need to fill
- * anything, so these overrides are scoped to the inbox specifically. */
-.atlas-section.atlas-inbox > .atlas-meta-children {
+.atlas-explorer-scroll {
 	flex: 1 1 auto;
 	min-height: 0;
-}
-
-.atlas-section.atlas-inbox > .atlas-meta-children > .atlas-meta-children-inner {
-	display: flex;
-	flex-direction: column;
-	height: 100%;
-}
-
-.atlas-section.atlas-inbox .atlas-node-list {
-	display: flex;
-	flex-direction: column;
-	flex: 1 1 auto;
-	min-height: 0;
+	overflow-y: auto;
 }
 
 .atlas-toolbar {
@@ -209,17 +178,9 @@
 	min-height: 0;
 }
 
-/* F11: independently-scrollable viewport so the inbox can hold thousands of rows without every row
- * living in the DOM at once — see `renderVirtualizedInboxRows` in explorer-view.ts. PR 9 (issue 3):
- * flex-grows to fill whatever space `.atlas-section.atlas-inbox` has left, instead of a fixed
- * `max-height: 45vh` that read as an arbitrary cutoff partway down a tall sidebar. */
-.atlas-inbox-viewport {
-	flex: 1 1 auto;
-	min-height: 80px;
-	overflow-y: auto;
-	position: relative;
-}
-
+/* F11: the inbox holds thousands of rows without every row living in the DOM at once. Its spacer
+ * gives the scroll body the full list length; only the visible window is rendered into it — see
+ * `renderVirtualizedInboxRows` in explorer-view.ts. */
 .atlas-inbox-spacer {
 	position: relative;
 }
