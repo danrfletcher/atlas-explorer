@@ -93,6 +93,35 @@ describe("PR-1.S1 — G9/E3: restore before the first inbox draw", () => {
 		}
 		expect(h.inboxRowKeys()).toEqual(first);
 	});
+
+	it("keeps scrollTop when renders overlap (started while an earlier one is still awaiting)", async () => {
+		const units = fileUnits(2000);
+		const h = setup(units);
+		await render(h.explorer);
+		scrollTo(h, 1400);
+
+		// Each render empties the container and builds a fresh body before its first await, so the
+		// later renders must take the target from the in-flight render, not from the new body's 0.
+		await Promise.all([render(h.explorer), render(h.explorer), render(h.explorer)]);
+
+		expect(h.scrollBody().scrollTop).toBe(1400);
+		expect(h.inboxRowKeys()).toContain(keyAt(units, 1400 / ROW));
+		expect(h.inboxRowKeys()).not.toContain(keyAt(units, 0));
+	});
+
+	it("redraws the inbox from the newest overlapping render's body, not a superseded one", async () => {
+		const units = fileUnits(2000);
+		const h = setup(units);
+		await render(h.explorer);
+		scrollTo(h, 1400);
+
+		await Promise.all([render(h.explorer), render(h.explorer)]);
+		expect(h.panel().querySelectorAll(".atlas-explorer-scroll")).toHaveLength(1);
+
+		scrollTo(h, ROW * 900);
+		expect(h.inboxRowKeys()).toContain(keyAt(units, 900));
+		expect(h.inboxRowKeys()).not.toContain(keyAt(units, 1400 / ROW));
+	});
 });
 
 describe("PR-1.S1 — G2/E9: the inbox redraws on scroll and on offset change", () => {
