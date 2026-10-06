@@ -3,7 +3,7 @@ import { Notice } from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { ViewsManager } from "../../src/views";
 import { DEFAULT_SETTINGS } from "../../src/settings";
-import { SwapCandidate } from "../../src/swap";
+import { SwapCandidate, SwapPickerModal } from "../../src/swap";
 import { UnitRef, View, ViewNode, unitRefKey, unitToRef } from "../../src/types";
 import { Setup, clone, file, folder, meta, setup, unit } from "./create-from-meta-fixtures";
 
@@ -252,3 +252,51 @@ describe("G14: swap survives a reload", () => {
 	});
 });
 
+
+describe("GP1 through the real picker: type, pick, close", () => {
+	/** The picker resolves every known block's text first, so the fixture's free block needs content on disk. */
+	const seedFreeBlockText = () => s.app.vault.contents.set("_pool/20260101000000-aaaa.md", "Ideas");
+
+	it("typing 'Customer Disc' lists Customer Discovery.md; picking it swaps the spot and closes the picker", async () => {
+		const { view, spot } = boot([meta("spot", "Customer interviews", [unit("k1", file("Sub/Nested Note.md"))])]);
+		s.app.vault.seedFile("Customer Discovery.md");
+		seedFreeBlockText();
+		const openSpy = vi.spyOn(SwapPickerModal.prototype, "open");
+
+		await fake.openSwapPicker(view, spot);
+
+		expect(openSpy).toHaveBeenCalledTimes(1);
+		const picker = openSpy.mock.contexts[0] as SwapPickerModal;
+		expect(picker.placeholder).toBe("Swap with…");
+		expect(document.querySelector(".modal-container")).not.toBeNull();
+
+		const matches = picker.getSuggestions("Customer Disc");
+		expect(matches.map((m) => m.item.path)).toEqual(["Customer Discovery.md"]);
+
+		picker.onChooseSuggestion(matches[0], new MouseEvent("click"));
+		await vi.waitFor(() => expect(flushSave).toHaveBeenCalledTimes(1));
+
+		const node = s.views.getView("default")!.root[0];
+		expect(node).toMatchObject({ id: "spot", type: "unit", ref: file("Customer Discovery.md") });
+		expect(node.children).toEqual([unit("k1", file("Sub/Nested Note.md"))]);
+		expect(document.querySelector(".modal-container")).toBeNull();
+		expect(notices()).toEqual([]);
+		vaultWasUntouched();
+		openSpy.mockRestore();
+	});
+
+	it("escaping the picker changes nothing and does not save", async () => {
+		const { view, spot } = boot([meta("spot", "Customer interviews")]);
+		seedFreeBlockText();
+		const before = clone(s.views.getView("default")!.root);
+		const openSpy = vi.spyOn(SwapPickerModal.prototype, "open");
+
+		await fake.openSwapPicker(view, spot);
+		(openSpy.mock.contexts[0] as SwapPickerModal).close();
+
+		expect(s.views.getView("default")!.root).toEqual(before);
+		expect(flushSave).not.toHaveBeenCalled();
+		vaultWasUntouched();
+		openSpy.mockRestore();
+	});
+});

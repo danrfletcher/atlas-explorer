@@ -113,6 +113,10 @@ export class Vault {
 		return [...this.entries.values()].filter((e): e is TFile => e instanceof TFile);
 	}
 
+	getAllLoadedFiles(): TAbstractFile[] {
+		return [...this.entries.values()];
+	}
+
 	getMarkdownFiles(): TFile[] {
 		return this.getFiles().filter((f) => f.extension === "md");
 	}
@@ -306,7 +310,36 @@ export class Modal {
 	onClose(): void {}
 }
 
-export class FuzzySuggestModal extends Modal {}
+/** Prompt-style suggest modal: its placeholder is the search box label (the title is not rendered). */
+export class SuggestModal<T> extends Modal {
+	placeholder = "";
+	setPlaceholder(placeholder: string): void {
+		this.placeholder = placeholder;
+	}
+}
+
+/** Fuzzy suggest modal: `getSuggestions` matches the query against `getItemText` (a plain substring
+ * match, case-insensitive, standing in for Obsidian's fuzzy scorer), returning matches in item order. */
+export class FuzzySuggestModal<T> extends SuggestModal<T> {
+	getItems(): T[] {
+		return [];
+	}
+	getItemText(_item: T): string {
+		return "";
+	}
+	getSuggestions(query: string): { item: T; match: { score: number; matches: [] } }[] {
+		const needle = query.trim().toLowerCase();
+		return this.getItems()
+			.filter((item) => this.getItemText(item).toLowerCase().includes(needle))
+			.map((item) => ({ item, match: { score: 0, matches: [] } }));
+	}
+	renderSuggestion(_match: unknown, _el: HTMLElement): void {}
+	onChooseItem(_item: T, _evt: unknown): void {}
+	onChooseSuggestion(match: { item: T }, evt: unknown): void {
+		this.onChooseItem(match.item, evt);
+		this.close();
+	}
+}
 export class ItemView {}
 export class MenuItem {
 	title = "";

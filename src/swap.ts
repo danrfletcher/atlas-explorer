@@ -111,14 +111,15 @@ export function canSwapForAtlasFolder(node: ViewNode): boolean {
 	return canSwapNode(node) && node.type === "unit";
 }
 
-/** PR-2 (G6): the "Swap with…" picker. Titled "Swap with…" by its caller. Results are the fuzzy matches of
- * `buildSwapCandidates`' list, capped at `SWAP_RESULT_CAP`; a second pick is ignored. */
+/** PR-2 (G6): the "Swap with…" picker. Its label is the search box placeholder: a prompt-style fuzzy modal
+ * does not render its title, so the placeholder is the only visible "Swap with…". Results are the fuzzy
+ * matches of `buildSwapCandidates`' list, capped at `SWAP_RESULT_CAP`; a second pick is ignored. */
 export class SwapPickerModal extends FuzzySuggestModal<SwapCandidate> {
 	private chosen = false;
 
 	constructor(app: App, private candidates: SwapCandidate[], private onChoose: (candidate: SwapCandidate) => void) {
 		super(app);
-		this.setTitle("Swap with…");
+		this.setPlaceholder("Swap with…");
 	}
 
 	getItems(): SwapCandidate[] {

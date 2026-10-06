@@ -174,9 +174,14 @@ describe("SwapPickerModal", () => {
 		expect(modal.getItemText(candidates[0])).toBe("A.md A.md");
 	});
 
-	it("is titled 'Swap with…'", () => {
+	it("shows 'Swap with…' as its visible search placeholder (a prompt-style modal does not render its title)", () => {
 		const modal = new SwapPickerModal(new App(), candidates, vi.fn());
-		expect(modal.titleEl.textContent).toBe("Swap with…");
+		expect(modal.placeholder).toBe("Swap with…");
+	});
+
+	it("fuzzy-matches the typed query against name and path", () => {
+		const modal = new SwapPickerModal(new App(), buildSwapCandidates(input({ files: [file("Customer Discovery.md"), file("Boat.md")] })), vi.fn());
+		expect(modal.getSuggestions("Customer Disc").map((m) => m.item.path)).toEqual(["Customer Discovery.md"]);
 	});
 
 	it("draws a type icon for each result: file, folder or block (G6)", () => {

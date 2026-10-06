@@ -204,7 +204,10 @@ describe("PR-2 G1-G4 — Swap menu items", () => {
 		["a file", { kind: "file" as const, path: "U.md" }],
 		["a folder", { kind: "folder" as const, path: "Boat" }],
 		["a block", { kind: "block" as const, path: "U.md", subpath: "^abc" }],
-	])("offers both items for %s units", (_label, ref) => {
+		["a promoted folder (nested, not a module)", { kind: "folder" as const, path: "Projects/Career" }],
+		["a promoted block", { kind: "block" as const, path: "Projects/Career.md", subpath: "^abc" }],
+		["a free block", { kind: "file" as const, path: "_pool/20260101000000-aaaa.md" }],
+	])("offers both items for %s units (G1)", (_label, ref) => {
 		const titles = build("showUnitMenu", unitNode({ ref })).menu.titles();
 		expect(titles).toEqual(expect.arrayContaining(SWAP));
 	});
