@@ -1,4 +1,4 @@
-import { Debouncer, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
+import { Debouncer, Notice, Platform, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
 import { AtlasSettingTab, AtlasSettings, DEFAULT_SETTINGS, computeDefaultExcludedFolders } from "./settings";
 import { UnitIndex } from "./unit-index";
 import { AddedItem, UnitRef, View } from "./types";
@@ -18,6 +18,8 @@ import { registerTestHarness } from "./test-harness";
 import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
 import { ApiHeadersStore } from "./api-headers-store";
 import { FolderSourcePathStore } from "./folder-source-path-store";
+import { resolveOutsidePath } from "./folder-source-outside";
+import { FolderSourceOutsideWatchers } from "./folder-source-outside-watcher";
 import { ApiSourceController } from "./api-source-controller";
 import { CsvSourceController } from "./csv-source-controller";
 import { MarkdownTableSourceController } from "./markdown-table-source-controller";
@@ -62,6 +64,8 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-5 (G6/F6): device-local (never-synced) storage for Outside-Vault Folder source absolute
 	 * paths — its own store, separate from `apiHeadersStore`, so the two never interact. */
 	folderSourcePathStore: FolderSourcePathStore;
+	/** PR-2 (G6/G9): live watchers on the active view's Outside-Vault Folder sources, one per folder. */
+	outsideFolderWatchers: FolderSourceOutsideWatchers;
 	/** G1/G6/G11: the fetch → map → merge → persist pipeline for API-backed Folders. */
 	apiSourceController: ApiSourceController;
 	/** PR-7 (G17-G19/G21-G23): the read → parse → map → merge → persist pipeline for CSV-backed
@@ -132,6 +136,13 @@ export default class AtlasPlugin extends Plugin {
 		});
 		this.apiHeadersStore = new ApiHeadersStore(this.app);
 		this.folderSourcePathStore = new FolderSourcePathStore(this.app);
+		this.outsideFolderWatchers = new FolderSourceOutsideWatchers({
+			isResolved: (path) => resolveOutsidePath(path),
+			onRescan: (nodeId) => this.refreshOutsideFolderSource(nodeId),
+		});
+		// Rebuilt on every views change: a new or re-pointed source, and a view switch, all reach here through `onChange`.
+		this.viewsManager.onChange(() => this.syncOutsideFolderWatchers());
+		this.syncOutsideFolderWatchers();
 		this.apiSourceController = new ApiSourceController();
 		this.csvSourceController = new CsvSourceController();
 		this.markdownTableSourceController = new MarkdownTableSourceController();
@@ -236,8 +247,28 @@ export default class AtlasPlugin extends Plugin {
 		this.viewsManager.refreshFolderSource(view.id, nodeId);
 	}
 
+	/** PR-2 (G9): keeps the watcher registry in step with the active view's Outside-Vault sources. Mobile
+	 * never watches (G7: outside sources don't run on mobile, and there is no fallback). */
+	private syncOutsideFolderWatchers(): void {
+		const sources = new Map<string, string>();
+		if (!Platform.isMobile) {
+			const view = this.viewsManager.getActiveView();
+			for (const nodeId of this.viewsManager.getOutsideFolderSourceNodeIds(view.id)) {
+				sources.set(nodeId, this.folderSourcePathStore.get(nodeId));
+			}
+		}
+		this.outsideFolderWatchers.sync(sources);
+	}
+
+	/** PR-2 (G6): a watcher event's rescan for one source — the same refresh window focus runs, for one node. */
+	private refreshOutsideFolderSource(nodeId: string): void {
+		const view = this.viewsManager.getActiveView();
+		this.viewsManager.refreshFolderSource(view.id, nodeId, this.folderSourcePathStore.get(nodeId));
+	}
+
 	onunload() {
 		this.folderLiveRefresh.cancelAll(); // PR-1 (G5): nothing fires after the plugin is gone
+		this.outsideFolderWatchers?.closeAll(); // PR-2 (G9): every watcher closes with the plugin
 		this.graduation?.dispose(); // before closing the dialog, so a dismissed one doesn't revert or move anything
 		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);

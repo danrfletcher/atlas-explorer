@@ -104,7 +104,7 @@ describe("G11/F10 — recheck-on-focus-regain rule", () => {
 		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [outsideA, inside, outsideB] };
 		const refreshFolderSource = vi.fn();
 		const fake = {
-			plugin: { viewsManager: { getActiveView: () => view } },
+			plugin: { viewsManager: { getActiveView: () => view }, outsideFolderWatchers: { retry: vi.fn() } },
 			collectFolderSourceNodes: proto.collectFolderSourceNodes,
 			refreshFolderSource,
 		};

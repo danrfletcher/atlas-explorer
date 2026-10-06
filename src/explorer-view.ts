@@ -523,6 +523,9 @@ export class AtlasExplorerView extends ItemView {
 	 * automatically; the indicator dot itself needs no separate refresh call since it already
 	 * recomputes `resolveOutsidePath` live on every render. */
 	private refreshOutsideFolderSourcesOnFocus(): void {
+		// PR-2 (G7): focus is also the retry for a closed or failed watcher, so a replugged drive
+		// reconnects here, before the rows reconcile below.
+		this.plugin.outsideFolderWatchers.retry();
 		const view = this.plugin.viewsManager.getActiveView();
 		for (const node of this.collectFolderSourceNodes(view.root)) {
 			if (node.folderSource?.location === "outside") this.refreshFolderSource(view, node);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -11,18 +11,24 @@ import { buildFolderSourceChildren } from "../../src/folder-source";
 import { View, ViewNode } from "../../src/types";
 import { meta } from "../integration/create-from-meta-fixtures";
 
-/** F10: "connection checks happen only on load and on focus-regain — never via a timer or poll."
- * Mirrors `tests/unit/fence-checks.test.ts`'s static-source-text + behavioral pattern (F5's disk-write
- * fence), swapped to a timer/poll construct and scoped to every file PR-5's Outside-Vault work touches:
- * the two new dedicated modules in full, plus the specific Outside-Vault slices added to the four
- * existing files they wire into. The narrower spot-check in `folder-source-outside-indicator.test.ts`
- * covers two of these same slices already — this file is the full dedicated sweep the spec calls for,
- * so some overlap with it is expected rather than a sign of redundant coverage elsewhere. */
+/** F4 (PR-2): the timer/watcher fence F10 is retired. Outside-Vault sources may now watch their folder,
+ * but only through `fs.watch` in the one new watcher module, and only with the debounce timer the
+ * watcher schedules. Everything else stays timer-free: path resolution, listing, the path store, the
+ * reconcile, and the focus/view-load hooks, which may call the registry to retry but never schedule a
+ * timer themselves. The static checks below enforce that. The behavioural half is the same
+ * zero-timer check as before, with the watcher left out of it. */
 
 const root = join(__dirname, "../..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
 
+/** The one module allowed to call `fs.watch`. */
+const WATCHER_MODULE = "src/folder-source-outside-watcher.ts";
+/** The shared debounce the watcher reuses (PR-1 groundwork), the only other place a timer may be created. */
+const DEBOUNCE_MODULE = "src/folder-live-refresh.ts";
+
 const TIMER_CONSTRUCT = /\b(setInterval|setTimeout|requestAnimationFrame|requestIdleCallback|queueMicrotask|FileSystemWatcher|fs\.watch|fs\.watchFile|setImmediate)\b/;
+const FS_WATCH_CALL = /\bfs\.watch\s*\(/;
+const ALWAYS_FORBIDDEN = /\b(setInterval|FileSystemWatcher|watchFile)\b/;
 
 function slice(file: string, startMarker: string, endMarker: string): string {
 	const src = read(file);
@@ -33,7 +39,30 @@ function slice(file: string, startMarker: string, endMarker: string): string {
 	return src.slice(start, end);
 }
 
-describe("F10 static sweep — the two new Outside-Vault modules have no timer/poll construct anywhere", () => {
+const srcFiles = readdirSync(join(root, "src"))
+	.filter((f) => f.endsWith(".ts"))
+	.map((f) => `src/${f}`);
+
+describe("F4 static sweep — fs.watch and timer constructs are confined to the watcher module", () => {
+	it("setInterval, fs.watchFile and FileSystemWatcher appear nowhere in src", () => {
+		for (const file of srcFiles) expect(read(file), file).not.toMatch(ALWAYS_FORBIDDEN);
+	});
+
+	it("fs.watch is called only from the new watcher module", () => {
+		for (const file of srcFiles) {
+			if (file === WATCHER_MODULE) continue;
+			expect(read(file), file).not.toMatch(FS_WATCH_CALL);
+		}
+		expect(read(WATCHER_MODULE)).toMatch(FS_WATCH_CALL);
+	});
+
+	it("the watcher module's only timer is the shared debounce (no timer of its own)", () => {
+		const src = read(WATCHER_MODULE);
+		expect(src).not.toMatch(/\bsetTimeout\b/);
+		expect(src).not.toMatch(/\bsetInterval\b/);
+		expect(read(DEBOUNCE_MODULE)).toMatch(/\bsetTimeout\b/);
+	});
+
 	it("src/folder-source-outside.ts (path resolution + listing) is fully clean", () => {
 		expect(read("src/folder-source-outside.ts")).not.toMatch(TIMER_CONSTRUCT);
 	});
@@ -43,14 +72,24 @@ describe("F10 static sweep — the two new Outside-Vault modules have no timer/p
 	});
 });
 
-describe("F10 static sweep — the Outside-Vault-specific additions to existing files have no timer/poll construct", () => {
+describe("F4 static sweep — the Outside-Vault-specific additions to existing files have no timer/poll construct", () => {
 	it("folder-source.ts's buildOutsideFolderChildren (E8 reconciliation) is clean", () => {
 		const body = slice("src/folder-source.ts", "function buildOutsideFolderChildren(", "\n/** G16/E1:");
 		expect(body).not.toMatch(TIMER_CONSTRUCT);
 	});
 
+	it("folder-source.ts's diffOutsideChildren (rename detection) is clean", () => {
+		const body = slice("src/folder-source.ts", "export function diffOutsideChildren(", "\n/** PR-1 (G5)");
+		expect(body).not.toMatch(TIMER_CONSTRUCT);
+	});
+
 	it("views.ts's refreshFolderSource (the outsidePath-aware reconcile call site) is clean", () => {
 		const body = slice("src/views.ts", "refreshFolderSource(viewId: string", "\n\t}");
+		expect(body).not.toMatch(TIMER_CONSTRUCT);
+	});
+
+	it("views.ts's reconcileOutsideChildChanges (outside delete and rename) is clean", () => {
+		const body = slice("src/views.ts", "private reconcileOutsideChildChanges(", "\n\t}");
 		expect(body).not.toMatch(TIMER_CONSTRUCT);
 	});
 
@@ -64,7 +103,7 @@ describe("F10 static sweep — the Outside-Vault-specific additions to existing 
 		expect(body).not.toMatch(TIMER_CONSTRUCT);
 	});
 
-	it("explorer-view.ts's refreshOutsideFolderSourcesOnFocus (recheck-on-focus-regain) is clean", () => {
+	it("explorer-view.ts's refreshOutsideFolderSourcesOnFocus (recheck and registry retry on focus-regain) is clean", () => {
 		const body = slice("src/explorer-view.ts", "private refreshOutsideFolderSourcesOnFocus(): void {", "\n\t}");
 		expect(body).not.toMatch(TIMER_CONSTRUCT);
 	});
@@ -80,7 +119,7 @@ describe("F10 static sweep — the Outside-Vault-specific additions to existing 
 	});
 });
 
-describe("F10 behavioral check — driving every Outside-Vault connection-check path never schedules a timer", () => {
+describe("F4 behavioural check — driving every Outside-Vault connection-check path never schedules a timer", () => {
 	let tmpDir: string;
 	let setIntervalSpy: ReturnType<typeof vi.spyOn>;
 	let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
@@ -137,6 +176,7 @@ describe("F10 behavioral check — driving every Outside-Vault connection-check 
 			plugin: {
 				viewsManager: { getActiveView: () => view, refreshFolderSource: vi.fn() },
 				folderSourcePathStore: { get: vi.fn(() => tmpDir) },
+				outsideFolderWatchers: { retry: vi.fn() },
 			},
 			collectFolderSourceNodes: proto.collectFolderSourceNodes,
 			refreshFolderSource: proto.refreshFolderSource,
