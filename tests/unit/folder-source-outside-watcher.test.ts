@@ -186,6 +186,40 @@ describe("folder-source-outside-watcher — failure, close and retry (G7, E3)", 
 		expect(watch).toHaveBeenCalledTimes(2);
 	});
 
+	it("a change event while the path no longer resolves closes the watcher, so focus retry reopens it (G7, Linux)", () => {
+		let resolved = true;
+		const { registry, watch, onRescan, watchers } = setup({ resolved: () => resolved });
+		registry.sync(new Map([["node-a", "/Volumes/Drive/Docs"]]));
+		const first = latest(watchers);
+
+		// The folder is removed: Linux reports the change but never emits 'error'.
+		resolved = false;
+		first.emitChange("Docs");
+		expect(first.close).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(OUTSIDE_WATCH_DEBOUNCE_MS);
+		expect(onRescan).toHaveBeenCalledWith("node-a");
+
+		// Still gone: retry does nothing. Back again: retry reopens a fresh watcher.
+		registry.retry();
+		expect(watch).toHaveBeenCalledTimes(1);
+		resolved = true;
+		registry.retry();
+		expect(watch).toHaveBeenCalledTimes(2);
+		expect(latest(watchers)).not.toBe(first);
+		latest(watchers).emitChange("new.pdf");
+		vi.advanceTimersByTime(OUTSIDE_WATCH_DEBOUNCE_MS);
+		expect(onRescan).toHaveBeenCalledTimes(2);
+	});
+
+	it("a change event while the path still resolves keeps the watcher open", () => {
+		const { registry, watch, watchers } = setup();
+		registry.sync(new Map([["node-a", "/Docs/Invoices"]]));
+		latest(watchers).emitChange("new.pdf");
+		expect(latest(watchers).close).not.toHaveBeenCalled();
+		registry.retry();
+		expect(watch).toHaveBeenCalledTimes(1);
+	});
+
 	it("a retry while the watcher is still open never opens a second one", () => {
 		const { registry, watch } = setup();
 		registry.sync(new Map([["node-a", "/Docs/Invoices"]]));

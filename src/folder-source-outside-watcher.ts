@@ -119,6 +119,9 @@ export class FolderSourceOutsideWatchers {
 		try {
 			const watcher = this.watch(entry.path, (eventType, filename) => {
 				if (!isIgnoredOutsideEvent(filename)) this.debounce.schedule(entry.path);
+				// G7: Linux emits no 'error' when the folder is removed, so a watcher on a path that no longer
+				// resolves is closed here. The rescan above still reconciles the rows; focus retry reopens it.
+				if (!this.deps.isResolved(entry.path) && entry.watcher === watcher) this.close(entry);
 			});
 			// G7: an `'error'` closes this handle. Focus retries it, and the rows stay as they are until then.
 			watcher.on("error", () => {
