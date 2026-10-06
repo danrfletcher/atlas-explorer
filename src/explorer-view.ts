@@ -291,6 +291,146 @@ export class ModuleContentsModal extends Modal {
  * (Add block/file/folder) and `createInterfaceNote`, both already on Part 7's allowed list. Every
  * drag/promote/placement path below is plugin-data only.
  */
+/** The explorer methods the shared source/status menu items call. Passed in as `host` rather than read
+ * off `this`, so the helper is a plain function — every call is made from inside a menu click, never while
+ * the menu is being built. */
+interface SourceMenuHost {
+	openStatusesModal(view: View, nodeId: string | null): void;
+	openApiSourceModal(view: View, node: ViewNode): void;
+	refreshApiSource(view: View, node: ViewNode, trigger?: "manual" | "automatic"): void;
+	refreshFolderSource(view: View, node: ViewNode): void;
+	refreshCsvSource(view: View, node: ViewNode, trigger?: "manual" | "automatic"): void;
+	refreshMarkdownTableSource(view: View, node: ViewNode, trigger?: "manual" | "automatic"): void;
+}
+
+/** Display name for a unit node, from its ref's basename — used where a row's own label isn't to hand. */
+function unitBasename(node: ViewNode): string {
+	return node.ref?.path.split("/").pop() ?? "this item";
+}
+
+/** PR-1 (G11e): the Statuses, Data source…, Refresh now and Remove data source items, shared by the
+ * Atlas-folder menu and the unit menu so a sourced unit offers exactly what a sourced folder does.
+ * Statuses shows when the node has children or source rows; Refresh now and Remove data source
+ * show only when that kind of source exists. Adds no trailing separator — the caller owns it. */
+function addSourceAndStatusItems(menu: Menu, plugin: AtlasPlugin, host: SourceMenuHost, view: View, node: ViewNode): void {
+	if (node.children.length > 0 || nodeHasApiRows(node)) {
+		menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => host.openStatusesModal(view, node.id)));
+		menu.addSeparator();
+	}
+	menu.addItem((item) =>
+		item
+			.setTitle("Data source…")
+			.setIcon("plug-zap")
+			.onClick(() => host.openApiSourceModal(view, node))
+	);
+	if (node.apiSource) {
+		menu.addItem((item) =>
+			item
+				.setTitle("Refresh now")
+				.setIcon("refresh-cw")
+				.onClick(() => {
+					// R8/G13: mobile shows cached rows only — say so rather than silently doing nothing.
+					if (Platform.isMobile) {
+						new Notice("Refreshing isn't available on mobile — showing cached rows.");
+						return;
+					}
+					host.refreshApiSource(view, node, "manual");
+				})
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Remove data source")
+				.setIcon("unplug")
+				.onClick(() => {
+					new ConfirmModal(
+						plugin.app,
+						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+						"Remove",
+						() => {
+							plugin.viewsManager.setApiSource(view.id, node.id, undefined);
+							// R4/G4: the source config itself includes headers (device-local, in
+							// ApiHeadersStore) — Remove drops those too, same as Delete folder already
+							// does, so a bearer token doesn't linger on the device or silently reappear
+							// if a source is added back to this Folder later.
+							plugin.apiHeadersStore.delete(node.id);
+						}
+					).open();
+				})
+		);
+	} else if (node.folderSource) {
+		// PR-4 (G10): reuses the exact same menu actions as an API source — "Refresh now" re-runs
+		// the (synchronous, disk-read-only) reconciliation; "Remove data source" just stops it,
+		// since the children it already placed are ordinary real units with nowhere else to go.
+		menu.addItem((item) =>
+			item
+				.setTitle("Refresh now")
+				.setIcon("refresh-cw")
+				.onClick(() => host.refreshFolderSource(view, node))
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Remove data source")
+				.setIcon("unplug")
+				.onClick(() => {
+					new ConfirmModal(
+						plugin.app,
+						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current children stay in place as plain units — it just stops refreshing.`,
+						"Remove",
+						() => plugin.viewsManager.setFolderSource(view.id, node.id, undefined)
+					).open();
+				})
+		);
+	} else if (node.csvSource) {
+		// PR-7: reuses the exact same menu actions as an API source — "Refresh now" re-reads+parses
+		// the file (no mobile guard, see `refreshCsvSource`'s own doc comment); "Remove data source"
+		// just stops it, same as an API source's own Remove (rows stay in place). CSV has no
+		// device-local headers store to clean up on removal.
+		menu.addItem((item) =>
+			item
+				.setTitle("Refresh now")
+				.setIcon("refresh-cw")
+				.onClick(() => host.refreshCsvSource(view, node, "manual"))
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Remove data source")
+				.setIcon("unplug")
+				.onClick(() => {
+					new ConfirmModal(
+						plugin.app,
+						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+						"Remove",
+						() => plugin.viewsManager.setCsvSource(view.id, node.id, undefined)
+					).open();
+				})
+		);
+	} else if (node.markdownTableSource) {
+		// PR-8: reuses the exact same menu actions as a CSV source — "Refresh now" re-reads+parses
+		// the file (no mobile guard, see `refreshMarkdownTableSource`'s own doc comment); "Remove
+		// data source" just stops it, same as a CSV source's own Remove (rows stay in place).
+		// Markdown Table has no device-local headers store to clean up on removal.
+		menu.addItem((item) =>
+			item
+				.setTitle("Refresh now")
+				.setIcon("refresh-cw")
+				.onClick(() => host.refreshMarkdownTableSource(view, node, "manual"))
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Remove data source")
+				.setIcon("unplug")
+				.onClick(() => {
+					new ConfirmModal(
+						plugin.app,
+						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+						"Remove",
+						() => plugin.viewsManager.setMarkdownTableSource(view.id, node.id, undefined)
+					).open();
+				})
+		);
+	}
+}
+
 export class AtlasExplorerView extends ItemView {
 	private filterText = "";
 	private sortMode: "manual" | "alphabetical" = "manual";
@@ -532,13 +672,13 @@ export class AtlasExplorerView extends ItemView {
 		}
 	}
 
+	/** PR-1 (G11b): every node is visited and every node's children are walked, units included, so a
+	 * sourced node nested anywhere in the tree still refreshes at load and on its timer. */
 	private collectApiSourceNodes(nodes: ViewNode[]): ViewNode[] {
 		const out: ViewNode[] = [];
 		for (const node of nodes) {
-			if (node.type === "meta") {
-				if (node.apiSource) out.push(node);
-				out.push(...this.collectApiSourceNodes(node.children));
-			}
+			if (node.apiSource) out.push(node);
+			out.push(...this.collectApiSourceNodes(node.children));
 		}
 		return out;
 	}
@@ -549,10 +689,8 @@ export class AtlasExplorerView extends ItemView {
 	private collectFolderSourceNodes(nodes: ViewNode[]): ViewNode[] {
 		const out: ViewNode[] = [];
 		for (const node of nodes) {
-			if (node.type === "meta") {
-				if (node.folderSource) out.push(node);
-				out.push(...this.collectFolderSourceNodes(node.children));
-			}
+			if (node.folderSource) out.push(node);
+			out.push(...this.collectFolderSourceNodes(node.children));
 		}
 		return out;
 	}
@@ -563,10 +701,8 @@ export class AtlasExplorerView extends ItemView {
 	private collectCsvSourceNodes(nodes: ViewNode[]): ViewNode[] {
 		const out: ViewNode[] = [];
 		for (const node of nodes) {
-			if (node.type === "meta") {
-				if (node.csvSource) out.push(node);
-				out.push(...this.collectCsvSourceNodes(node.children));
-			}
+			if (node.csvSource) out.push(node);
+			out.push(...this.collectCsvSourceNodes(node.children));
 		}
 		return out;
 	}
@@ -575,10 +711,8 @@ export class AtlasExplorerView extends ItemView {
 	private collectMarkdownTableSourceNodes(nodes: ViewNode[]): ViewNode[] {
 		const out: ViewNode[] = [];
 		for (const node of nodes) {
-			if (node.type === "meta") {
-				if (node.markdownTableSource) out.push(node);
-				out.push(...this.collectMarkdownTableSourceNodes(node.children));
-			}
+			if (node.markdownTableSource) out.push(node);
+			out.push(...this.collectMarkdownTableSourceNodes(node.children));
 		}
 		return out;
 	}
@@ -655,7 +789,7 @@ export class AtlasExplorerView extends ItemView {
 	 * every-X-minutes timer, "Refresh now", post-save) — mobile shows cached rows only and can never
 	 * trigger a live request. `trigger` (G5/G6b) distinguishes "Refresh now" (always asks again when a
 	 * delete needs confirming) from the two automatic triggers (ask at most once per Folder). */
-	private refreshApiSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+	refreshApiSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.apiSource || Platform.isMobile) return;
 		const headers = this.plugin.apiHeadersStore.get(node.id);
 		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => this.plugin.viewsManager.notifyExternalMutation(), {
@@ -677,7 +811,7 @@ export class AtlasExplorerView extends ItemView {
 	 * target folder. Purely a data-layer operation (`ViewsManager.refreshFolderSource` only reads the
 	 * vault, never writes it) — the resulting real unit children render for free through the normal
 	 * tree, with no Folder-source-specific rendering path. */
-	private refreshFolderSource(view: View, node: ViewNode): void {
+	refreshFolderSource(view: View, node: ViewNode): void {
 		// PR-5: Outside-Vault reconciliation needs the device-local path, which `ViewsManager` itself
 		// never holds (same reason `apiHeadersStore` lookups live here, not in `ViewsManager`, for API
 		// sources) — looked up fresh on every call so a since-changed path is always current.
@@ -689,7 +823,7 @@ export class AtlasExplorerView extends ItemView {
 	 * for the HTTP fetch, so (unlike `refreshApiSource`) this deliberately has no `Platform.isMobile`
 	 * guard: reading a file already in the vault works offline/on mobile exactly as well as it does on
 	 * desktop, there's no live request to skip. */
-	private refreshCsvSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+	refreshCsvSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.csvSource) return;
 		void this.plugin.csvSourceController.refresh(node, node.csvSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
 			vault: this.plugin.app.vault,
@@ -708,7 +842,7 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-8 (G17-G20/G22-G24): the Markdown Table equivalent of `refreshCsvSource` — same no-mobile-
 	 * guard reasoning (a vault file read, not a live request). */
-	private refreshMarkdownTableSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+	refreshMarkdownTableSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.markdownTableSource) return;
 		void this.plugin.markdownTableSourceController.refresh(node, node.markdownTableSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
 			vault: this.plugin.app.vault,
@@ -725,7 +859,7 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	private openApiSourceModal(view: View, node: ViewNode): void {
+	openApiSourceModal(view: View, node: ViewNode): void {
 		const headers = this.plugin.apiHeadersStore.get(node.id);
 		const outsidePath = this.plugin.folderSourcePathStore.get(node.id);
 		new ApiSourceModal(
@@ -1411,7 +1545,7 @@ export class AtlasExplorerView extends ItemView {
 					const info = await this.resolveRef(node.ref);
 					if (this.matchesFilter(info.text)) bypass = true;
 				}
-				if (!bypass && node.type === "meta" && this.apiItemsMatchFilter(node)) bypass = true;
+				if (!bypass && this.apiItemsMatchFilter(node)) bypass = true;
 				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children))) bypass = true;
 			}
 			resolved.push({ node, status, governor, bypass });
@@ -1706,7 +1840,7 @@ export class AtlasExplorerView extends ItemView {
 			}
 			// R18: a Folder's API rows are its rows too, just not `ViewNode` children (G10) — a filter
 			// match among them must force-reveal the Folder the same as a matching real descendant would.
-			if (n.type === "meta" && this.apiItemsMatchFilter(n)) return true;
+			if (this.apiItemsMatchFilter(n)) return true;
 			if (n.children.length > 0 && (await this.subtreeHasMatch(n.children))) return true;
 		}
 		return false;
@@ -1763,7 +1897,7 @@ export class AtlasExplorerView extends ItemView {
 		// — see `nodeHasApiRows`'s own doc comment) are passed in as `apiOwner` so they're merged into
 		// this same list's sort/truncate pass, right behind the real children, instead of a second
 		// `renderApiItems` pass with no sort/truncate logic of its own.
-		const apiOwner = node.type === "meta" && nodeHasApiRows(node) ? node : undefined;
+		const apiOwner = nodeHasApiRows(node) ? node : undefined;
 		await this.renderNodeList(node.children, childrenInner, view, depth + 1, [node, ...ancestors], apiOwner);
 
 		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
@@ -1946,7 +2080,7 @@ export class AtlasExplorerView extends ItemView {
 			setTooltip(removeBtn, "Remove from view");
 			removeBtn.addEventListener("click", (evt) => {
 				evt.stopPropagation();
-				this.plugin.viewsManager.unplaceNode(view.id, node.id);
+				this.removeUnitsFromView(view.id, [node]);
 			});
 		}
 		// PR 9 (issue 2): modules never expand inline anymore, in the bucket or the inbox — the icon
@@ -1975,7 +2109,8 @@ export class AtlasExplorerView extends ItemView {
 			this.showUnitMenu(evt, ref, view, node);
 		});
 
-		if (node.children.length > 0) await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
+		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
+		if (node.children.length > 0 || nodeHasApiRows(node)) await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
 	}
 
 	// --- inbox -----------------------------------------------------------------------------------
@@ -2248,12 +2383,16 @@ export class AtlasExplorerView extends ItemView {
 			if (payload.kind === "node") {
 				const draggedView = this.plugin.viewsManager.getView(payload.viewId);
 				if (draggedView) {
-					for (const nodeId of payload.nodeIds) {
-						const dragged = this.findNodeAnywhere(draggedView.root, nodeId);
-						// PR 13: unplaceNode removes this exact dragged instance, not every duplicate of
-						// the same unit that might also be placed elsewhere in this view.
-						if (dragged?.node.type === "unit") this.plugin.viewsManager.unplaceNode(payload.viewId, nodeId);
-					}
+					// PR 13: each dragged instance is removed by its own id, not every duplicate of the same unit.
+					// PR-1 (G15b): a sourced unit in the drag asks once, through the shared removal path.
+					const units = payload.nodeIds
+						.map((nodeId) => this.findNodeAnywhere(draggedView.root, nodeId)?.node)
+						.filter((node): node is ViewNode => node?.type === "unit");
+					this.removeUnitsFromView(payload.viewId, units, () => {
+						this.selectedBucketNodeIds.clear();
+						this.queueRender();
+					});
+					return;
 				}
 			}
 			this.selectedBucketNodeIds.clear();
@@ -2415,10 +2554,9 @@ export class AtlasExplorerView extends ItemView {
 		// PR 15 fix (Dan-found): status assignment governs this item's own *children*, not the item
 		// itself — an item with no children has nothing for the option to apply to, so it's hidden
 		// entirely rather than offered and doing nothing when toggled.
-		if (node.children.length > 0) {
-			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
-			menu.addSeparator();
-		}
+		// PR-1 (G11e): same Statuses / Data source… / Refresh now / Remove data source items as an Atlas folder.
+		addSourceAndStatusItems(menu, this.plugin, this, view, node);
+		menu.addSeparator();
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
 		// the same label is expected — see duplicateNode's own doc comment for why).
@@ -2427,9 +2565,9 @@ export class AtlasExplorerView extends ItemView {
 			item
 				.setTitle("Remove from view")
 				.setIcon("x")
-				// PR 13: unplaceNode removes this exact row, not every duplicate of the same unit
-				// that might also be placed elsewhere in this view.
-				.onClick(() => this.plugin.viewsManager.unplaceNode(view.id, node.id))
+				// PR 13: removes this exact row, not every duplicate of the same unit that might also be
+				// placed elsewhere in this view. PR-1 (G15a): a sourced unit confirms first.
+				.onClick(() => this.removeUnitsFromView(view.id, [node]))
 		);
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
 		// Create Module: only on a placed row for a root-level .md file (not inbox rows, not free
@@ -2476,7 +2614,7 @@ export class AtlasExplorerView extends ItemView {
 	 * PR 17) — both read/write through `ViewsManager`'s generic `getStatusGovernance`/
 	 * `updateStatusGovernance`, so this one method serves both without knowing which kind of
 	 * governor it's actually editing. */
-	private openStatusesModal(view: View, nodeId: string | null): void {
+	openStatusesModal(view: View, nodeId: string | null): void {
 		const governance = this.plugin.viewsManager.getStatusGovernance(view.id, nodeId);
 		if (!governance) return;
 		new StatusesModal(this.plugin.app, this.plugin.statusesManager.getStatusSets(), governance, (patch) =>
@@ -2549,6 +2687,46 @@ export class AtlasExplorerView extends ItemView {
 		menu.showAtMouseEvent(evt);
 	}
 
+	/** PR-1 (G15): true when a node holds a live data source. Its device-local headers and Outside path
+	 * are what a removal would otherwise leave behind on this device. Static rows left by "Remove data
+	 * source" don't count — that action already cleared the headers. */
+	private holdsLiveDataSource(node: ViewNode): boolean {
+		return Boolean(node.apiSource || node.csvSource || node.markdownTableSource || node.folderSource);
+	}
+
+	/** PR-1 (G15e): drops a node's device-local source state — its headers (`ApiHeadersStore`) and its
+	 * Outside-Vault path (`FolderSourcePathStore`). Both are keyed by node id and never synced. Shared
+	 * by every path that deletes a sourced node, so none of them can forget one of the two. */
+	private forgetDeviceLocalSourceState(nodeId: string): void {
+		this.plugin.apiHeadersStore.delete(nodeId);
+		this.plugin.folderSourcePathStore.delete(nodeId);
+	}
+
+	/** PR-1 (G15a/b): the one "remove these units from the view" path, used by Remove from view, the
+	 * Delete key (single and multi-selection), drag-to-inbox and a missing row's own remove button.
+	 * Units holding a live source get a single confirm for the whole batch; confirming clears each one's
+	 * device-local state, cancelling changes nothing (`after` runs only once removal has happened).
+	 * Units without a live source are removed straight away, as before. */
+	private removeUnitsFromView(viewId: string, units: ViewNode[], after?: () => void): void {
+		const removeAll = () => {
+			for (const node of units) {
+				if (this.holdsLiveDataSource(node)) this.forgetDeviceLocalSourceState(node.id);
+				this.plugin.viewsManager.unplaceNode(viewId, node.id);
+			}
+			after?.();
+		};
+		const sourced = units.filter((node) => this.holdsLiveDataSource(node));
+		if (sourced.length === 0) {
+			removeAll();
+			return;
+		}
+		const message =
+			sourced.length === 1
+				? `Remove "${unitBasename(sourced[0])}" from this view? Its data source will stop refreshing, and its saved headers and folder path on this device will be deleted. Nothing on disk changes.`
+				: `Remove ${sourced.length} items with data sources from this view? Their data sources will stop refreshing, and their saved headers and folder paths on this device will be deleted. Nothing on disk changes.`;
+		new ConfirmModal(this.plugin.app, message, "Remove", removeAll).open();
+	}
+
 	private showMetaFolderMenu(evt: MouseEvent, node: ViewNode, view: View): void {
 		const menu = new Menu();
 		// PR 13: same clone-as-sibling action as a unit row's context menu — a meta folder has no
@@ -2569,126 +2747,7 @@ export class AtlasExplorerView extends ItemView {
 		// keeps its place, settings and children). Offered on every meta folder, whatever its children,
 		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
-		// R6: an API-only Folder has no real children yet still governs its API rows' statuses (G8) —
-		// without `node.apiSource` here, such a Folder could never configure a status set at all. G4:
-		// a Folder whose source was removed can still be carrying static rows from before — same reason
-		// applies just as much to those.
-		if (node.children.length > 0 || nodeHasApiRows(node)) {
-			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
-		}
-		menu.addSeparator();
-		menu.addItem((item) =>
-			item
-				.setTitle("Data source…")
-				.setIcon("plug-zap")
-				.onClick(() => this.openApiSourceModal(view, node))
-		);
-		if (node.apiSource) {
-			menu.addItem((item) =>
-				item
-					.setTitle("Refresh now")
-					.setIcon("refresh-cw")
-					.onClick(() => {
-						// R8/G13: mobile shows cached rows only — say so rather than silently doing nothing.
-						if (Platform.isMobile) {
-							new Notice("Refreshing isn't available on mobile — showing cached rows.");
-							return;
-						}
-						this.refreshApiSource(view, node, "manual");
-					})
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle("Remove data source")
-					.setIcon("unplug")
-					.onClick(() => {
-						new ConfirmModal(
-							this.plugin.app,
-							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
-							"Remove",
-							() => {
-								this.plugin.viewsManager.setApiSource(view.id, node.id, undefined);
-								// R4/G4: the source config itself includes headers (device-local, in
-								// ApiHeadersStore) — Remove drops those too, same as Delete folder already
-								// does, so a bearer token doesn't linger on the device or silently reappear
-								// if a source is added back to this Folder later.
-								this.plugin.apiHeadersStore.delete(node.id);
-							}
-						).open();
-					})
-			);
-		} else if (node.folderSource) {
-			// PR-4 (G10): reuses the exact same menu actions as an API source — "Refresh now" re-runs
-			// the (synchronous, disk-read-only) reconciliation; "Remove data source" just stops it,
-			// since the children it already placed are ordinary real units with nowhere else to go.
-			menu.addItem((item) =>
-				item
-					.setTitle("Refresh now")
-					.setIcon("refresh-cw")
-					.onClick(() => this.refreshFolderSource(view, node))
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle("Remove data source")
-					.setIcon("unplug")
-					.onClick(() => {
-						new ConfirmModal(
-							this.plugin.app,
-							`Remove the data source from "${node.label}"? Its current children stay in place as plain units — it just stops refreshing.`,
-							"Remove",
-							() => this.plugin.viewsManager.setFolderSource(view.id, node.id, undefined)
-						).open();
-					})
-			);
-		} else if (node.csvSource) {
-			// PR-7: reuses the exact same menu actions as an API source — "Refresh now" re-reads+parses
-			// the file (no mobile guard, see `refreshCsvSource`'s own doc comment); "Remove data source"
-			// just stops it, same as an API source's own Remove (rows stay in place). CSV has no
-			// device-local headers store to clean up on removal.
-			menu.addItem((item) =>
-				item
-					.setTitle("Refresh now")
-					.setIcon("refresh-cw")
-					.onClick(() => this.refreshCsvSource(view, node, "manual"))
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle("Remove data source")
-					.setIcon("unplug")
-					.onClick(() => {
-						new ConfirmModal(
-							this.plugin.app,
-							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
-							"Remove",
-							() => this.plugin.viewsManager.setCsvSource(view.id, node.id, undefined)
-						).open();
-					})
-			);
-		} else if (node.markdownTableSource) {
-			// PR-8: reuses the exact same menu actions as a CSV source — "Refresh now" re-reads+parses
-			// the file (no mobile guard, see `refreshMarkdownTableSource`'s own doc comment); "Remove
-			// data source" just stops it, same as a CSV source's own Remove (rows stay in place).
-			// Markdown Table has no device-local headers store to clean up on removal.
-			menu.addItem((item) =>
-				item
-					.setTitle("Refresh now")
-					.setIcon("refresh-cw")
-					.onClick(() => this.refreshMarkdownTableSource(view, node, "manual"))
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle("Remove data source")
-					.setIcon("unplug")
-					.onClick(() => {
-						new ConfirmModal(
-							this.plugin.app,
-							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
-							"Remove",
-							() => this.plugin.viewsManager.setMarkdownTableSource(view.id, node.id, undefined)
-						).open();
-					})
-			);
-		}
+		addSourceAndStatusItems(menu, this.plugin, this, view, node);
 		menu.addSeparator();
 		menu.addItem((item) =>
 			item
@@ -2701,8 +2760,9 @@ export class AtlasExplorerView extends ItemView {
 						"Delete",
 						() => {
 							// E6: the device-local headers entry has no home in the synced view data, so
-							// it's cleaned up here rather than inside `deleteMetaFolder` itself.
-							this.plugin.apiHeadersStore.delete(node.id);
+							// it's cleaned up here rather than inside `deleteMetaFolder` itself. PR-1 (G15e):
+							// the stored Outside-Vault path goes with it.
+							this.forgetDeviceLocalSourceState(node.id);
 							this.plugin.viewsManager.deleteMetaFolder(view.id, node.id);
 						}
 					).open();
@@ -2946,16 +3006,18 @@ export class AtlasExplorerView extends ItemView {
 			// have keyboard focus — same "drag moves the whole selection" spirit, applied to the one
 			// other batch-shaped action this view already had.
 			if (this.selectedBucketNodeIds.has(node.id) && this.selectedBucketNodeIds.size > 1) {
-				for (const id of this.selectedBucketNodeIds) {
-					const found = this.findNodeAnywhere(view.root, id);
-					if (found?.node.type === "unit") this.plugin.viewsManager.unplaceNode(view.id, id);
-				}
-				this.selectedBucketNodeIds.clear();
-				void this.render();
+				// PR-1 (G15b): one confirm for the whole selection when any of it holds a live source.
+				const units = [...this.selectedBucketNodeIds]
+					.map((id) => this.findNodeAnywhere(view.root, id)?.node)
+					.filter((n): n is ViewNode => n?.type === "unit");
+				this.removeUnitsFromView(view.id, units, () => {
+					this.selectedBucketNodeIds.clear();
+					void this.render();
+				});
 			} else if (node.type === "unit") {
-				// PR 13: unplaceNode removes this exact focused row, not every duplicate of the same
-				// unit that might also be placed elsewhere in this view.
-				this.plugin.viewsManager.unplaceNode(view.id, node.id);
+				// PR 13: removes this exact focused row, not every duplicate of the same unit that might
+				// also be placed elsewhere in this view. PR-1 (G15b): a sourced unit confirms first.
+				this.removeUnitsFromView(view.id, [node]);
 			}
 		} else if (evt.key === "F2" && node.type === "meta") {
 			evt.preventDefault();
