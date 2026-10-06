@@ -384,6 +384,16 @@ function sanitizeViewsApiFields(views: View[]): void {
 	}
 }
 
+/** PR-1.F2 (C25): a duplicated Folder source's managed rows must belong to the copy, not the original, so
+ * each source's flags and visibility are decided by its own rules. Rows nested under a managed row keep
+ * their owner too, so the whole duplicated subtree is walked. Rows owned by any other source are left alone. */
+function remapFolderSourceOwner(nodes: ViewNode[], fromOwnerId: string, toOwnerId: string): void {
+	for (const node of nodes) {
+		if (node.folderSourceOwnerId === fromOwnerId) node.folderSourceOwnerId = toOwnerId;
+		remapFolderSourceOwner(node.children, fromOwnerId, toOwnerId);
+	}
+}
+
 /** G7: a deep copy of a source config — `duplicateNode`'s clone must never share `mapping` (or any
  * later-added nested object) by reference with the original, or editing one's field mapping would
  * silently edit the other's too. */
@@ -933,6 +943,7 @@ export class ViewsManager {
 		// PR-4: same reference-sharing hazard as `apiSource` above — a shallow `{...node}` spread
 		// would leave both nodes' `folderSource` pointing at the very same object.
 		clone.folderSource = node.folderSource ? cloneFolderSource(node.folderSource) : node.folderSource;
+		if (node.folderSource) remapFolderSourceOwner(clone.children, node.id, clone.id);
 
 		return clone;
 	}
