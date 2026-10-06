@@ -1,5 +1,12 @@
-import { Debouncer, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
-import { AtlasSettingTab, AtlasSettings, DEFAULT_SETTINGS, computeDefaultExcludedFolders } from "./settings";
+import { Debouncer, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
+import {
+	AtlasSettingTab,
+	AtlasSettings,
+	DEFAULT_SETTINGS,
+	computeDefaultExcludedFolders,
+	normalizeNoAutoPromoteFolders,
+	rewriteNoAutoPromoteFolders,
+} from "./settings";
 import { UnitIndex } from "./unit-index";
 import { AddedItem, UnitRef, View } from "./types";
 import { registerAddBlockCommand } from "./commands";
@@ -116,13 +123,7 @@ export default class AtlasPlugin extends Plugin {
 			getExcludedFolders: () => this.settings.excludedFolders,
 			notify: (message, durationMs) => void new Notice(message, durationMs),
 			afterMove: () => void noticeIfLinksNotUpdated(this.app),
-			onHiddenMove: (oldPath, newPath) => {
-				// Obsidian sends no rename event for a file it has hidden, so replay the placement hooks.
-				const manualChanged = this.unitIndex.rewriteManualPromotions(oldPath, newPath);
-				const dismissedChanged = this.unitIndex.rewriteDismissedAndAddedPaths(oldPath, newPath);
-				if (manualChanged || dismissedChanged) this.persistDebounced();
-				this.viewsManager.onVaultRename(oldPath, newPath);
-			},
+			onHiddenMove: (oldPath, newPath) => this.handleHiddenMove(oldPath, newPath),
 			openDialog: (options) => openNameDialog(this.app, options),
 		});
 		this.apiHeadersStore = new ApiHeadersStore(this.app);
@@ -164,13 +165,7 @@ export default class AtlasPlugin extends Plugin {
 			})
 		);
 		this.registerEvent(
-			this.app.vault.on("rename", (file, oldPath) => {
-				const promotionsChanged = this.unitIndex.onVaultRename(file, oldPath);
-				this.viewsManager.onVaultRename(oldPath, file.path); // saves itself if anything changed
-				if (this.onModuleFolderRename(oldPath, file.path)) this.persistDebounced();
-				if (promotionsChanged) this.persistDebounced();
-				this.graduation.handleRename(file, oldPath); // last: only records the file and schedules the move for a later tick
-			})
+			this.app.vault.on("rename", (file, oldPath) => this.handleVaultRename(file, oldPath))
 		);
 		this.registerEvent(
 			this.app.vault.on("modify", (file) => {
@@ -229,6 +224,8 @@ export default class AtlasPlugin extends Plugin {
 
 	private loadFromData(data: AtlasData | null): void {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
+		// Always a fresh, normalised array: `Object.assign` above would otherwise share DEFAULT_SETTINGS' array.
+		this.settings.noAutoPromoteFolders = normalizeNoAutoPromoteFolders(data?.settings?.noAutoPromoteFolders, this.settings.poolFolder);
 		this.manualPromotions = data?.manualPromotions ?? [];
 		this.dismissedByView = data?.dismissedByView ?? {};
 		this.dismissedGlobal = data?.dismissedGlobal ?? [];
@@ -294,6 +291,34 @@ export default class AtlasPlugin extends Plugin {
 			}
 		}
 		return changed;
+	}
+
+	/** Vault rename event body, kept out of `onload`'s closure so tests can drive it directly. */
+	handleVaultRename(file: TAbstractFile, oldPath: string): void {
+		this.rewriteNoAutoPromoteOnRename(oldPath, file.path); // before onVaultRename: its folder branch rebuilds the index
+		const promotionsChanged = this.unitIndex.onVaultRename(file, oldPath);
+		this.viewsManager.onVaultRename(oldPath, file.path); // saves itself if anything changed
+		if (this.onModuleFolderRename(oldPath, file.path)) this.persistDebounced();
+		if (promotionsChanged) this.persistDebounced();
+		this.graduation.handleRename(file, oldPath); // last: only records the file and schedules the move for a later tick
+	}
+
+	/** Obsidian sends no rename event for a file it has hidden, so this replays the placement hooks. */
+	handleHiddenMove(oldPath: string, newPath: string): void {
+		this.rewriteNoAutoPromoteOnRename(oldPath, newPath); // same order as handleVaultRename: save before anything else
+		const manualChanged = this.unitIndex.rewriteManualPromotions(oldPath, newPath);
+		const dismissedChanged = this.unitIndex.rewriteDismissedAndAddedPaths(oldPath, newPath);
+		if (manualChanged || dismissedChanged) this.persistDebounced();
+		this.viewsManager.onVaultRename(oldPath, newPath);
+	}
+
+	/** Keeps `noAutoPromoteFolders` pointing at a renamed or moved folder (E4). Assigns and saves right
+	 * away, so the entry is on disk before the caller's index rebuild runs. No-op when nothing matches. */
+	private rewriteNoAutoPromoteOnRename(oldPath: string, newPath: string): void {
+		const rewritten = rewriteNoAutoPromoteFolders(this.settings.noAutoPromoteFolders, oldPath, newPath);
+		if (!rewritten) return;
+		this.settings.noAutoPromoteFolders = rewritten;
+		void this.saveSettings();
 	}
 
 	/** Settings changes are deliberate, infrequent user actions — save immediately rather than
