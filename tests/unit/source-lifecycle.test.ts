@@ -15,7 +15,6 @@ function makeSource(overrides: Partial<ApiSourceConfig> = {}): ApiSourceConfig {
 		method: "GET",
 		mapping: { idField: "id", labelField: "name" },
 		mode: "merge",
-		refreshOnViewLoad: false,
 		...overrides,
 	};
 }
@@ -25,7 +24,6 @@ function makeCsvSource(overrides: Partial<CsvSourceConfig> = {}): CsvSourceConfi
 		path: "data/items.csv",
 		mapping: { idField: "id", labelField: "name" },
 		mode: "merge",
-		refreshOnViewLoad: false,
 		...overrides,
 	};
 }

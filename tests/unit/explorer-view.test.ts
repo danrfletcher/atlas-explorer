@@ -93,7 +93,7 @@ describe("R8 — switching API->CSV drops the API source's device-local headers,
 	it("deletes the ApiHeadersStore entry when a node that had a live apiSource is switched to csv", () => {
 		FakeApiSourceModal.instances.length = 0;
 		const node = meta("m", "Folder");
-		node.apiSource = { url: "https://api.example.com/items", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false };
+		node.apiSource = { url: "https://api.example.com/items", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge" };
 
 		const apiHeadersStore = { get: vi.fn(() => []), set: vi.fn(), delete: vi.fn() };
 		const viewsManager = { setCsvSource: vi.fn() };
@@ -107,7 +107,7 @@ describe("R8 — switching API->CSV drops the API source's device-local headers,
 		);
 
 		const modal = FakeApiSourceModal.instances[0];
-		const csvSource = { path: "data/items.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge" as const, refreshOnViewLoad: false };
+		const csvSource = { path: "data/items.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge" as const };
 		modal.onSave({ type: "csv", source: csvSource });
 
 		expect(viewsManager.setCsvSource).toHaveBeenCalledWith(view.id, node.id, csvSource);
@@ -130,7 +130,7 @@ describe("R8 — switching API->CSV drops the API source's device-local headers,
 		);
 
 		const modal = FakeApiSourceModal.instances[0];
-		const csvSource = { path: "data/items.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge" as const, refreshOnViewLoad: false };
+		const csvSource = { path: "data/items.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge" as const };
 		modal.onSave({ type: "csv", source: csvSource });
 
 		expect(apiHeadersStore.delete).not.toHaveBeenCalled();

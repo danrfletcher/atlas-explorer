@@ -12,7 +12,6 @@ function source(overrides: Partial<FolderSourceConfig> = {}): FolderSourceConfig
 		path: "Projects",
 		showFiles: true,
 		showFolders: true,
-		refreshOnViewLoad: false,
 		mode: "merge",
 		...overrides,
 	};

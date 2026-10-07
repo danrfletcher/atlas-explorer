@@ -61,7 +61,7 @@ describe("F5 static check — Folder-source code touches no disk-write API", () 
 
 describe("F5 behavioral check — driving the real Folder-source paths never records a Vault write", () => {
 	function source(overrides: Partial<FolderSourceConfig> = {}): FolderSourceConfig {
-		return { location: "inside", path: "Projects", showFiles: true, showFolders: true, refreshOnViewLoad: false, ...overrides };
+		return { location: "inside", path: "Projects", showFiles: true, showFolders: true, ...overrides };
 	}
 
 	it("setFolderSource -> refreshFolderSource -> onVaultRename leaves vault.calls empty", () => {

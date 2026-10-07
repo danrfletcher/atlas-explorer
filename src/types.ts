@@ -76,7 +76,12 @@ export type Unit =
 	| { type: "promoted-block"; path: string; subpath: string }
 	/** PR-3 (G3): a file manually added to the inbox via "+" — see `AddedItem`. Always a file (the
 	 * "+" modal only ever offers `app.vault.getFiles()`, never a folder). */
-	| { type: "added-file"; path: string };
+	| { type: "added-file"; path: string }
+	/** PR-1.S1 (G2): a sub-folder manually added to the inbox — see `AddedItem`. Behaves as a module
+	 * everywhere a folder ref does (`unitToRef` maps it to a folder ref): folder icon, icon opens
+	 * Module Contents, never expands inline. Never a vault-root folder (those are already
+	 * `folder-unit`s). */
+	| { type: "added-folder"; path: string };
 
 export function unitKey(unit: Unit): string {
 	return unit.type === "promoted-block" ? `block:${unit.path}#${unit.subpath}` : `${unit.type}:${unit.path}`;
@@ -86,7 +91,7 @@ export function unitToRef(unit: Unit): UnitRef {
 	if (unit.type === "promoted-block") {
 		return { kind: "block", path: unit.path, subpath: unit.subpath };
 	}
-	if (unit.type === "folder-unit" || unit.type === "promoted-folder") {
+	if (unit.type === "folder-unit" || unit.type === "promoted-folder" || unit.type === "added-folder") {
 		return { kind: "folder", path: unit.path };
 	}
 	return { kind: "file", path: unit.path };
@@ -305,11 +310,6 @@ export interface FolderSourceConfig {
 	/** G4: both default true, independent of each other. */
 	showFiles: boolean;
 	showFolders: boolean;
-	/** G10: reuses the exact same refresh-toggle fields/semantics as `ApiSourceConfig` — no new
-	 * refresh UI or scheduler for Folder sources. */
-	refreshOnViewLoad: boolean;
-	refreshEveryMinutesEnabled?: boolean;
-	refreshEveryMinutes?: number;
 	/** PR-4 (R1 fix): `unitRefKey`-keyed refs the user has explicitly removed from this source's
 	 * managed set (via "Remove from view", the Delete key, or dragging to the inbox) — reconcile never
 	 * recreates one of these, the same way any other removed ref stays gone rather than being
@@ -339,11 +339,8 @@ export interface MarkdownTableSourceConfig {
 	tableIndex: number;
 	mapping: ApiFieldMapping;
 	mode: "append" | "merge" | "overwrite";
-	/** Refreshes automatically whenever the file at `path` is modified, in addition to reusing the
-	 * same view-load/every-N-minutes triggers as an API/CSV source — no new refresh UI. */
-	refreshOnViewLoad: boolean;
-	refreshEveryMinutesEnabled?: boolean;
-	refreshEveryMinutes?: number;
+	/** Refreshes automatically whenever the file at `path` is modified, and on every view load — no
+	 * refresh toggles (PR-1). */
 	keepOnEmpty?: boolean;
 	confirmBeforeDelete?: boolean;
 	mappingMode?: "drag" | "js";
@@ -366,11 +363,8 @@ export interface CsvSourceConfig {
 	path: string;
 	mapping: ApiFieldMapping;
 	mode: "append" | "merge" | "overwrite";
-	/** G21: refreshes automatically whenever the file at `path` is modified, in addition to reusing
-	 * the same view-load/every-N-minutes triggers as an API source. */
-	refreshOnViewLoad: boolean;
-	refreshEveryMinutesEnabled?: boolean;
-	refreshEveryMinutes?: number;
+	/** G21: refreshes automatically whenever the file at `path` is modified, and on every view load —
+	 * no refresh toggles (PR-1). */
 	keepOnEmpty?: boolean;
 	confirmBeforeDelete?: boolean;
 	mappingMode?: "drag" | "js";

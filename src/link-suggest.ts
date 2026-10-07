@@ -77,7 +77,8 @@ export class AtlasLinkSuggest extends EditorSuggest<SuggestItem> {
 		}
 
 		for (const unit of plugin.unitIndex.getUnits()) {
-			if (unit.type === "folder-unit" || unit.type === "promoted-folder") {
+			// PR-1.F1 (G13): an added folder is a module, so it is listed here like any other.
+			if (unit.type === "folder-unit" || unit.type === "promoted-folder" || unit.type === "added-folder") {
 				const folder = app.vault.getAbstractFileByPath(unit.path);
 				if (!(folder instanceof TFolder)) continue;
 				const match = search(folder.name);

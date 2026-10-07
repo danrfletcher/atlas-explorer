@@ -838,3 +838,22 @@ input.atlas-name-input.atlas-name-invalid[type="text"]:not(:disabled) {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+
+/* PR-1.F1: the "+" picker's mixed file/folder rows — the icon sits beside the path, not on its own line. */
+.atlas-add-suggest-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.atlas-add-suggest-icon {
+	display: flex;
+	flex-shrink: 0;
+	color: var(--icon-color);
+}
+
+.atlas-add-suggest-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}

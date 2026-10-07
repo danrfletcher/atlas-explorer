@@ -59,7 +59,8 @@ interface Scheduled {
 }
 
 /**
- * G5b/F3: one interval timer per API Folder that has "Refresh every X minutes" on, alive only for as
+ * G5b/F3: one interval timer per API source that has "Refresh every X minutes" on (PR-1: Folder, CSV
+ * and markdown-table sources never get one), alive only for as
  * long as this instance is told to run one (the caller starts it in the Atlas view's `onOpen` and
  * calls `stopAll()` from `onClose` — nothing here runs, or even exists, once the view is closed; F3's
  * "no scheduler outside the in-plugin toggles").
@@ -69,7 +70,7 @@ interface Scheduled {
  * timer untouched (no reset, no double-fire), one whose interval changed is rescheduled cleanly, and
  * one that's no longer eligible (toggle turned off, source removed/deleted) has its timer stopped.
  *
- * A Folder that's stale when it joins `sync()` — never refreshed, or longer than its own interval since
+ * A source that's stale when it joins `sync()` — never refreshed, or longer than its own interval since
  * the last successful fetch — fires exactly one immediate catch-up refresh, then resumes its normal
  * interval from that moment; it never bursts through every tick it missed while the view was closed.
  */
