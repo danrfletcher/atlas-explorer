@@ -123,7 +123,7 @@ describe("T1 — Folder-source-managed refs resolve as real units via UnitIndex"
 
 		vm.addMetaFolder(view1.id, null, "Outside Source");
 		const outsideOwner = vm.getViews().find((v) => v.id === view1.id)!.root[0];
-		vm.setFolderSource(view1.id, outsideOwner.id, { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false });
+		vm.setFolderSource(view1.id, outsideOwner.id, { location: "outside", path: "", showFiles: true, showFolders: true });
 
 		vm.placeUnit(view1.id, { kind: "file", path: "note.md" }, outsideOwner.id);
 		const outsideManaged = vm.getNode(view1.id, outsideOwner.id)!.children[0];

@@ -13,7 +13,6 @@ function jsSource(overrides: Partial<ApiSourceConfig> = {}): ApiSourceConfig {
 		method: "GET",
 		mapping: { idField: "id", labelField: "name" },
 		mode: "merge",
-		refreshOnViewLoad: false,
 		refreshEveryMinutesEnabled: false,
 		refreshEveryMinutes: undefined,
 		keepOnEmpty: undefined,

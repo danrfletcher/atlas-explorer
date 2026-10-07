@@ -497,26 +497,23 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- G1/G5/G6/G11: API-backed Folders ---------------------------------------------------------
 
-	/** G5a/PR-4 (G10): refreshes every Folder in the active view that has "refresh when Atlas view
-	 * loads" on — both API and (Inside-Vault) Folder sources, reusing this same trigger/toggle. */
+	/** G5a/PR-4 (G10): refreshes every API source in the active view that has "refresh when Atlas view
+	 * loads" on. PR-1 (G4): every Folder (inside and outside), CSV and markdown-table source in the
+	 * active view refreshes on load with no toggle — those three types have no refresh settings at all
+	 * any more, and their live triggers (vault events, file saves) cover everything between loads. */
 	private refreshApiSourcesOnViewLoad(): void {
 		const view = this.plugin.viewsManager.getActiveView();
 		for (const node of this.collectApiSourceNodes(view.root)) {
 			if (node.apiSource?.refreshOnViewLoad) this.refreshApiSource(view, node, "automatic");
 		}
 		for (const node of this.collectFolderSourceNodes(view.root)) {
-			// G11: Outside-Vault's connection/children check on load is mandatory, independent of the
-			// optional "refresh on view load" toggle (G10) — Inside-Vault keeps the toggle-gated
-			// behavior unchanged, exactly as before this PR.
-			if (node.folderSource?.refreshOnViewLoad || node.folderSource?.location === "outside") {
-				this.refreshFolderSource(view, node);
-			}
+			this.refreshFolderSource(view, node);
 		}
 		for (const node of this.collectCsvSourceNodes(view.root)) {
-			if (node.csvSource?.refreshOnViewLoad) this.refreshCsvSource(view, node, "automatic");
+			this.refreshCsvSource(view, node, "automatic");
 		}
 		for (const node of this.collectMarkdownTableSourceNodes(view.root)) {
-			if (node.markdownTableSource?.refreshOnViewLoad) this.refreshMarkdownTableSource(view, node, "automatic");
+			this.refreshMarkdownTableSource(view, node, "automatic");
 		}
 	}
 
@@ -526,6 +523,9 @@ export class AtlasExplorerView extends ItemView {
 	 * automatically; the indicator dot itself needs no separate refresh call since it already
 	 * recomputes `resolveOutsidePath` live on every render. */
 	private refreshOutsideFolderSourcesOnFocus(): void {
+		// PR-2 (G7): focus is also the retry for a closed or failed watcher, so a replugged drive
+		// reconnects here, before the rows reconcile below.
+		this.plugin.outsideFolderWatchers.retry();
 		const view = this.plugin.viewsManager.getActiveView();
 		for (const node of this.collectFolderSourceNodes(view.root)) {
 			if (node.folderSource?.location === "outside") this.refreshFolderSource(view, node);
@@ -583,12 +583,11 @@ export class AtlasExplorerView extends ItemView {
 		return out;
 	}
 
-	/** G5b/F3/PR-4 (G10): (re)schedules this Atlas view's "Refresh every X minutes" timers against
-	 * the active View's current set of eligible Folders — both API and Folder sources feed the same
-	 * scheduler (`RefreshEveryTimers` is already source-type-agnostic), so no new scheduler is
-	 * introduced for Folder sources. Called after every render, so a saved config change (interval
-	 * edited, toggle flipped, source removed) reschedules cleanly on the very next render rather than
-	 * needing a dedicated call site of its own for each way that can happen. */
+	/** G5b/F3: (re)schedules this Atlas view's "Refresh every X minutes" timers against the active
+	 * View's current set of eligible API sources. PR-1 (G2): Folder, CSV and markdown-table sources no
+	 * longer have that setting, so they never get a timer here. Called after every render, so a saved
+	 * config change (interval edited, toggle flipped, source removed) reschedules cleanly on the very
+	 * next render rather than needing a dedicated call site of its own for each way that can happen. */
 	private syncRefreshTimers(view: View): void {
 		const apiNodes = this.collectApiSourceNodes(view.root)
 			.filter((node) => node.apiSource?.refreshEveryMinutesEnabled)
@@ -598,56 +597,10 @@ export class AtlasExplorerView extends ItemView {
 				minutes: node.apiSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
 				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
 			}));
-		const folderNodes = this.collectFolderSourceNodes(view.root)
-			.filter((node) => node.folderSource?.refreshEveryMinutesEnabled)
-			.map((node) => ({
-				id: node.id,
-				enabled: true,
-				minutes: node.folderSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
-				// PR-4: a Folder source has no fetch-timestamp cache of its own (its "cache" is just the
-				// real children it manages) — always `null`, so a never-refreshed Folder fires one
-				// immediate catch-up refresh the same way a never-fetched API source does.
-				lastFetchedAt: null,
-			}));
-		// PR-7: a CSV source shares `apiCache` with API sources (same shape, same `fetchedAt`), so its
-		// timer entry is built exactly like `apiNodes` above.
-		const csvNodes = this.collectCsvSourceNodes(view.root)
-			.filter((node) => node.csvSource?.refreshEveryMinutesEnabled)
-			.map((node) => ({
-				id: node.id,
-				enabled: true,
-				minutes: node.csvSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
-				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
-			}));
-		// PR-8: a Markdown Table source shares `apiCache` with API/CSV sources, so its timer entry is
-		// built exactly like `csvNodes` above.
-		const mdTableNodes = this.collectMarkdownTableSourceNodes(view.root)
-			.filter((node) => node.markdownTableSource?.refreshEveryMinutesEnabled)
-			.map((node) => ({
-				id: node.id,
-				enabled: true,
-				minutes: node.markdownTableSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
-				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
-			}));
-		this.refreshEveryTimers.sync([...apiNodes, ...folderNodes, ...csvNodes, ...mdTableNodes], (nodeId) => {
+		this.refreshEveryTimers.sync(apiNodes, (nodeId) => {
 			const activeView = this.plugin.viewsManager.getActiveView();
 			const apiTarget = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (apiTarget) {
-				this.refreshApiSource(activeView, apiTarget, "automatic");
-				return;
-			}
-			const folderTarget = this.collectFolderSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (folderTarget) {
-				this.refreshFolderSource(activeView, folderTarget);
-				return;
-			}
-			const csvTarget = this.collectCsvSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (csvTarget) {
-				this.refreshCsvSource(activeView, csvTarget, "automatic");
-				return;
-			}
-			const mdTableTarget = this.collectMarkdownTableSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (mdTableTarget) this.refreshMarkdownTableSource(activeView, mdTableTarget, "automatic");
+			if (apiTarget) this.refreshApiSource(activeView, apiTarget, "automatic");
 		});
 	}
 
@@ -1936,8 +1889,6 @@ export class AtlasExplorerView extends ItemView {
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		this.renderRowIcon(iconEl, view, node, ancestors, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
-		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
-		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) {
 			row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });

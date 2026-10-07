@@ -13,7 +13,6 @@ function baseSource(path: string, overrides: Partial<CsvSourceConfig> = {}): Csv
 		path,
 		mapping: { idField: "id", labelField: "name" },
 		mode: "merge",
-		refreshOnViewLoad: false,
 		...overrides,
 	};
 }

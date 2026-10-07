@@ -303,7 +303,7 @@ function fileAt(path: string): TFile {
 describe("E4: renames and moves rewrite noAutoPromoteFolders before the index rebuild", () => {
 	it("folder rename rewrites the entry, saves, and only then rebuilds the index", () => {
 		const { plugin, fx, order, saveData } = renamePlugin({ noAutoPromoteFolders: ["Attachments", "Projects/Old/assets"] });
-		(plugin as unknown as { handleVaultRename(f: TFolder, old: string): void }).handleVaultRename(folderAt("Media"), "Attachments");
+		(plugin as unknown as { onVaultRenameEvent(f: TFolder, old: string): void }).onVaultRenameEvent(folderAt("Media"), "Attachments");
 		expect(fx.settings.noAutoPromoteFolders).toEqual(["Media", "Projects/Old/assets"]);
 		expect(saveData).toHaveBeenCalledTimes(1);
 		expect(saveData.mock.calls[0][0]).toMatchObject({ settings: { noAutoPromoteFolders: ["Media", "Projects/Old/assets"] } });
@@ -312,28 +312,28 @@ describe("E4: renames and moves rewrite noAutoPromoteFolders before the index re
 
 	it("parent rename rewrites a nested entry by prefix", () => {
 		const { plugin, fx, order } = renamePlugin({ noAutoPromoteFolders: ["Projects/Old/assets"] });
-		(plugin as unknown as { handleVaultRename(f: TFolder, old: string): void }).handleVaultRename(folderAt("Projects/New"), "Projects/Old");
+		(plugin as unknown as { onVaultRenameEvent(f: TFolder, old: string): void }).onVaultRenameEvent(folderAt("Projects/New"), "Projects/Old");
 		expect(fx.settings.noAutoPromoteFolders).toEqual(["Projects/New/assets"]);
 		expect(order.indexOf("save")).toBeLessThan(order.indexOf("rebuild"));
 	});
 
 	it("a move of a listed folder into another parent rewrites the entry", () => {
 		const { plugin, fx } = renamePlugin({ noAutoPromoteFolders: ["Attachments"] });
-		(plugin as unknown as { handleVaultRename(f: TFolder, old: string): void }).handleVaultRename(folderAt("Archive/Attachments"), "Attachments");
+		(plugin as unknown as { onVaultRenameEvent(f: TFolder, old: string): void }).onVaultRenameEvent(folderAt("Archive/Attachments"), "Attachments");
 		expect(fx.settings.noAutoPromoteFolders).toEqual(["Archive/Attachments"]);
 	});
 
 	it("an unrelated rename changes no setting and saves nothing", () => {
 		const { plugin, fx, saveData } = renamePlugin({ noAutoPromoteFolders: ["Attachments"] });
 		const before = fx.settings.noAutoPromoteFolders;
-		(plugin as unknown as { handleVaultRename(f: TFile, old: string): void }).handleVaultRename(fileAt("Notes/Hartley.md"), "Hartley Haulage.md");
+		(plugin as unknown as { onVaultRenameEvent(f: TFile, old: string): void }).onVaultRenameEvent(fileAt("Notes/Hartley.md"), "Hartley Haulage.md");
 		expect(fx.settings.noAutoPromoteFolders).toBe(before);
 		expect(saveData).not.toHaveBeenCalled();
 	});
 
 	it("a prefix lookalike is not rewritten", () => {
 		const { plugin, fx } = renamePlugin({ noAutoPromoteFolders: ["Attachments"] });
-		(plugin as unknown as { handleVaultRename(f: TFolder, old: string): void }).handleVaultRename(folderAt("Media"), "Attachments2");
+		(plugin as unknown as { onVaultRenameEvent(f: TFolder, old: string): void }).onVaultRenameEvent(folderAt("Media"), "Attachments2");
 		expect(fx.settings.noAutoPromoteFolders).toEqual(["Attachments"]);
 	});
 
