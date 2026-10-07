@@ -10,6 +10,13 @@ function setRefMembership(list: UnitRef[], ref: UnitRef, value: boolean): UnitRe
 	return value ? [...list, ref] : list.filter((existing) => !unitRefsEqual(existing, ref));
 }
 
+/** PR-1.S1: `data.json` is hand-editable, so an `addedItems` entry with a missing ref, an unknown
+ * kind, or a non-string path is skipped by every reader rather than allowed to throw. */
+function isUsableAddedItem(item: AddedItem): boolean {
+	const ref = item?.ref;
+	return !!ref && (ref.kind === "file" || ref.kind === "folder" || ref.kind === "block") && typeof ref.path === "string";
+}
+
 /**
  * In-memory index of every unit in the vault (F2). Rebuilt fully on load, then kept current by
  * two separate incremental paths: vault structure events (create/delete/rename — cheap, O(1) per
@@ -68,12 +75,16 @@ export class UnitIndex {
 	}
 
 	getUnits(): Unit[] {
-		const addedRefKeys = new Set(this.addedItems.map((item) => unitRefKey(item.ref)));
+		const usableAdded = this.addedItems.filter(isUsableAddedItem);
+		const addedRefKeys = new Set(usableAdded.map((item) => unitRefKey(item.ref)));
 		// R3: "added" is a terminal state later promotion passes never rewrite (spec edge case) — a
 		// promoted-file unit for a path that was manually added is dropped here so the "added" badge
 		// keeps surfacing instead of flipping to "promoted" once the file is also auto-/manually
 		// promoted. This covers both auto-promotion and manual promotion, since both land in
 		// `promotedFiles` (see `applyManualPromotions`).
+		// PR-1.S1 (G8): the same terminal rule for folders — an added-folder suppresses any promoted-folder
+		// (link, Module Contents promote-and-place, or Folder source) with the same key, so the folder is
+		// always one row and keeps "added".
 		const base = [
 			...this.folderUnits.values(),
 			...this.baseFileUnits.values(),
@@ -82,7 +93,10 @@ export class UnitIndex {
 			...this.promotedBlocks.values(),
 			// Folder-source units sit in `base` so the R3 and R1 rules below treat them like any other promoted unit.
 			...this.folderSourceUnits.values(),
-		].filter((unit) => !(unit.type === "promoted-file" && addedRefKeys.has(unitRefKey(unitToRef(unit)))));
+		].filter((unit) => {
+			if (unit.type !== "promoted-file" && unit.type !== "promoted-folder") return true;
+			return !addedRefKeys.has(unitRefKey(unitToRef(unit)));
+		});
 		// R1 (E4): dedup the added-file overlay by *file-kind ref*, not by bare path — a promoted-block
 		// unit's `.path` is its containing file's path (it's still kind "block" per `unitToRef`), so it
 		// must never shadow that same file's own added-file row. Only a unit that is itself a file-kind
@@ -90,10 +104,18 @@ export class UnitIndex {
 		const knownFileRefKeys = new Set(
 			base.filter((unit) => unitToRef(unit).kind === "file").map((unit) => unitRefKey(unitToRef(unit)))
 		);
-		const added: Unit[] = this.addedItems
+		const added: Unit[] = usableAdded
 			.filter((item) => item.ref.kind === "file" && !knownFileRefKeys.has(unitRefKey(item.ref)))
 			.map((item) => ({ type: "added-file", path: item.ref.path }));
-		const all = [...base, ...added];
+		// PR-1.S1 (G2): one row per added folder, however many duplicate entries `addedItems` holds.
+		const addedFolderKeys = new Set<string>();
+		const addedFolders: Unit[] = [];
+		for (const item of usableAdded) {
+			if (item.ref.kind !== "folder" || addedFolderKeys.has(unitRefKey(item.ref))) continue;
+			addedFolderKeys.add(unitRefKey(item.ref));
+			addedFolders.push({ type: "added-folder", path: item.ref.path });
+		}
+		const all = [...base, ...added, ...addedFolders];
 		return this.held.size === 0 ? all : all.filter((unit) => !this.held.has(unit.path));
 	}
 
@@ -189,7 +211,7 @@ export class UnitIndex {
 	}
 
 	isAdded(ref: UnitRef): boolean {
-		return this.addedItems.some((item) => unitRefsEqual(item.ref, ref));
+		return this.addedItems.some((item) => isUsableAddedItem(item) && unitRefsEqual(item.ref, ref));
 	}
 
 	/** True when `unit` is promoted only because a link or embed reaches it, and its path sits under a
@@ -205,7 +227,8 @@ export class UnitIndex {
 	}
 
 	/** No corresponding "unmark added" — per F1, dismiss is the only removal mechanism for every
-	 * inbox item regardless of how it got there, including one added via "+". */
+	 * inbox item regardless of how it got there, including one added via "+". Accepts a folder ref
+	 * (PR-1.S1, G2) as well as a file ref. Adds to the in-memory list only: the caller persists. */
 	markAdded(ref: UnitRef): void {
 		if (this.isAdded(ref)) return;
 		this.addedItems.push({ ref, tag: "added" });
@@ -456,11 +479,25 @@ export class UnitIndex {
 			changed = true;
 		}
 
-		const rewrittenAdded = this.addedItems.map((item) => {
+		// PR-1.S1 (E7): an added folder moved to the vault root drops its entry — root folders are never
+		// addable, and a root folder already surfaces as a `folder-unit` with its placement intact.
+		const rewrittenAdded: AddedItem[] = [];
+		let addedChanged = false;
+		for (const item of this.addedItems) {
+			if (!isUsableAddedItem(item)) {
+				rewrittenAdded.push(item);
+				continue;
+			}
 			const rewritten = rewriteRefPath(item.ref, oldPath, newPath);
-			return rewritten === item.ref ? item : { ...item, ref: rewritten };
-		});
-		if (rewrittenAdded.some((item, i) => item !== this.addedItems[i])) {
+			if (rewritten === item.ref) {
+				rewrittenAdded.push(item);
+				continue;
+			}
+			addedChanged = true;
+			if (item.ref.kind === "folder" && !rewritten.path.includes("/")) continue;
+			rewrittenAdded.push({ ...item, ref: rewritten });
+		}
+		if (addedChanged) {
 			this.addedItems = rewrittenAdded;
 			changed = true;
 		}
