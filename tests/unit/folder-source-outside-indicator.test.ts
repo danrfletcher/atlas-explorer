@@ -26,15 +26,14 @@ function folderMeta(id: string, folderSource: Partial<ViewNode["folderSource"]> 
 		path: "",
 		showFiles: true,
 		showFolders: true,
-		refreshOnViewLoad: false,
 		...folderSource,
 	};
 	return node;
 }
 
 describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is unconditional, independent of the refreshOnViewLoad toggle", () => {
-	it("an Outside-Vault source with refreshOnViewLoad OFF is still refreshed on view load", () => {
-		const outside = folderMeta("outside-off", { location: "outside", refreshOnViewLoad: false });
+	it("an Outside-Vault source is refreshed on view load with no refresh setting at all", () => {
+		const outside = folderMeta("outside-off", { location: "outside" });
 		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [outside] };
 		const refreshFolderSource = vi.fn();
 		const fake = {
@@ -54,8 +53,8 @@ describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is uncondition
 		expect(refreshFolderSource).toHaveBeenCalledWith(view, outside);
 	});
 
-	it("an Inside-Vault source with refreshOnViewLoad OFF is NOT refreshed on view load (unchanged PR-4 behavior)", () => {
-		const inside = folderMeta("inside-off", { location: "inside", refreshOnViewLoad: false });
+	it("an Inside-Vault source is refreshed on view load with no toggle (PR-1 G4: the toggle is gone)", () => {
+		const inside = folderMeta("inside-off", { location: "inside" });
 		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [inside] };
 		const refreshFolderSource = vi.fn();
 		const fake = {
@@ -72,11 +71,11 @@ describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is uncondition
 
 		proto.refreshApiSourcesOnViewLoad.call(fake);
 
-		expect(refreshFolderSource).not.toHaveBeenCalled();
+		expect(refreshFolderSource).toHaveBeenCalledWith(view, inside);
 	});
 
-	it("an Inside-Vault source with refreshOnViewLoad ON is still refreshed on view load (toggle gate unchanged)", () => {
-		const inside = folderMeta("inside-on", { location: "inside", refreshOnViewLoad: true });
+	it("an Inside-Vault source is refreshed on view load regardless of any legacy refreshOnViewLoad value", () => {
+		const inside = folderMeta("inside-on", { location: "inside", refreshOnViewLoad: true } as never);
 		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [inside] };
 		const refreshFolderSource = vi.fn();
 		const fake = {
@@ -105,7 +104,7 @@ describe("G11/F10 — recheck-on-focus-regain rule", () => {
 		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [outsideA, inside, outsideB] };
 		const refreshFolderSource = vi.fn();
 		const fake = {
-			plugin: { viewsManager: { getActiveView: () => view } },
+			plugin: { viewsManager: { getActiveView: () => view }, outsideFolderWatchers: { retry: vi.fn() } },
 			collectFolderSourceNodes: proto.collectFolderSourceNodes,
 			refreshFolderSource,
 		};

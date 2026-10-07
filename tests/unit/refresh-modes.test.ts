@@ -190,7 +190,6 @@ describe("ApiSourceController — R7(a): a duplicate-id response through the ful
 			method: "GET",
 			mapping: { idField: "id", labelField: "name" },
 			mode,
-			refreshOnViewLoad: false,
 			...overrides,
 		};
 	}

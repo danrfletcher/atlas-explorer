@@ -21,7 +21,6 @@ describe("R9 — Outside-Vault child refs never collide with same-named vault-ro
 			path: "",
 			showFiles: true,
 			showFolders: true,
-			refreshOnViewLoad: false,
 			removedRefs: ["folder:Projects"],
 		});
 
@@ -52,7 +51,6 @@ describe("R9 — Outside-Vault child refs never collide with same-named vault-ro
 			path: "Projects",
 			showFiles: true,
 			showFolders: true,
-			refreshOnViewLoad: false,
 			removedRefs: ["folder:Projects/Removed"],
 		});
 
@@ -76,7 +74,7 @@ describe("R9 — Outside-Vault child refs never collide with same-named vault-ro
 
 		vm.addMetaFolder(view.id, null, "Outside Source");
 		const owner = vm.getViews()[0].root[0];
-		vm.setFolderSource(view.id, owner.id, { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false });
+		vm.setFolderSource(view.id, owner.id, { location: "outside", path: "", showFiles: true, showFolders: true });
 
 		vm.placeUnit(view.id, { kind: "file", path: "notes.md" }, owner.id);
 		const outsideChild = vm.getNode(view.id, owner.id)!.children[0];
@@ -108,7 +106,7 @@ describe("R9 — Outside-Vault child refs never collide with same-named vault-ro
 
 		vm.addMetaFolder(view.id, null, "Outside Source");
 		const owner = vm.getViews()[0].root[0];
-		vm.setFolderSource(view.id, owner.id, { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false });
+		vm.setFolderSource(view.id, owner.id, { location: "outside", path: "", showFiles: true, showFolders: true });
 
 		vm.placeUnit(view.id, { kind: "file", path: "notes.md" }, owner.id);
 		const outsideChild = vm.getNode(view.id, owner.id)!.children[0];

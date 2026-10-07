@@ -9,7 +9,6 @@ function makePr2Source(): ApiSourceConfig {
 		method: "GET",
 		mapping: { idField: "id", labelField: "name" },
 		mode: "merge",
-		refreshOnViewLoad: false,
 	};
 }
 
@@ -65,7 +64,6 @@ describe("source-migration — G9b/PR-5: PR-2 sources load with action = open at
 				extraFields: { path: "raw_path" },
 			},
 			mode: "merge",
-			refreshOnViewLoad: false,
 			action: "run-command",
 			command: "record-args {path}",
 		};

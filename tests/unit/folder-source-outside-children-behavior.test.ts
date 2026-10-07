@@ -55,7 +55,7 @@ async function renderUnitRow(node: ViewNode, fakeOverrides: Record<string, unkno
 
 describe("G8/F7 — drag-disabled rule", () => {
 	it("an Outside-Vault-managed child renders with draggable=false", async () => {
-		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false } });
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true } });
 		const node = unit("c1", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 
 		const { row } = await renderUnitRow(node, { ownerNode: owner });
@@ -70,7 +70,7 @@ describe("G8/F7 — drag-disabled rule", () => {
 	});
 
 	it("an Inside-Vault Folder-source-managed child still renders with draggable=true (unaffected, G7)", async () => {
-		const owner = meta("owner", "Folder", [], { folderSource: { location: "inside", path: "Projects", showFiles: true, showFolders: true, refreshOnViewLoad: false } });
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "inside", path: "Projects", showFiles: true, showFolders: true } });
 		const node = unit("c3", file("Projects/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 
 		const { row } = await renderUnitRow(node, { ownerNode: owner });
@@ -79,7 +79,7 @@ describe("G8/F7 — drag-disabled rule", () => {
 	});
 
 	it("a dragstart listener is never attached to an Outside-Vault-managed row — firing dragstart never sets dragPayload", async () => {
-		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false } });
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true } });
 		const node = unit("c1", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 
 		const { row, fake } = await renderUnitRow(node, { ownerNode: owner });
@@ -100,7 +100,7 @@ describe("G8/F7 — drag-disabled rule", () => {
 
 describe("G8/F7 — nest-disabled rule: an Outside-Vault-managed row is never made a drop zone", () => {
 	it("makeDropZone is never called for an Outside-Vault-managed row", async () => {
-		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false } });
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true } });
 		const node = unit("c1", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 
 		const { fake } = await renderUnitRow(node, { ownerNode: owner });
@@ -118,7 +118,7 @@ describe("G8/F7 — nest-disabled rule: an Outside-Vault-managed row is never ma
 
 describe("G8/F7 — rename-disabled rule: wireModuleRow (the only rename mechanic for a folder-kind unit row) is never wired for an Outside-Vault-managed child", () => {
 	it("a folder-kind Outside-Vault-managed child never calls wireModuleRow", async () => {
-		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false } });
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true } });
 		const node = unit("c1", folder("/Volumes/External/Notes/Sub"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 
 		const { fake } = await renderUnitRow(node, { ownerNode: owner, resolveOutsideManagedRowInfo: () => ({ text: "Sub", icon: "folder", promoted: false, missing: false }) });
@@ -162,7 +162,7 @@ describe("status/sort/truncate-still-enabled rule — an Outside-Vault-managed r
 describe("renderNodeList — R1/R2: render-time skip for an unresolved Outside-Vault source (real isOutsideManagedAndUnresolved)", () => {
 	it("skips an Outside-managed node entirely while its owning source's path doesn't resolve, rendering only the ordinary node", async () => {
 		const owner = meta("owner", "Folder", [], {
-			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false },
+			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true },
 		});
 		const outsideManaged = realNode("outside-a", { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 		const ordinary = realNode("ordinary");
@@ -187,7 +187,7 @@ describe("renderNodeList — R1/R2: render-time skip for an unresolved Outside-V
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "atlas-outside-render-recover-test-"));
 		try {
 			const owner = meta("owner", "Folder", [], {
-				folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false },
+				folderSource: { location: "outside", path: "", showFiles: true, showFolders: true },
 			});
 			const outsideManaged = realNode("outside-a", { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 			const ordinary = realNode("ordinary");
@@ -229,7 +229,7 @@ describe("buildNodeDragPayload — R3: an Outside-Vault-managed node id never ri
 
 	it("R3: dragging an ordinary row that's multi-selected alongside an Outside-managed row excludes the Outside-managed id from the payload", () => {
 		const owner = meta("owner", "Folder", [], {
-			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false },
+			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true },
 		});
 		const outsideChild = unit("outside-c", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 		const ordinary = unit("ordinary-c", file("Notes/b.md"));
@@ -273,7 +273,7 @@ describe("buildNodeDragPayload — R3: an Outside-Vault-managed node id never ri
 
 describe("R9(c) — clicking or pressing Enter on an Outside-Vault-managed row never calls openRef: its ref.path is a bare name relative to the source's root, not a vault path, so opening it would open (or create) an unrelated same-named vault-root file/module instead of doing nothing", () => {
 	it("the row's click handler no-ops instead of calling openRef", async () => {
-		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false } });
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true } });
 		const node = unit("c1", file("notes.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 
 		const { row, fake } = await renderUnitRow(node, { ownerNode: owner });
@@ -291,7 +291,7 @@ describe("R9(c) — clicking or pressing Enter on an Outside-Vault-managed row n
 	});
 
 	it("handleRowKeydown's real implementation no-ops Enter on an Outside-managed row instead of calling openRef", () => {
-		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false } });
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true } });
 		const node = unit("c1", file("notes.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
 		const getNode = vi.fn((_viewId: string, nodeId: string) => (nodeId === "owner" ? owner : null));
 		const fake = {
