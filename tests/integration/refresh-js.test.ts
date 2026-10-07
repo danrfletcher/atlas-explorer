@@ -19,7 +19,6 @@ function jsSource(source: string, overrides: Partial<ApiSourceConfig> = {}): Api
 		method: "GET",
 		mapping: { idField: "id", labelField: "name" },
 		mode: "merge",
-		refreshOnViewLoad: false,
 		mappingMode: "js",
 		jsSource: source,
 		...overrides,

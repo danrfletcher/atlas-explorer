@@ -1,4 +1,4 @@
-import { Debouncer, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
+import { Debouncer, Notice, Platform, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
 import { AtlasSettingTab, AtlasSettings, DEFAULT_SETTINGS, computeDefaultExcludedFolders } from "./settings";
 import { UnitIndex } from "./unit-index";
 import { AddedItem, UnitRef, View } from "./types";
@@ -7,6 +7,8 @@ import { AtlasLinkSuggest } from "./link-suggest";
 import { applySuggesterPrecedence, removeSuggesterPrecedence } from "./suggester-precedence";
 import { FreeBlockTextCache, freeBlockLivePreviewPlugin, registerBlockLinkDisplayPostProcessor } from "./block-link-display";
 import { ViewsManager } from "./views";
+import { FolderLiveRefresh } from "./folder-live-refresh";
+import { parentFolderPath } from "./folder-source";
 import { ATLAS_VIEW_TYPE, AtlasExplorerView } from "./explorer-view";
 import { registerF10Commands } from "./f10-commands";
 import { closeNameDialog, openNameDialog } from "./name-dialog";
@@ -16,6 +18,8 @@ import { registerTestHarness } from "./test-harness";
 import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
 import { ApiHeadersStore } from "./api-headers-store";
 import { FolderSourcePathStore } from "./folder-source-path-store";
+import { resolveOutsidePath } from "./folder-source-outside";
+import { FolderSourceOutsideWatchers } from "./folder-source-outside-watcher";
 import { ApiSourceController } from "./api-source-controller";
 import { CsvSourceController } from "./csv-source-controller";
 import { MarkdownTableSourceController } from "./markdown-table-source-controller";
@@ -60,6 +64,8 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-5 (G6/F6): device-local (never-synced) storage for Outside-Vault Folder source absolute
 	 * paths — its own store, separate from `apiHeadersStore`, so the two never interact. */
 	folderSourcePathStore: FolderSourcePathStore;
+	/** PR-2 (G6/G9): live watchers on the active view's Outside-Vault Folder sources, one per folder. */
+	outsideFolderWatchers: FolderSourceOutsideWatchers;
 	/** G1/G6/G11: the fetch → map → merge → persist pipeline for API-backed Folders. */
 	apiSourceController: ApiSourceController;
 	/** PR-7 (G17-G19/G21-G23): the read → parse → map → merge → persist pipeline for CSV-backed
@@ -74,6 +80,9 @@ export default class AtlasPlugin extends Plugin {
 	private linkSuggest: AtlasLinkSuggest;
 	graduation: GraduationController;
 	private persistDebounced: Debouncer<[], void>;
+	/** PR-1 (G5): debounced live refresh for Inside-Vault Folder sources. Plugin-wide, not per leaf, so
+	 * two open Atlas leaves never mean two refreshes of the same source. */
+	private folderLiveRefresh = new FolderLiveRefresh((nodeId) => this.refreshInsideFolderSource(nodeId));
 
 	async onload() {
 		const data = (await this.loadData()) as AtlasData | null;
@@ -127,6 +136,13 @@ export default class AtlasPlugin extends Plugin {
 		});
 		this.apiHeadersStore = new ApiHeadersStore(this.app);
 		this.folderSourcePathStore = new FolderSourcePathStore(this.app);
+		this.outsideFolderWatchers = new FolderSourceOutsideWatchers({
+			isResolved: (path) => resolveOutsidePath(path),
+			onRescan: (nodeId) => this.refreshOutsideFolderSource(nodeId),
+		});
+		// Rebuilt on every views change: a new or re-pointed source, and a view switch, all reach here through `onChange`.
+		this.viewsManager.onChange(() => this.syncOutsideFolderWatchers());
+		this.syncOutsideFolderWatchers();
 		this.apiSourceController = new ApiSourceController();
 		this.csvSourceController = new CsvSourceController();
 		this.markdownTableSourceController = new MarkdownTableSourceController();
@@ -153,39 +169,10 @@ export default class AtlasPlugin extends Plugin {
 			}
 		});
 
-		this.registerEvent(this.app.vault.on("create", (file) => this.unitIndex.onVaultCreate(file)));
-		this.registerEvent(
-			this.app.vault.on("delete", (file) => {
-				this.unitIndex.onVaultDelete(file.path);
-				this.graduation.handleDelete(file);
-				// G27: clears any placeholder row's noteRef pointing at the deleted file — additive
-				// alongside the two existing calls above, which this leaves untouched.
-				this.viewsManager.onVaultDelete(file.path);
-			})
-		);
-		this.registerEvent(
-			this.app.vault.on("rename", (file, oldPath) => {
-				const promotionsChanged = this.unitIndex.onVaultRename(file, oldPath);
-				this.viewsManager.onVaultRename(oldPath, file.path); // saves itself if anything changed
-				if (this.onModuleFolderRename(oldPath, file.path)) this.persistDebounced();
-				if (promotionsChanged) this.persistDebounced();
-				this.graduation.handleRename(file, oldPath); // last: only records the file and schedules the move for a later tick
-			})
-		);
-		this.registerEvent(
-			this.app.vault.on("modify", (file) => {
-				this.graduation.handleModify();
-				// G21: a saved `.csv` file re-triggers every CSV-sourced node pointed at it, same as the
-				// view-load/every-N-minutes triggers already do for API sources. PR-8: a saved `.md` file
-				// does the same for every Markdown-Table-sourced node pointed at it.
-				for (const leaf of this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE)) {
-					if (leaf.view instanceof AtlasExplorerView) {
-						leaf.view.notifyCsvFileModified(file.path);
-						leaf.view.notifyMarkdownTableFileModified(file.path);
-					}
-				}
-			})
-		);
+		this.registerEvent(this.app.vault.on("create", (file) => this.onVaultCreateEvent(file)));
+		this.registerEvent(this.app.vault.on("delete", (file) => this.onVaultDeleteEvent(file)));
+		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.onVaultRenameEvent(file, oldPath)));
+		this.registerEvent(this.app.vault.on("modify", (file) => this.onVaultModifyEvent(file)));
 		this.registerEvent(
 			this.app.metadataCache.on("resolved", () => {
 				this.unitIndex.onMetadataResolved();
@@ -199,7 +186,89 @@ export default class AtlasPlugin extends Plugin {
 		if (__ATLAS_TEST__) this.register(registerTestHarness(this));
 	}
 
+	/** A vault `modify` event. PR-1 (G5): deliberately never queues a folder refresh — a child's content
+	 * edit changes no row, so only create, delete and rename reach `scheduleInsideFolderRefresh`. */
+	onVaultModifyEvent(file: TAbstractFile): void {
+		this.graduation.handleModify();
+		// G21: a saved `.csv` file re-triggers every CSV-sourced node pointed at it, same as the
+		// view-load/every-N-minutes triggers already do for API sources. PR-8: a saved `.md` file
+		// does the same for every Markdown-Table-sourced node pointed at it.
+		for (const leaf of this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE)) {
+			if (leaf.view instanceof AtlasExplorerView) {
+				leaf.view.notifyCsvFileModified(file.path);
+				leaf.view.notifyMarkdownTableFileModified(file.path);
+			}
+		}
+	}
+
+	/** PR-1 (G5): a vault `create` event — the index picks the new file up, and any Inside-Vault Folder
+	 * source it is a direct child of refreshes live. */
+	onVaultCreateEvent(file: TAbstractFile): void {
+		this.unitIndex.onVaultCreate(file);
+		this.scheduleInsideFolderRefresh([file.path]);
+	}
+
+	/** PR-1 (G5): a vault `delete` event. The live refresh is queued after the view's own delete handling,
+	 * so the placeholder/mode reconciliation has already run by the time the folder re-reads. */
+	onVaultDeleteEvent(file: TAbstractFile): void {
+		this.unitIndex.onVaultDelete(file.path);
+		this.graduation.handleDelete(file);
+		// G27: clears any placeholder row's noteRef pointing at the deleted file — additive
+		// alongside the two existing calls above, which this leaves untouched.
+		this.viewsManager.onVaultDelete(file.path);
+		this.scheduleInsideFolderRefresh([file.path]);
+	}
+
+	/** PR-1 (G5): a vault `rename` event. The live refresh is queued only after `viewsManager.onVaultRename`
+	 * has run (rewrites refs, detaches a move-out) — it's a debounced timer, so it can never fire inline. */
+	onVaultRenameEvent(file: TAbstractFile, oldPath: string): void {
+		const promotionsChanged = this.unitIndex.onVaultRename(file, oldPath);
+		this.viewsManager.onVaultRename(oldPath, file.path); // saves itself if anything changed
+		this.scheduleInsideFolderRefresh([oldPath, file.path]);
+		if (this.onModuleFolderRename(oldPath, file.path)) this.persistDebounced();
+		if (promotionsChanged) this.persistDebounced();
+		this.graduation.handleRename(file, oldPath); // last: only records the file and schedules the move for a later tick
+	}
+
+	/** PR-1 (G5): queues a live refresh for every Inside-Vault Folder source in the active view whose
+	 * folder is the direct parent of one of `paths` — exact, case-sensitive match. A child's content
+	 * edit never reaches here (only create/delete/rename do), and a grandchild's events never match. */
+	private scheduleInsideFolderRefresh(paths: string[]): void {
+		const parents = new Set(paths.map(parentFolderPath));
+		const view = this.viewsManager.getActiveView();
+		for (const nodeId of this.viewsManager.getInsideFolderSourceNodeIds(view.id, parents)) {
+			this.folderLiveRefresh.schedule(nodeId);
+		}
+	}
+
+	/** PR-1 (G5): the debounced refresh itself — always the active view, same as every other source trigger. */
+	private refreshInsideFolderSource(nodeId: string): void {
+		const view = this.viewsManager.getActiveView();
+		this.viewsManager.refreshFolderSource(view.id, nodeId);
+	}
+
+	/** PR-2 (G9): keeps the watcher registry in step with the active view's Outside-Vault sources. Mobile
+	 * never watches (G7: outside sources don't run on mobile, and there is no fallback). */
+	private syncOutsideFolderWatchers(): void {
+		const sources = new Map<string, string>();
+		if (!Platform.isMobile) {
+			const view = this.viewsManager.getActiveView();
+			for (const nodeId of this.viewsManager.getOutsideFolderSourceNodeIds(view.id)) {
+				sources.set(nodeId, this.folderSourcePathStore.get(nodeId));
+			}
+		}
+		this.outsideFolderWatchers.sync(sources);
+	}
+
+	/** PR-2 (G6): a watcher event's rescan for one source — the same refresh window focus runs, for one node. */
+	private refreshOutsideFolderSource(nodeId: string): void {
+		const view = this.viewsManager.getActiveView();
+		this.viewsManager.refreshFolderSource(view.id, nodeId, this.folderSourcePathStore.get(nodeId));
+	}
+
 	onunload() {
+		this.folderLiveRefresh.cancelAll(); // PR-1 (G5): nothing fires after the plugin is gone
+		this.outsideFolderWatchers?.closeAll(); // PR-2 (G9): every watcher closes with the plugin
 		this.graduation?.dispose(); // before closing the dialog, so a dismissed one doesn't revert or move anything
 		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);

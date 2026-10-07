@@ -1,7 +1,14 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
-import { basenameForDeletedRef, buildFolderSourceChildren, reconcileFolderSourceChildDelete } from "./folder-source";
+import {
+	basenameForDeletedRef,
+	buildFolderSourceChildren,
+	diffOutsideChildren,
+	parentFolderPath,
+	reconcileFolderSourceChildDelete,
+} from "./folder-source";
+import { listOutsideChildren, resolveOutsidePath } from "./folder-source-outside";
 import {
 	ApiClickAction,
 	ApiFieldMapping,
@@ -193,8 +200,9 @@ function sanitizeApiFields(node: ViewNode): void {
 }
 
 /** PR-4 (G5/G16): `data.json` is free-form JSON — hand-edited or corrupted, `folderSource.path` can
- * be missing/non-string, and `location`/`showFiles`/`showFolders`/the refresh fields can be any shape
- * at all. A `folderSource` missing a usable `path` is dropped entirely (mirrors `apiSource`'s own
+ * be missing/non-string, and `location`/`showFiles`/`showFolders` can be any shape at all. PR-1 (G2):
+ * any legacy `refreshOnViewLoad`/`refreshEveryMinutes*` field is dropped silently — Folder sources
+ * always refresh live now, so they have no refresh settings to carry. A `folderSource` missing a usable `path` is dropped entirely (mirrors `apiSource`'s own
  * "no usable mapping" rule — there's no safe path to invent); every other field falls back to its own
  * spec'd default (G4: `location` "inside", both show-toggles on) rather than being rejected outright. */
 function sanitizeFolderSource(node: ViewNode): void {
@@ -204,9 +212,6 @@ function sanitizeFolderSource(node: ViewNode): void {
 		node.folderSource = undefined;
 		return;
 	}
-	const rawMinutes = raw.refreshEveryMinutes;
-	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
-	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
 	const rawRemoved = raw.removedRefs;
 	node.folderSource = {
 		type: "folder",
@@ -214,9 +219,6 @@ function sanitizeFolderSource(node: ViewNode): void {
 		path: raw.path,
 		showFiles: typeof raw.showFiles === "boolean" ? raw.showFiles : true,
 		showFolders: typeof raw.showFolders === "boolean" ? raw.showFolders : true,
-		refreshOnViewLoad: !!raw.refreshOnViewLoad,
-		refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
-		refreshEveryMinutes,
 		// R1 fix: `unitRefKey` strings the user has removed from this source's managed set — any
 		// non-string entry (hand-edited `data.json`) is dropped rather than rejecting the whole list.
 		removedRefs: Array.isArray(rawRemoved) ? rawRemoved.filter((key): key is string => typeof key === "string") : undefined,
@@ -241,9 +243,6 @@ function sanitizeCsvSource(node: ViewNode): void {
 		node.csvSource = undefined;
 		return;
 	}
-	const rawMinutes = raw.refreshEveryMinutes;
-	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
-	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
 	const rawExtras = mapping?.extraFields ?? (mapping as unknown as { extras?: unknown })?.extras;
 	const extraFields: Record<string, string> = {};
 	if (rawExtras && typeof rawExtras === "object" && !Array.isArray(rawExtras)) {
@@ -262,9 +261,6 @@ function sanitizeCsvSource(node: ViewNode): void {
 			extraFields: extraFieldsRecord,
 		},
 		mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
-		refreshOnViewLoad: !!raw.refreshOnViewLoad,
-		refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
-		refreshEveryMinutes,
 		keepOnEmpty: typeof raw.keepOnEmpty === "boolean" ? raw.keepOnEmpty : undefined,
 		confirmBeforeDelete: typeof raw.confirmBeforeDelete === "boolean" ? raw.confirmBeforeDelete : undefined,
 		mappingMode: isJsMode ? "js" : undefined,
@@ -290,9 +286,6 @@ function sanitizeMarkdownTableSource(node: ViewNode): void {
 		node.markdownTableSource = undefined;
 		return;
 	}
-	const rawMinutes = raw.refreshEveryMinutes;
-	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
-	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
 	const rawExtras = mapping?.extraFields ?? (mapping as unknown as { extras?: unknown })?.extras;
 	const extraFields: Record<string, string> = {};
 	if (rawExtras && typeof rawExtras === "object" && !Array.isArray(rawExtras)) {
@@ -313,9 +306,6 @@ function sanitizeMarkdownTableSource(node: ViewNode): void {
 			extraFields: extraFieldsRecord,
 		},
 		mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
-		refreshOnViewLoad: !!raw.refreshOnViewLoad,
-		refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
-		refreshEveryMinutes,
 		keepOnEmpty: typeof raw.keepOnEmpty === "boolean" ? raw.keepOnEmpty : undefined,
 		confirmBeforeDelete: typeof raw.confirmBeforeDelete === "boolean" ? raw.confirmBeforeDelete : undefined,
 		mappingMode: isJsMode ? "js" : undefined,
@@ -455,6 +445,10 @@ interface FoundNode {
 	index: number;
 }
 
+/** A managed row found by `ViewsManager.collectManagedMatches`: its parent list, its slot there, and how
+ * deep it sits in the view. */
+type ManagedMatch = { list: ViewNode[]; index: number; node: ViewNode; depth: number };
+
 /**
  * F9 — views (named arrangements of units into a bucket tree) with storage/integrity. The bucket
  * is a drawing over the vault, never a second copy of it: placing/removing/reparenting a node here
@@ -479,6 +473,12 @@ export class ViewsManager {
 
 	private save(): void {
 		this.persist();
+		this.notifyChange();
+	}
+
+	/** Re-renders listeners without persisting anything — for a change that is only visible on screen
+	 * (e.g. an Outside-Vault source's unresolved/reconnected state), which `save` alone would skip. */
+	private notifyChange(): void {
 		for (const cb of this.changeListeners) cb();
 	}
 
@@ -1094,6 +1094,13 @@ export class ViewsManager {
 		const found = this.findNode(view.root, nodeId);
 		if (!found || found.node.type !== "meta" || !found.node.folderSource) return;
 		const ownerId = found.node.id;
+		const before = JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]);
+		// PR-2 (R2-Q2): an Outside-Vault source's deletes and renames are reconciled before the add pass,
+		// so a renamed row keeps its node and a deleted one is demoted per mode. An unresolved path is
+		// left alone, as it always was.
+		if (found.node.folderSource.location === "outside" && outsidePath && resolveOutsidePath(outsidePath)) {
+			this.reconcileOutsideChildChanges(view.root, found.node, found.node.folderSource, listOutsideChildren(outsidePath, found.node.folderSource));
+		}
 		found.node.children = buildFolderSourceChildren(
 			this.app.vault,
 			found.node.folderSource,
@@ -1110,7 +1117,33 @@ export class ViewsManager {
 			outsidePath
 		);
 		this.sweepFolderSourceDeletedPlaceholders(found.node);
-		this.save();
+		// PR-1 (F2): a refresh that finds nothing new writes nothing — every view load and every live
+		// folder event runs through here, so an unchanged source must not cost a `data.json` write.
+		// PR-1 (R1): but it still re-renders, because an unchanged Outside-Vault source can change what
+		// the explorer shows (unplugged or reconnected drive) without any stored data changing.
+		if (JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]) !== before) this.save();
+		else this.notifyChange();
+	}
+
+	/** PR-1 (G5): the ids of this view's Inside-Vault Folder sources whose target folder is one of
+	 * `folderPaths`. Exact, case-sensitive path match (the same rule `isExcluded` uses). Outside-Vault
+	 * sources never match: their `path` is meaningless and they refresh on load/focus instead. Scoped
+	 * to a single view, so the live trigger follows the same active-view-only rule as every other
+	 * refresh. */
+	getInsideFolderSourceNodeIds(viewId: string, folderPaths: Set<string>): string[] {
+		const view = this.getView(viewId);
+		if (!view) return [];
+		const ids: string[] = [];
+		const walk = (nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.type === "meta" && node.folderSource?.location === "inside" && folderPaths.has(node.folderSource.path)) {
+					ids.push(node.id);
+				}
+				walk(node.children);
+			}
+		};
+		walk(view.root);
+		return ids;
 	}
 
 	/** PR-6: the "next reconciliation pass" half of the mode-switch edge cases — re-applies
@@ -1254,6 +1287,22 @@ export class ViewsManager {
 	/** F9 rename integrity: rewrite every matching ref (exact + prefix) across every view. */
 	onVaultRename(oldPath: string, newPath: string): void {
 		let changed = false;
+		const nowIso = new Date().toISOString();
+		// PR-1 (R2-Q1): a managed child renamed or moved out of its source folder leaves that source per
+		// the source's mode, exactly as a delete does. Checked before the rewrite below, so the owner
+		// folder's path is first rewritten here (a renamed source folder still counts as "still inside").
+		const leftSource = (owner: ViewNode | undefined): boolean => {
+			if (!owner?.folderSource) return true;
+			const sourcePath = owner.folderSource.path;
+			// R2: a renamed parent folder's child can arrive before the folder's own rename event, so the
+			// source path is still the old one here. A source folder that no longer exists at its old path
+			// means its parent was renamed — the child is still inside, so it must not be detached.
+			if (parentFolderPath(oldPath) === sourcePath && !this.app.vault.getAbstractFileByPath(sourcePath)) return false;
+			return parentFolderPath(newPath) !== rewritePathString(sourcePath, oldPath, newPath);
+		};
+		for (const view of this.views) {
+			if (this.reconcileFolderSourceDeletesForPath(view.root, oldPath, nowIso, leftSource, false)) changed = true;
+		}
 		for (const view of this.views) {
 			if (this.rewriteTree(view.root, oldPath, newPath, view.root)) changed = true;
 		}
@@ -1362,7 +1411,63 @@ export class ViewsManager {
 	 * parameterized rule rather than its own ad-hoc branch). An Outside-Vault-owned child is skipped
 	 * outright — its `ref.path` is a bare root-relative name, never a real vault path, and Outside
 	 * deletions are PR-5's own unresolved-path contract, not a vault `delete` event. */
-	private reconcileFolderSourceDeletesForPath(root: ViewNode[], path: string, nowIso: string): boolean {
+	private reconcileFolderSourceDeletesForPath(
+		root: ViewNode[],
+		path: string,
+		nowIso: string,
+		detaches: (owner: ViewNode | undefined) => boolean = () => true,
+		deleted = true
+	): boolean {
+		const matches = this.collectManagedMatches(root, (node) => node.type === "unit" && node.ref?.path === path);
+		if (matches.length === 0) return false;
+		const byId = this.indexNodesById(root);
+		// Outside-Vault-owned rows are skipped: their refs are root-relative names, never vault paths.
+		const applicable = matches.filter(({ node }) => {
+			const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
+			return owner?.folderSource?.location !== "outside" && detaches(owner);
+		});
+		this.demoteManagedMatches(applicable, byId, nowIso, deleted);
+		return true;
+	}
+
+	/** PR-2 (R2-Q2): the Outside-Vault half of delete and rename reconciliation, run by `refreshFolderSource`
+	 * before its ordinary add pass. An outside source's refs are bare root-relative names, so only this
+	 * owner's own managed rows are considered. A rename keeps the same node, with its children, status
+	 * and position, and changes only its ref. A delete is demoted per the source's current mode, with no
+	 * `noteRef`, since there is no vault file for it to link to. */
+	private reconcileOutsideChildChanges(root: ViewNode[], owner: ViewNode, source: FolderSourceConfig, listed: UnitRef[]): void {
+		const shown = (ref: UnitRef): boolean => (ref.kind === "folder" ? source.showFolders : source.showFiles);
+		const matches = this.collectManagedMatches(root, (node) => node.folderSourceOwnerId === owner.id && !!node.ref && shown(node.ref));
+		if (matches.length === 0) return;
+		const managedRefs = matches.map(({ node }) => node.ref as UnitRef);
+		const { renamed, gone } = diffOutsideChildren(managedRefs, listed, new Set(source.removedRefs ?? []));
+		const byKey = new Map(matches.map((match) => [unitRefKey(match.node.ref as UnitRef), match]));
+		for (const { from, to } of renamed) {
+			const match = byKey.get(unitRefKey(from));
+			if (match) match.node.ref = to;
+		}
+		const goneKeys = new Set(gone.map(unitRefKey));
+		const goneMatches = matches.filter(({ node }) => goneKeys.has(unitRefKey(node.ref as UnitRef)));
+		this.demoteManagedMatches(goneMatches, this.indexNodesById(root), new Date().toISOString(), false);
+	}
+
+	/** Every managed `unit` node under `root` that `isMatch` accepts, with the list it sits in, its slot
+	 * there, and its depth. Recurses into each match's own children too, since a managed row can be
+	 * nested anywhere in the view. */
+	private collectManagedMatches(root: ViewNode[], isMatch: (node: ViewNode) => boolean): ManagedMatch[] {
+		const matches: ManagedMatch[] = [];
+		const collect = (list: ViewNode[], depth: number): void => {
+			for (let i = 0; i < list.length; i++) {
+				const node = list[i];
+				if (node.folderSourceManaged && isMatch(node)) matches.push({ list, index: i, node, depth });
+				collect(node.children, depth + 1);
+			}
+		};
+		collect(root, 0);
+		return matches;
+	}
+
+	private indexNodesById(root: ViewNode[]): Map<string, ViewNode> {
 		const byId = new Map<string, ViewNode>();
 		const indexIds = (nodes: ViewNode[]): void => {
 			for (const node of nodes) {
@@ -1371,26 +1476,16 @@ export class ViewsManager {
 			}
 		};
 		indexIds(root);
+		return byId;
+	}
 
-		type Match = { list: ViewNode[]; index: number; node: ViewNode };
-		const matches: Match[] = [];
-		const collect = (list: ViewNode[]): void => {
-			for (let i = 0; i < list.length; i++) {
-				const node = list[i];
-				if (node.type === "unit" && node.folderSourceManaged && node.ref && node.ref.path === path) {
-					matches.push({ list, index: i, node });
-				}
-				collect(node.children);
-			}
-		};
-		collect(root);
-		if (matches.length === 0) return false;
-
-		// Highest index first within each list, so splicing one match never shifts another's index.
-		matches.sort((a, b) => b.index - a.index);
-		for (const { list, index, node } of matches) {
+	/** Demotes each match in turn. Deepest first, then highest index first within a depth: a nested match
+	 * is spliced out of its parent's children before the parent lifts them, so no splice ever works on a
+	 * stale list, and no splice shifts another match's index. */
+	private demoteManagedMatches(matches: ManagedMatch[], byId: Map<string, ViewNode>, nowIso: string, deleted: boolean): void {
+		const ordered = [...matches].sort((a, b) => b.depth - a.depth || b.index - a.index);
+		for (const { list, index, node } of ordered) {
 			const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
-			if (owner?.folderSource?.location === "outside") continue;
 			const ref = node.ref as UnitRef;
 			const mode = owner?.folderSource?.mode ?? "merge";
 			// R3 fix: strip the extension off a file's basename (matching what the row displayed while
@@ -1401,7 +1496,9 @@ export class ViewsManager {
 			// splice below removes it — `renderNodeList` uses it to put the resulting row back in
 			// (approximately) that same slot instead of always appending it after every real child.
 			const base = { id: unitRefKey(ref), label, lastSeenAt: nowIso, explicitStatusId: node.explicitStatusId, position: index };
-			const placeholder = reconcileFolderSourceChildDelete(mode, base, ref);
+			// A move-out is not a delete: the append placeholder gets no `noteRef` (nothing to clear), and
+			// the file's new location is never shown as a stale link.
+			const placeholder = reconcileFolderSourceChildDelete(mode, base, deleted ? ref : undefined);
 			list.splice(index, 1, ...node.children);
 			if (placeholder && owner) {
 				if (!owner.apiItemState) owner.apiItemState = {};
@@ -1410,7 +1507,21 @@ export class ViewsManager {
 				if (!owner.apiItemOrder.includes(placeholder.id)) owner.apiItemOrder.push(placeholder.id);
 			}
 		}
-		return true;
+	}
+
+	/** PR-2 (G9): the active view's Outside-Vault Folder source node ids, for the watcher registry. */
+	getOutsideFolderSourceNodeIds(viewId: string): string[] {
+		const view = this.getView(viewId);
+		if (!view) return [];
+		const ids: string[] = [];
+		const walk = (nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.type === "meta" && node.folderSource?.location === "outside") ids.push(node.id);
+				walk(node.children);
+			}
+		};
+		walk(view.root);
+		return ids;
 	}
 
 	private clearNoteRefsForPath(nodes: ViewNode[], path: string): boolean {
