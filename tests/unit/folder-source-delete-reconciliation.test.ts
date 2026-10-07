@@ -20,7 +20,6 @@ function setupWithVault(mode: "append" | "merge" | "overwrite") {
 		path: "Projects",
 		showFiles: true,
 		showFolders: true,
-		refreshOnViewLoad: false,
 		mode,
 	});
 	vm.refreshFolderSource(view.id, folder.id);
@@ -37,7 +36,6 @@ function setup(mode: "append" | "merge" | "overwrite", childOverrides: Partial<V
 		path: "Projects",
 		showFiles: true,
 		showFolders: true,
-		refreshOnViewLoad: false,
 		mode,
 	};
 	const child: ViewNode = {
@@ -149,7 +147,6 @@ describe("ViewsManager.onVaultDelete — PR-6 mode-reconciliation rule (G12/G13/
 			path: "Projects",
 			showFiles: true,
 			showFolders: true,
-			refreshOnViewLoad: false,
 		};
 		const child: ViewNode = {
 			id: "child-1",

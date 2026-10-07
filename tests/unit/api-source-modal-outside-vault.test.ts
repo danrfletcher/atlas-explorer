@@ -281,7 +281,6 @@ describe("api-source-modal-outside-vault — G6: raw-path-field-rendered rule", 
 			path: "",
 			showFiles: true,
 			showFolders: false,
-			refreshOnViewLoad: false,
 		};
 		const modal = new ApiSourceModal({} as any, null, [], vi.fn(), folderSource, "/Volumes/External/Notes");
 		(modal as any).onOpen();
@@ -329,7 +328,7 @@ describe("api-source-modal-outside-vault — G4: no-vault-suggester-shown-in-out
 
 describe("api-source-modal-outside-vault — G6/G11: modal-indicator-reflects-store-state rule", () => {
 	it("an initially-blank path renders the indicator red", () => {
-		const folderSource: FolderSourceConfig = { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false };
+		const folderSource: FolderSourceConfig = { location: "outside", path: "", showFiles: true, showFolders: true };
 		const modal = new ApiSourceModal({} as any, null, [], vi.fn(), folderSource, "");
 		(modal as any).onOpen();
 
@@ -365,7 +364,7 @@ describe("api-source-modal-outside-vault — G6/G11: modal-indicator-reflects-st
 
 	it("clearing a previously-resolving path back to blank turns the indicator red again, live on keystroke", () => {
 		const os = require("node:os") as typeof import("node:os");
-		const folderSource: FolderSourceConfig = { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false };
+		const folderSource: FolderSourceConfig = { location: "outside", path: "", showFiles: true, showFolders: true };
 		const modal = new ApiSourceModal({} as any, null, [], vi.fn(), folderSource, os.tmpdir());
 		(modal as any).onOpen();
 

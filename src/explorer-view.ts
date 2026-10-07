@@ -1,5 +1,6 @@
-import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
+import { App, FuzzyMatch, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TAbstractFile, TFile, TFolder, WorkspaceLeaf, renderResults, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
+import type { AtlasSettings } from "./settings";
 import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import {
 	ApiSourceIdPair,
@@ -62,6 +63,37 @@ function sanitizeFileName(name: string): string {
 	return name.replace(/[/\\:*?"<>|]/g, "-").trim();
 }
 
+/** PR-1.F2 (G3): one inbox row as the sort sees it. */
+export interface InboxSortRow {
+	unit: Unit;
+	/** The row's displayed text (`RowInfo.text`), used for name order. */
+	text: string;
+}
+
+/** PR-1.F2 (G3): the inbox sort, extracted as a pure comparator so it is unit-testable. Alphabetical
+ * mode orders every row by name, files and modules interleaved. Newest-first (any other mode) puts
+ * files first by ctime, newest first, then every module (folder-kind unit: folder-unit, promoted-folder,
+ * added-folder) ordered by name. Ties on name or ctime fall back to path, so a re-render never reorders
+ * rows that compare equal. `lookup` is the vault's `getAbstractFileByPath`, read only for a file's ctime. */
+export function compareInboxRows(
+	a: InboxSortRow,
+	b: InboxSortRow,
+	alphabetical: boolean,
+	lookup: (path: string) => TAbstractFile | null
+): number {
+	const byName = (): number => a.text.localeCompare(b.text) || a.unit.path.localeCompare(b.unit.path);
+	if (alphabetical) return byName();
+	const aIsModule = unitToRef(a.unit).kind === "folder";
+	const bIsModule = unitToRef(b.unit).kind === "folder";
+	if (aIsModule !== bIsModule) return aIsModule ? 1 : -1;
+	if (aIsModule) return byName();
+	const fileA = lookup(a.unit.path);
+	const fileB = lookup(b.unit.path);
+	const ctimeA = fileA instanceof TFile ? fileA.stat.ctime : 0;
+	const ctimeB = fileB instanceof TFile ? fileB.stat.ctime : 0;
+	return ctimeB - ctimeA || byName();
+}
+
 interface RowInfo {
 	text: string;
 	secondary?: string;
@@ -104,36 +136,82 @@ export class MetaFolderSuggestModal extends FuzzySuggestModal<MetaTarget> {
 
 /** PR-3 (G2): the "+" inbox-add modal. Deliberately broader than auto-promotion eligibility — its
  * list source is every vault file, not the "references outside the module" rule (F3) — narrowed only
- * by `candidateFilesForAdd`'s already-a-unit-somewhere exclusion. */
-export class AddFileSuggestModal extends FuzzySuggestModal<TFile> {
-	constructor(app: AtlasPlugin["app"], private files: TFile[], private onChoose: (file: TFile) => void) {
+ * by the candidate builders' already-a-unit-somewhere exclusion. PR-1.F1: one mixed list of files
+ * and sub-folders; a folder row shows as `path/` with a folder icon, a file row as `path` with a file icon. */
+export class AddFileSuggestModal extends FuzzySuggestModal<TFile | TFolder> {
+	constructor(app: AtlasPlugin["app"], private items: (TFile | TFolder)[], private onChoose: (item: TFile | TFolder) => void) {
 		super(app);
 	}
-	getItems(): TFile[] {
-		return this.files;
+	getItems(): (TFile | TFolder)[] {
+		return this.items;
 	}
-	getItemText(file: TFile): string {
-		return file.path;
+	getItemText(item: TFile | TFolder): string {
+		return item instanceof TFolder ? `${item.path}/` : item.path;
 	}
-	onChooseItem(file: TFile): void {
-		this.onChoose(file);
+	onChooseItem(item: TFile | TFolder): void {
+		this.onChoose(item);
+	}
+	renderSuggestion(match: FuzzyMatch<TFile | TFolder>, el: HTMLElement): void {
+		el.addClass("atlas-add-suggest-item");
+		const iconEl = el.createSpan({ cls: "atlas-add-suggest-icon" });
+		setIcon(iconEl, match.item instanceof TFolder ? "folder" : "file");
+		const textEl = el.createSpan({ cls: "atlas-add-suggest-text" });
+		renderResults(textEl, this.getItemText(match.item), match.match);
 	}
 }
 
 /** PR-3 (G2, E4): every vault file minus any file already a unit somewhere (auto-promoted, manually
  * promoted, already added) or already placed/nested as a node in any view — so picking one from the
  * modal can never produce a duplicate inbox row. List-level exclusion only: no runtime dedupe is
- * exercised once a file is chosen. */
-export function candidateFilesForAdd(allFiles: TFile[], units: Unit[], isPlacedAnywhere: (ref: UnitRef) => boolean): TFile[] {
+ * exercised once a file is chosen. PR-1.F1 (G12): an added folder's interface note (`<Folder>/<Folder>.md`)
+ * is excluded too, until that folder is dismissed for good (`isGloballyDismissed`); a promoted folder's
+ * note is still offered. */
+export function candidateFilesForAdd(
+	allFiles: TFile[],
+	units: Unit[],
+	isPlacedAnywhere: (ref: UnitRef) => boolean,
+	isGloballyDismissed: (ref: UnitRef) => boolean = () => false
+): TFile[] {
 	// R2: only a *file-kind* ref counts as "the file already present as a unit" (G2) — a promoted-block
 	// unit's `.path` is its containing file's path even though it's kind "block" (per `unitToRef`), so
 	// comparing bare paths wrongly excluded a file whose only unit is a promoted block from this list.
 	const fileRefKeys = new Set(
 		units.filter((unit) => unitToRef(unit).kind === "file").map((unit) => unitRefKey(unitToRef(unit)))
 	);
+	for (const unit of units) {
+		if (unit.type !== "added-folder") continue;
+		if (isGloballyDismissed({ kind: "folder", path: unit.path })) continue;
+		const folderName = unit.path.slice(unit.path.lastIndexOf("/") + 1);
+		fileRefKeys.add(unitRefKey({ kind: "file", path: `${unit.path}/${folderName}.md` }));
+	}
 	return allFiles.filter(
 		(file) => !fileRefKeys.has(unitRefKey({ kind: "file", path: file.path })) && !isPlacedAnywhere({ kind: "file", path: file.path })
 	);
+}
+
+/** PR-1.F1 (G1, F2, E9): every sub-folder the "+" picker may offer. Lists the folders itself from
+ * `allLoaded` (`vault.getAllLoadedFiles()`). A folder is offered only when it is not a vault-root
+ * folder, not already a unit (folder-units, promoted, Folder-source-managed or added folders), not
+ * placed in any view (bucket or inbox), not the pool folder or inside it, and not inside an excluded
+ * folder. Unit and placed lookups are Sets built once per call, so the cost is linear in the vault. */
+export function candidateFoldersForAdd(
+	allLoaded: TAbstractFile[],
+	units: Unit[],
+	placedRefKeys: Set<string>,
+	settings: Pick<AtlasSettings, "poolFolder" | "excludedFolders">
+): TFolder[] {
+	const unitFolderKeys = new Set(
+		units.filter((unit) => unitToRef(unit).kind === "folder").map((unit) => unitRefKey(unitToRef(unit)))
+	);
+	const { poolFolder, excludedFolders } = settings;
+	const isWithin = (path: string, parent: string): boolean => path === parent || path.startsWith(`${parent}/`);
+	return allLoaded.filter((entry): entry is TFolder => entry instanceof TFolder).filter((folder) => {
+		const key = unitRefKey({ kind: "folder", path: folder.path });
+		if (folder.isRoot() || !folder.path.includes("/")) return false;
+		if (unitFolderKeys.has(key) || placedRefKeys.has(key)) return false;
+		if (isWithin(folder.path, poolFolder)) return false;
+		return !excludedFolders.some((excluded) => isWithin(folder.path, excluded));
+	});
 }
 
 /** PR 9 (issue 2): replaces inline fold/unfold for modules with a browsable read-only tree of the
@@ -497,26 +575,23 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- G1/G5/G6/G11: API-backed Folders ---------------------------------------------------------
 
-	/** G5a/PR-4 (G10): refreshes every Folder in the active view that has "refresh when Atlas view
-	 * loads" on — both API and (Inside-Vault) Folder sources, reusing this same trigger/toggle. */
+	/** G5a/PR-4 (G10): refreshes every API source in the active view that has "refresh when Atlas view
+	 * loads" on. PR-1 (G4): every Folder (inside and outside), CSV and markdown-table source in the
+	 * active view refreshes on load with no toggle — those three types have no refresh settings at all
+	 * any more, and their live triggers (vault events, file saves) cover everything between loads. */
 	private refreshApiSourcesOnViewLoad(): void {
 		const view = this.plugin.viewsManager.getActiveView();
 		for (const node of this.collectApiSourceNodes(view.root)) {
 			if (node.apiSource?.refreshOnViewLoad) this.refreshApiSource(view, node, "automatic");
 		}
 		for (const node of this.collectFolderSourceNodes(view.root)) {
-			// G11: Outside-Vault's connection/children check on load is mandatory, independent of the
-			// optional "refresh on view load" toggle (G10) — Inside-Vault keeps the toggle-gated
-			// behavior unchanged, exactly as before this PR.
-			if (node.folderSource?.refreshOnViewLoad || node.folderSource?.location === "outside") {
-				this.refreshFolderSource(view, node);
-			}
+			this.refreshFolderSource(view, node);
 		}
 		for (const node of this.collectCsvSourceNodes(view.root)) {
-			if (node.csvSource?.refreshOnViewLoad) this.refreshCsvSource(view, node, "automatic");
+			this.refreshCsvSource(view, node, "automatic");
 		}
 		for (const node of this.collectMarkdownTableSourceNodes(view.root)) {
-			if (node.markdownTableSource?.refreshOnViewLoad) this.refreshMarkdownTableSource(view, node, "automatic");
+			this.refreshMarkdownTableSource(view, node, "automatic");
 		}
 	}
 
@@ -526,6 +601,9 @@ export class AtlasExplorerView extends ItemView {
 	 * automatically; the indicator dot itself needs no separate refresh call since it already
 	 * recomputes `resolveOutsidePath` live on every render. */
 	private refreshOutsideFolderSourcesOnFocus(): void {
+		// PR-2 (G7): focus is also the retry for a closed or failed watcher, so a replugged drive
+		// reconnects here, before the rows reconcile below.
+		this.plugin.outsideFolderWatchers.retry();
 		const view = this.plugin.viewsManager.getActiveView();
 		for (const node of this.collectFolderSourceNodes(view.root)) {
 			if (node.folderSource?.location === "outside") this.refreshFolderSource(view, node);
@@ -583,12 +661,11 @@ export class AtlasExplorerView extends ItemView {
 		return out;
 	}
 
-	/** G5b/F3/PR-4 (G10): (re)schedules this Atlas view's "Refresh every X minutes" timers against
-	 * the active View's current set of eligible Folders — both API and Folder sources feed the same
-	 * scheduler (`RefreshEveryTimers` is already source-type-agnostic), so no new scheduler is
-	 * introduced for Folder sources. Called after every render, so a saved config change (interval
-	 * edited, toggle flipped, source removed) reschedules cleanly on the very next render rather than
-	 * needing a dedicated call site of its own for each way that can happen. */
+	/** G5b/F3: (re)schedules this Atlas view's "Refresh every X minutes" timers against the active
+	 * View's current set of eligible API sources. PR-1 (G2): Folder, CSV and markdown-table sources no
+	 * longer have that setting, so they never get a timer here. Called after every render, so a saved
+	 * config change (interval edited, toggle flipped, source removed) reschedules cleanly on the very
+	 * next render rather than needing a dedicated call site of its own for each way that can happen. */
 	private syncRefreshTimers(view: View): void {
 		const apiNodes = this.collectApiSourceNodes(view.root)
 			.filter((node) => node.apiSource?.refreshEveryMinutesEnabled)
@@ -598,56 +675,10 @@ export class AtlasExplorerView extends ItemView {
 				minutes: node.apiSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
 				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
 			}));
-		const folderNodes = this.collectFolderSourceNodes(view.root)
-			.filter((node) => node.folderSource?.refreshEveryMinutesEnabled)
-			.map((node) => ({
-				id: node.id,
-				enabled: true,
-				minutes: node.folderSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
-				// PR-4: a Folder source has no fetch-timestamp cache of its own (its "cache" is just the
-				// real children it manages) — always `null`, so a never-refreshed Folder fires one
-				// immediate catch-up refresh the same way a never-fetched API source does.
-				lastFetchedAt: null,
-			}));
-		// PR-7: a CSV source shares `apiCache` with API sources (same shape, same `fetchedAt`), so its
-		// timer entry is built exactly like `apiNodes` above.
-		const csvNodes = this.collectCsvSourceNodes(view.root)
-			.filter((node) => node.csvSource?.refreshEveryMinutesEnabled)
-			.map((node) => ({
-				id: node.id,
-				enabled: true,
-				minutes: node.csvSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
-				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
-			}));
-		// PR-8: a Markdown Table source shares `apiCache` with API/CSV sources, so its timer entry is
-		// built exactly like `csvNodes` above.
-		const mdTableNodes = this.collectMarkdownTableSourceNodes(view.root)
-			.filter((node) => node.markdownTableSource?.refreshEveryMinutesEnabled)
-			.map((node) => ({
-				id: node.id,
-				enabled: true,
-				minutes: node.markdownTableSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
-				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
-			}));
-		this.refreshEveryTimers.sync([...apiNodes, ...folderNodes, ...csvNodes, ...mdTableNodes], (nodeId) => {
+		this.refreshEveryTimers.sync(apiNodes, (nodeId) => {
 			const activeView = this.plugin.viewsManager.getActiveView();
 			const apiTarget = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (apiTarget) {
-				this.refreshApiSource(activeView, apiTarget, "automatic");
-				return;
-			}
-			const folderTarget = this.collectFolderSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (folderTarget) {
-				this.refreshFolderSource(activeView, folderTarget);
-				return;
-			}
-			const csvTarget = this.collectCsvSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (csvTarget) {
-				this.refreshCsvSource(activeView, csvTarget, "automatic");
-				return;
-			}
-			const mdTableTarget = this.collectMarkdownTableSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (mdTableTarget) this.refreshMarkdownTableSource(activeView, mdTableTarget, "automatic");
+			if (apiTarget) this.refreshApiSource(activeView, apiTarget, "automatic");
 		});
 	}
 
@@ -1936,8 +1967,6 @@ export class AtlasExplorerView extends ItemView {
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		this.renderRowIcon(iconEl, view, node, ancestors, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
-		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
-		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) {
 			row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
@@ -2050,16 +2079,12 @@ export class AtlasExplorerView extends ItemView {
 			combined.map(async ({ unit, hidden }) => ({ unit, ref: unitToRef(unit), hidden, info: await this.resolveRef(unitToRef(unit)) }))
 		);
 		const filtered = resolved.filter((r) => this.matchesFilter(r.info.text));
-		const sorted =
-			this.sortMode === "alphabetical"
-				? filtered.sort((a, b) => a.info.text.localeCompare(b.info.text))
-				: filtered.sort((a, b) => {
-						const fileA = this.plugin.app.vault.getAbstractFileByPath(a.unit.path);
-						const fileB = this.plugin.app.vault.getAbstractFileByPath(b.unit.path);
-						const ctimeA = fileA instanceof TFile ? fileA.stat.ctime : 0;
-						const ctimeB = fileB instanceof TFile ? fileB.stat.ctime : 0;
-						return ctimeB - ctimeA; // newest first, per spec default
-				  });
+		// PR-1.F2 (G3): every module (folder-kind unit) sorts by name in newest-first mode, not ctime 0.
+		const alphabetical = this.sortMode === "alphabetical";
+		const lookup = (path: string) => this.plugin.app.vault.getAbstractFileByPath(path);
+		const sorted = filtered.sort((a, b) =>
+			compareInboxRows({ unit: a.unit, text: a.info.text }, { unit: b.unit, text: b.info.text }, alphabetical, lookup)
+		);
 
 		// PR 20: captured here (not queried from the DOM like the bucket's) — F11's virtualization
 		// below means most of these rows never actually exist in the DOM at once, so a shift-click on
@@ -2094,24 +2119,34 @@ export class AtlasExplorerView extends ItemView {
 	 * placed somewhere, and on selection marks it "added" (terminal state — see `markAdded`) and
 	 * persists immediately, matching the click-driven-action convention `promoteAndPlace` uses. */
 	private openAddFileModal(): void {
-		const units = this.plugin.unitIndex.getUnits();
-		const candidates = candidateFilesForAdd(this.plugin.app.vault.getFiles(), units, (ref) =>
-			this.plugin.viewsManager.isPlacedAnywhere(ref)
-		);
-		new AddFileSuggestModal(this.plugin.app, candidates, (file) => {
-			this.plugin.unitIndex.markAdded({ kind: "file", path: file.path });
+		const { app, settings, unitIndex, viewsManager } = this.plugin;
+		const units = unitIndex.getUnits();
+		// PR-1.F1: one placed-set per open, shared by the file and folder candidate lists.
+		const placed = viewsManager.placedRefKeys();
+		const isPlacedAnywhere = (ref: UnitRef): boolean => placed.has(unitRefKey(ref));
+		const candidates: (TFile | TFolder)[] = [
+			...candidateFilesForAdd(app.vault.getFiles(), units, isPlacedAnywhere, (ref) => unitIndex.isDismissed(ref, "global")),
+			...candidateFoldersForAdd(app.vault.getAllLoadedFiles(), units, placed, settings),
+		];
+		new AddFileSuggestModal(app, candidates, (item) => {
+			const ref: UnitRef = item instanceof TFolder ? { kind: "folder", path: item.path } : { kind: "file", path: item.path };
+			unitIndex.markAdded(ref);
 			void this.plugin.flushSave();
 			void this.render();
 		}).open();
 	}
 
 	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, view: View, hidden = false): HTMLElement {
+		// PR-1.F2 (G10): only an "added" item that has gone missing gets the greyed row. A missing row that
+		// is not "added" (promoted, link-derived) keeps today's inbox behaviour.
+		const missingAdded = info.missing && this.plugin.unitIndex.isAdded(ref);
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		const key = unitRefKey(ref);
+		if (missingAdded) row.addClass("atlas-missing");
 		row.dataset.refKey = key;
 		row.dataset.selectKey = key;
 		row.toggleClass("is-selected", this.selectedInboxRefKeys.has(key));
-		row.setAttr("draggable", "true");
+		row.setAttr("draggable", missingAdded ? "false" : "true");
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		setIcon(iconEl, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
@@ -2121,22 +2156,44 @@ export class AtlasExplorerView extends ItemView {
 		// without either clobbering the other, since each is just its own sibling span.
 		if (hidden) row.createSpan({ cls: "atlas-badge", text: "hidden" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
+		if (missingAdded) {
+			// PR-1.F2 (G10): same greyed "(missing)" row and Remove button as the bucket; never auto-removed.
+			row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
+			const removeBtn = row.createDiv({ cls: "atlas-row-action" });
+			setIcon(removeBtn, "x");
+			setTooltip(removeBtn, "Remove from inbox");
+			removeBtn.addEventListener("click", (evt) => {
+				evt.stopPropagation();
+				this.removeMissingAddedRow(ref);
+			});
+		}
 		// PR 9 (issue 2): modules never expand inline anymore, in the inbox or the bucket — the icon
-		// opens the Module Contents modal instead (see `wireModuleRow`).
-		if (ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
+		// opens the Module Contents modal instead (see `wireModuleRow`). A missing added row is never wired.
+		if (ref.kind === "folder" && !missingAdded) this.wireModuleRow(row, iconEl, ref.path);
 
 		this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, key, "inbox", this.inboxSelectOrder);
-			if (!consumed) void this.openRef(ref);
+			if (!consumed && !missingAdded) void this.openRef(ref);
 		});
 		row.addEventListener("dragstart", () => (this.dragPayload = this.buildInboxDragPayload(ref)));
 		row.tabIndex = 0;
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
+			// PR-1.F2 (G10): a missing added row offers only Remove, never Open/Create note/Place (its target is gone).
+			if (missingAdded) return;
 			this.showInboxUnitMenu(evt, ref, view);
 		});
 		return row;
+	}
+
+	/** PR-1.F2 (G10): Remove on an inbox "(missing)" row. Takes the item out of `addedItems`, drops it from
+	 * the selection so no ghost row is left behind, saves immediately, and re-renders. Nothing else changes. */
+	private removeMissingAddedRow(ref: UnitRef): void {
+		this.plugin.unitIndex.removeAdded(ref);
+		this.selectedInboxRefKeys.delete(unitRefKey(ref));
+		void this.plugin.flushSave();
+		void this.render();
 	}
 
 	/** F11: renders only the rows within the scrolled viewport (+ overscan) of a fixed-height,
