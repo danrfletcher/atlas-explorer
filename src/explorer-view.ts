@@ -2532,20 +2532,50 @@ export class AtlasExplorerView extends ItemView {
 		// explorer is showing Global view it writes the single global-scope entry instead (G5), which
 		// `getInboxUnits`' dismissed-OR-check (view-scope reads global-or-own-view, global-scope reads
 		// only the global set) then applies at render time for every view, including ones never opened.
-		menu.addItem((item) =>
-			item
-				.setTitle("Dismiss")
-				.setIcon("x")
-				.onClick(() => {
-					if (view.inboxMode === "global") {
-						this.plugin.unitIndex.setDismissed(ref, "global", true);
-					} else {
-						this.plugin.unitIndex.setDismissed(ref, "view", true, view.id);
-					}
-					void this.plugin.flushSave();
-					void this.render();
-				})
-		);
+		// Polish R1 (PR-5 finding): a row already dismissed-and-revealed (via "Show Dismissed") gets
+		// an "Unhide" item that flips the same dismiss flag back off, instead of a second "Dismiss"
+		// that would just no-op. "hidden" is derived the same way `ViewsManager.getDismissedInboxUnits`
+		// already classifies this row for this exact (viewId, mode) — never a separate stored flag.
+		const scope = view.inboxMode === "global" ? "global" : "view";
+		const hidden =
+			scope === "global" ? this.plugin.unitIndex.isDismissed(ref, "global") : this.plugin.unitIndex.isDismissed(ref, "view", view.id);
+		if (hidden) {
+			menu.addItem((item) =>
+				item
+					.setTitle("Unhide")
+					.setIcon("eye")
+					.onClick(() => {
+						// Clears both scopes, not just the current mode's — a view-mode OR-check can read
+						// "hidden" off a Global dismiss, and clearing only the (empty) per-view entry in
+						// that case would leave the row silently still dismissed. Unhide always means
+						// "actually bring it back" (the PR-5 finding's own wording), so both writes run
+						// unconditionally; the one with nothing to clear is just a no-op.
+						this.plugin.unitIndex.setDismissed(ref, "global", false);
+						this.plugin.unitIndex.setDismissed(ref, "view", false, view.id);
+						void this.plugin.flushSave();
+						void this.render();
+					})
+			);
+		} else {
+			// Polish R1 (PR-4 finding): label only, per Dan's testing feedback overriding F1/G6 —
+			// manually-added (via "+") rows read "Remove", everything else still reads "Dismiss". The
+			// underlying write is identical either way, so this never special-cases by provenance.
+			const added = this.plugin.unitIndex.isAdded(ref);
+			menu.addItem((item) =>
+				item
+					.setTitle(added ? "Remove" : "Dismiss")
+					.setIcon("x")
+					.onClick(() => {
+						if (scope === "global") {
+							this.plugin.unitIndex.setDismissed(ref, "global", true);
+						} else {
+							this.plugin.unitIndex.setDismissed(ref, "view", true, view.id);
+						}
+						void this.plugin.flushSave();
+						void this.render();
+					})
+			);
+		}
 		menu.showAtMouseEvent(evt);
 	}
 
