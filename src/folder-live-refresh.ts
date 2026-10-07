@@ -22,11 +22,16 @@ interface Pending {
 
 /** One instance per plugin (not per Atlas leaf), so two open leaves never mean two refreshes of the
  * same source. Keyed by source node id: two sources on the same folder are two nodes, so each gets
- * exactly one refresh (E4). */
+ * exactly one refresh (E4). PR-2 reuses it for outside-folder watchers, keyed by folder path instead,
+ * with a longer quiet period (`debounceMs`). */
 export class FolderLiveRefresh {
 	private pending = new Map<string, Pending>();
 
-	constructor(private onDue: (nodeId: string) => void, private timers: FolderLiveRefreshTimers = realTimers) {}
+	constructor(
+		private onDue: (nodeId: string) => void,
+		private timers: FolderLiveRefreshTimers = realTimers,
+		private debounceMs: number = FOLDER_LIVE_REFRESH_DEBOUNCE_MS
+	) {}
 
 	schedule(nodeId: string): void {
 		const existing = this.pending.get(nodeId);
@@ -35,8 +40,17 @@ export class FolderLiveRefresh {
 			debounce: undefined,
 			maxWait: this.timers.setTimeoutFn(() => this.fire(nodeId), FOLDER_LIVE_REFRESH_MAX_WAIT_MS),
 		};
-		entry.debounce = this.timers.setTimeoutFn(() => this.fire(nodeId), FOLDER_LIVE_REFRESH_DEBOUNCE_MS);
+		entry.debounce = this.timers.setTimeoutFn(() => this.fire(nodeId), this.debounceMs);
 		this.pending.set(nodeId, entry);
+	}
+
+	/** Drops one key's pending refresh without firing it. A key with nothing pending is a no-op. */
+	cancel(nodeId: string): void {
+		const entry = this.pending.get(nodeId);
+		if (!entry) return;
+		this.timers.clearTimeoutFn(entry.debounce);
+		this.timers.clearTimeoutFn(entry.maxWait);
+		this.pending.delete(nodeId);
 	}
 
 	/** Drops every pending refresh without firing it — called from `onunload`, so nothing runs after
