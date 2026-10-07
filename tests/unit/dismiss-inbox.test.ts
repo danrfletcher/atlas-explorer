@@ -20,16 +20,24 @@ afterEach(() => {
 
 type FakeMenuThis = {
 	plugin: {
-		unitIndex: { setDismissed: ReturnType<typeof vi.fn> };
+		unitIndex: {
+			setDismissed: ReturnType<typeof vi.fn>;
+			isDismissed: ReturnType<typeof vi.fn>;
+			isAdded: ReturnType<typeof vi.fn>;
+		};
 		flushSave: ReturnType<typeof vi.fn>;
 	};
 	render: ReturnType<typeof vi.fn>;
 };
 
-function fakeMenuThis(): FakeMenuThis {
+function fakeMenuThis(opts: { isDismissed?: boolean; isAdded?: boolean } = {}): FakeMenuThis {
 	return {
 		plugin: {
-			unitIndex: { setDismissed: vi.fn() },
+			unitIndex: {
+				setDismissed: vi.fn(),
+				isDismissed: vi.fn(() => opts.isDismissed ?? false),
+				isAdded: vi.fn(() => opts.isAdded ?? false),
+			},
 			flushSave: vi.fn(async () => {}),
 		},
 		render: vi.fn(async () => {}),
@@ -111,23 +119,20 @@ describe("showInboxUnitMenu — Dismiss item (G4)", () => {
 		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledWith(ref, "global", true);
 	});
 
-	it("G6: dismissing a row flagged as added calls the exact same dismiss write path as a non-added row", () => {
-		// The menu/click path makes no distinction based on "added" state at all — it only ever reads
-		// `ref`/`view`, never consults `isAdded`. Asserting identical call shape for an added-looking
-		// ref is the regression guard that a future change doesn't special-case it.
+	it("G6: dismissing a non-added row calls the per-view write, using the 'Dismiss' label (the default, non-added config of this fake)", () => {
 		const fake = fakeMenuThis();
 		const view = createEmptyView("v1", "Default");
-		const addedRef = file("Areas/Career/Notes.md");
-		const menu = callShowInboxUnitMenu(fake, addedRef, view);
+		const ref = file("Areas/Career/Notes.md");
+		const menu = callShowInboxUnitMenu(fake, ref, view);
 
 		menu.items.find((i) => i.title === "Dismiss")!.clickHandler!();
 
-		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledWith(addedRef, "view", true, "v1");
+		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledWith(ref, "view", true, "v1");
 		// No "un-add"/clear-added call exists on the fake at all — if the implementation tried to call
 		// one, this test would throw rather than silently pass.
 	});
 
-	it("R2/G6 (real UnitIndex): dismissing an added + manually-promoted row clears neither marker and removes it from the inbox", () => {
+	it("R2/G6 (real UnitIndex): removing an added + manually-promoted row clears neither marker and removes it from the inbox", () => {
 		const app = new App();
 		seedRoot(app, ["Foo.md"]);
 		const ref = file("Foo.md");
@@ -136,7 +141,9 @@ describe("showInboxUnitMenu — Dismiss item (G4)", () => {
 		const view = createEmptyView("v1", "Default"); // inboxMode defaults to "view"
 
 		const menu = callShowInboxUnitMenuWithRealIndex(index, ref, view);
-		menu.items.find((i) => i.title === "Dismiss")!.clickHandler!();
+		// Polish R1 (PR-4 finding): an added row's removal item reads "Remove", not "Dismiss" — the
+		// underlying write (below) is identical either way.
+		menu.items.find((i) => i.title === "Remove")!.clickHandler!();
 
 		expect(index.isAdded(ref)).toBe(true);
 		expect(index.getAddedItems()).toEqual([{ ref, tag: "added" }]);
@@ -175,6 +182,138 @@ describe("showInboxUnitMenu — Dismiss item (G4)", () => {
 		index.setDismissed(ref, "global", true);
 		index.setDismissed(ref, "global", true);
 		expect(index.getDismissedGlobal()).toEqual([ref]);
+	});
+});
+
+// --- Polish R1 (PR-4 finding): "Remove" label for manually-added rows, same dismiss-style write ----
+
+describe("showInboxUnitMenu — 'Remove' label for manually-added rows (Polish R1)", () => {
+	it("a manually-added, not-yet-dismissed row's removal item reads 'Remove', not 'Dismiss'", () => {
+		const fake = fakeMenuThis({ isAdded: true });
+		const menu = callShowInboxUnitMenu(fake, file("Areas/Added.md"), createEmptyView("v1", "Default"));
+		expect(menu.titles()).toEqual(["Open", "Open in new tab", "Reveal in native explorer", "Copy link", "Place in view…", "Remove"]);
+	});
+
+	it("exactly one removal-type item exists either way — never both 'Dismiss' and 'Remove' at once", () => {
+		const fake = fakeMenuThis({ isAdded: true });
+		const menu = callShowInboxUnitMenu(fake, file("Areas/Added.md"), createEmptyView("v1", "Default"));
+		const removalLike = menu.titles().filter((t) => /dismiss|remove|un-?hide|un-?add/i.test(t));
+		expect(removalLike).toEqual(["Remove"]);
+	});
+
+	it("clicking 'Remove' writes through the exact same setDismissed(ref, scope, true) call as 'Dismiss'", () => {
+		const fake = fakeMenuThis({ isAdded: true });
+		const view = createEmptyView("v1", "Default");
+		const ref = file("Areas/Added.md");
+		const menu = callShowInboxUnitMenu(fake, ref, view);
+
+		menu.items.find((i) => i.title === "Remove")!.clickHandler!();
+
+		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledWith(ref, "view", true, "v1");
+		expect(fake.plugin.flushSave).toHaveBeenCalledTimes(1);
+		expect(fake.render).toHaveBeenCalledTimes(1);
+	});
+
+	it("a non-added row still reads 'Dismiss' (isAdded: false is the default)", () => {
+		const fake = fakeMenuThis();
+		const menu = callShowInboxUnitMenu(fake, file("Plain.md"), createEmptyView("v1", "Default"));
+		expect(menu.titles()).toContain("Dismiss");
+		expect(menu.titles()).not.toContain("Remove");
+	});
+});
+
+// --- Polish R1 (PR-5 finding): "Unhide" item for a dismissed row revealed via Show Dismissed -------
+
+describe("showInboxUnitMenu — 'Unhide' item for a revealed dismissed row (Polish R1)", () => {
+	it("a row dismissed in this view (view mode) shows 'Unhide' instead of 'Dismiss'", () => {
+		const fake = fakeMenuThis({ isDismissed: true });
+		const view = createEmptyView("v1", "Default"); // inboxMode defaults to "view"
+		const menu = callShowInboxUnitMenu(fake, file("Hidden.md"), view);
+		expect(menu.titles()).toEqual(["Open", "Open in new tab", "Reveal in native explorer", "Copy link", "Place in view…", "Unhide"]);
+	});
+
+	it("exactly one removal-type item exists when hidden — 'Unhide' only, never 'Dismiss'/'Remove' alongside it", () => {
+		const fake = fakeMenuThis({ isDismissed: true, isAdded: true });
+		const view = createEmptyView("v1", "Default");
+		const menu = callShowInboxUnitMenu(fake, file("Hidden.md"), view);
+		const removalLike = menu.titles().filter((t) => /dismiss|remove|un-?hide|un-?add/i.test(t));
+		expect(removalLike).toEqual(["Unhide"]);
+	});
+
+	it("clicking 'Unhide' outside Global view clears both the global and this view's own dismiss flag", () => {
+		// Clearing only the current mode's scope isn't enough: a "view" mode read of isDismissed is an
+		// OR-check against the global flag too, so a globally-dismissed row can show "Unhide" while
+		// viewed in "view" mode. Both writes always run so the row actually comes back either way.
+		const fake = fakeMenuThis({ isDismissed: true });
+		const view = createEmptyView("v1", "Default");
+		const ref = file("Hidden.md");
+		const menu = callShowInboxUnitMenu(fake, ref, view);
+
+		menu.items.find((i) => i.title === "Unhide")!.clickHandler!();
+
+		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledTimes(2);
+		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledWith(ref, "global", false);
+		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledWith(ref, "view", false, "v1");
+		expect(fake.plugin.flushSave).toHaveBeenCalledTimes(1);
+		expect(fake.render).toHaveBeenCalledTimes(1);
+	});
+
+	it("clicking 'Unhide' in Global view also clears both flags", () => {
+		const fake = fakeMenuThis({ isDismissed: true });
+		const view: View = { ...createEmptyView("v1", "Default"), inboxMode: "global" };
+		const ref = file("Hidden.md");
+		const menu = callShowInboxUnitMenu(fake, ref, view);
+
+		menu.items.find((i) => i.title === "Unhide")!.clickHandler!();
+
+		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledTimes(2);
+		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledWith(ref, "global", false);
+		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledWith(ref, "view", false, "v1");
+	});
+
+	it("'hidden' is scope-matched the same way getDismissedInboxUnits reads it: a view-scoped dismiss alone never shows 'Unhide' while reading in Global mode", () => {
+		const fake = fakeMenuThis({ isDismissed: false }); // isDismissed("global") would read false here
+		const view: View = { ...createEmptyView("v1", "Default"), inboxMode: "global" };
+		const menu = callShowInboxUnitMenu(fake, file("OnlyViewDismissed.md"), view);
+		expect(menu.titles()).toContain("Dismiss");
+		expect(menu.titles()).not.toContain("Unhide");
+		expect(fake.plugin.unitIndex.isDismissed).toHaveBeenCalledWith(file("OnlyViewDismissed.md"), "global");
+	});
+
+	it("R2 (real UnitIndex, end to end): Unhide on a globally-dismissed row, viewed in 'view' mode, still un-dismisses it and it reappears in the plain inbox", () => {
+		const app = new App();
+		seedRoot(app, ["Foo.md"]);
+		const ref = file("Foo.md");
+		const index = new UnitIndex(app, DEFAULT_SETTINGS, []);
+		index.setDismissed(ref, "global", true);
+		const view = createEmptyView("v1", "Default"); // inboxMode defaults to "view"
+		const views = new ViewsManager(app, [], "v1", () => {});
+
+		expect(views.getInboxUnits(makeUnits(["Foo.md"]), "v1", "view", index)).toEqual([]);
+
+		const menu = callShowInboxUnitMenuWithRealIndex(index, ref, view);
+		menu.items.find((i) => i.title === "Unhide")!.clickHandler!();
+
+		expect(index.isDismissed(ref, "global")).toBe(false);
+		expect(views.getInboxUnits(makeUnits(["Foo.md"]), "v1", "view", index).map((u) => u.path)).toEqual(["Foo.md"]);
+	});
+
+	it("R3 (real UnitIndex): Unhide on a row dismissed only in this view's own set clears it, and the row reappears", () => {
+		const app = new App();
+		seedRoot(app, ["Foo.md"]);
+		const ref = file("Foo.md");
+		const index = new UnitIndex(app, DEFAULT_SETTINGS, []);
+		index.setDismissed(ref, "view", true, "v1");
+		const view = createEmptyView("v1", "Default");
+		const views = new ViewsManager(app, [], "v1", () => {});
+
+		expect(views.getInboxUnits(makeUnits(["Foo.md"]), "v1", "view", index)).toEqual([]);
+
+		const menu = callShowInboxUnitMenuWithRealIndex(index, ref, view);
+		menu.items.find((i) => i.title === "Unhide")!.clickHandler!();
+
+		expect(index.getDismissedByView()).toEqual({});
+		expect(views.getInboxUnits(makeUnits(["Foo.md"]), "v1", "view", index).map((u) => u.path)).toEqual(["Foo.md"]);
 	});
 });
 
