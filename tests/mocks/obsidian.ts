@@ -113,6 +113,11 @@ export class Vault {
 		return [...this.entries.values()].filter((e): e is TFile => e instanceof TFile);
 	}
 
+	/** Every loaded entry, the vault root included, as Obsidian's `getAllLoadedFiles` does. */
+	getAllLoadedFiles(): TAbstractFile[] {
+		return [this.root, ...this.entries.values()];
+	}
+
 	getMarkdownFiles(): TFile[] {
 		return this.getFiles().filter((f) => f.extension === "md");
 	}

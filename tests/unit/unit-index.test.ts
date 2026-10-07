@@ -473,3 +473,58 @@ describe("noAutoPromoteFolders does not change computePromotions (G3, G4, G7)", 
 		expect(sorted(withList)).toContain("promoted-file:Attachments/tacho-sheet.png");
 	});
 });
+
+describe("UnitIndex.removeAdded — PR-1.F2 (G10) inbox Remove on a missing added row", () => {
+	const fileRef = (path: string): UnitRef => ({ kind: "file", path });
+	const folderRef = (path: string): UnitRef => ({ kind: "folder", path });
+
+	function indexWith(addedItems: AddedItem[], dismissedGlobal: UnitRef[] = [], dismissedByView: Record<string, UnitRef[]> = {}): UnitIndex {
+		return new UnitIndex(new App(), { ...DEFAULT_SETTINGS }, [], dismissedByView, dismissedGlobal, addedItems);
+	}
+
+	it("removes only the matching file ref", () => {
+		const index = indexWith([
+			{ ref: fileRef("a.md"), tag: "added" },
+			{ ref: fileRef("b.md"), tag: "added" },
+		]);
+		index.removeAdded(fileRef("a.md"));
+		expect(index.getAddedItems()).toEqual([{ ref: fileRef("b.md"), tag: "added" }]);
+		expect(index.isAdded(fileRef("a.md"))).toBe(false);
+	});
+
+	it("removes only the matching folder ref, leaving a file ref with the same path alone", () => {
+		const index = indexWith([
+			{ ref: folderRef("Jobs/Acme"), tag: "added" },
+			{ ref: fileRef("Jobs/Acme"), tag: "added" },
+		]);
+		index.removeAdded(folderRef("Jobs/Acme"));
+		expect(index.getAddedItems()).toEqual([{ ref: fileRef("Jobs/Acme"), tag: "added" }]);
+	});
+
+	it("is a no-op for an unknown ref", () => {
+		const items: AddedItem[] = [{ ref: fileRef("a.md"), tag: "added" }];
+		const index = indexWith(items);
+		index.removeAdded(fileRef("nope.md"));
+		expect(index.getAddedItems()).toEqual([{ ref: fileRef("a.md"), tag: "added" }]);
+	});
+
+	it("leaves dismissals (global and per-view) intact", () => {
+		const index = indexWith(
+			[{ ref: fileRef("a.md"), tag: "added" }],
+			[fileRef("g.md")],
+			{ v1: [fileRef("v.md")] }
+		);
+		index.removeAdded(fileRef("a.md"));
+		expect(index.getDismissedGlobal()).toEqual([fileRef("g.md")]);
+		expect(index.getDismissedByView()).toEqual({ v1: [fileRef("v.md")] });
+	});
+
+	it("removes every duplicate entry for the same ref", () => {
+		const index = indexWith([
+			{ ref: fileRef("a.md"), tag: "added" },
+			{ ref: fileRef("a.md"), tag: "added" },
+		]);
+		index.removeAdded(fileRef("a.md"));
+		expect(index.getAddedItems()).toEqual([]);
+	});
+});
