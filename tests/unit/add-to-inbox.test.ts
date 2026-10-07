@@ -169,9 +169,10 @@ describe("AddFileSuggestModal (G2 structural, G3 wiring)", () => {
 
 type FakeThis = {
 	plugin: {
-		app: { vault: { getFiles: () => TFile[] } };
+		app: { vault: { getFiles: () => TFile[]; getAllLoadedFiles: () => TFile[] } };
+		settings: { poolFolder: string; excludedFolders: string[] };
 		unitIndex: { getUnits: () => Unit[]; markAdded: ReturnType<typeof vi.fn> };
-		viewsManager: { isPlacedAnywhere: (ref: UnitRef) => boolean };
+		viewsManager: { placedRefKeys: () => Set<string> };
 		flushSave: ReturnType<typeof vi.fn>;
 	};
 	render: ReturnType<typeof vi.fn>;
@@ -181,12 +182,13 @@ function callOpenAddFileModal(fake: FakeThis): void {
 	(AtlasExplorerView.prototype as unknown as { openAddFileModal: (this: FakeThis) => void }).openAddFileModal.call(fake);
 }
 
-function fakeFor(units: Unit[], files: TFile[], isPlacedAnywhere: (ref: UnitRef) => boolean = () => false): FakeThis {
+function fakeFor(units: Unit[], files: TFile[], placedRefKeys: string[] = []): FakeThis {
 	return {
 		plugin: {
-			app: { vault: { getFiles: () => files } },
+			app: { vault: { getFiles: () => files, getAllLoadedFiles: () => files } },
+			settings: { poolFolder: "_pool", excludedFolders: [] },
 			unitIndex: { getUnits: () => units, markAdded: vi.fn() },
-			viewsManager: { isPlacedAnywhere },
+			viewsManager: { placedRefKeys: () => new Set(placedRefKeys) },
 			flushSave: vi.fn(async () => {}),
 		},
 		render: vi.fn(async () => {}),
@@ -204,7 +206,7 @@ describe("AtlasExplorerView.openAddFileModal (G2, G3, E4, GP3)", () => {
 		seedRoot(app, ["ModuleA/Promoted.md", "ModuleA/Placed.md", "Areas/Career/Notes.md"], ["ModuleA", "Areas", "Areas/Career"]);
 		const files = app.vault.getFiles();
 		const units: Unit[] = [{ type: "promoted-file", path: "ModuleA/Promoted.md", topLevelFolder: "ModuleA" }];
-		const fake = fakeFor(units, files, (ref) => ref.path === "ModuleA/Placed.md");
+		const fake = fakeFor(units, files, ["file:ModuleA/Placed.md"]);
 
 		let built: AddFileSuggestModal | undefined;
 		vi.spyOn(AddFileSuggestModal.prototype, "open").mockImplementation(function (this: AddFileSuggestModal) {
