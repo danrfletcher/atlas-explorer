@@ -23,7 +23,6 @@ function source(mode: Mode, rules?: YamlFilterRule[]): FolderSourceConfig {
 		path: "Jobs",
 		showFiles: true,
 		showFolders: false,
-		refreshOnViewLoad: false,
 		mode,
 		...(rules ? { filters: { files: { yaml: { rules } } } } : {}),
 	};

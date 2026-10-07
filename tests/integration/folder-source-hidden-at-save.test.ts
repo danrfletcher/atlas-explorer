@@ -35,7 +35,6 @@ function source(mode: FolderSourceConfig["mode"], rules?: YamlFilterRule[]): Fol
 		path: "Jobs",
 		showFiles: true,
 		showFolders: false,
-		refreshOnViewLoad: false,
 		mode,
 		...(rules ? { filters: { files: { yaml: { rules } } } } : {}),
 	};

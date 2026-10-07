@@ -144,7 +144,7 @@ describe("openApiSourceModal — G6 acceptance: path-cleared-on-mode-toggle rule
 		const modal = FakeApiSourceModal.instances[0];
 		modal.onSave({
 			type: "folder",
-			source: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false },
+			source: { location: "outside", path: "", showFiles: true, showFolders: true },
 			outsidePath: "/Volumes/External/Notes",
 		});
 
@@ -163,7 +163,7 @@ describe("openApiSourceModal — G6 acceptance: path-cleared-on-mode-toggle rule
 		const modal = FakeApiSourceModal.instances[0];
 		modal.onSave({
 			type: "folder",
-			source: { location: "inside", path: "Projects/Active", showFiles: true, showFolders: true, refreshOnViewLoad: false },
+			source: { location: "inside", path: "Projects/Active", showFiles: true, showFolders: true },
 			outsidePath: "",
 		});
 
@@ -182,7 +182,7 @@ describe("openApiSourceModal — G6 acceptance: path-cleared-on-mode-toggle rule
 		const modal = FakeApiSourceModal.instances[0];
 		modal.onSave({
 			type: "folder",
-			source: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false },
+			source: { location: "outside", path: "", showFiles: true, showFolders: true },
 			outsidePath: "",
 		});
 

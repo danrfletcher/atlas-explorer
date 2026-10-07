@@ -15,7 +15,6 @@ function setupApiSourceWithNoteRef(): { vm: ViewsManager; viewId: string; nodeId
 		method: "GET",
 		mapping: { idField: "id", labelField: "label" },
 		mode: "merge",
-		refreshOnViewLoad: false,
 	};
 	const apiItemState: Record<string, ApiItemState> = {
 		"1": {

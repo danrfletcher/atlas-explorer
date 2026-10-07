@@ -271,7 +271,6 @@ function folderSource(overrides: Partial<FolderSourceConfig> = {}): FolderSource
 		path: "Jobs",
 		showFiles: true,
 		showFolders: true,
-		refreshOnViewLoad: false,
 		mode: "merge",
 		...overrides,
 	} as FolderSourceConfig;

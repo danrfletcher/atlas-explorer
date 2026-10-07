@@ -262,6 +262,43 @@ export function reconcileFolderSourceChildDelete(
 	};
 }
 
+/** PR-2 (R2-Q2): diffs an Outside-Vault source's managed refs against its current listing. Refs are
+ * bare root-relative names, so a rename can only be recognised by what disappeared and what appeared.
+ * A managed ref that is gone and a listed ref that is new, of the same kind, count as a rename only
+ * when they are the sole such pair in that kind. Anything ambiguous (two renames at once, or a
+ * rename alongside an unrelated add) is reported as a delete, and the add pass then creates the new
+ * row, so the end state is still correct with no duplicate. `removedRefs` keeps a row the user removed
+ * from coming back as an add. Callers pass only the kinds this source currently shows. */
+export function diffOutsideChildren(
+	managed: UnitRef[],
+	listed: UnitRef[],
+	removedRefs: ReadonlySet<string>
+): { renamed: { from: UnitRef; to: UnitRef }[]; gone: UnitRef[] } {
+	const managedKeys = new Set(managed.map(unitRefKey));
+	const listedKeys = new Set(listed.map(unitRefKey));
+	const gone = managed.filter((ref) => !listedKeys.has(unitRefKey(ref)));
+	const added = listed.filter((ref) => {
+		const key = unitRefKey(ref);
+		return !managedKeys.has(key) && !removedRefs.has(key);
+	});
+	const renamed: { from: UnitRef; to: UnitRef }[] = [];
+	const unpaired: UnitRef[] = [];
+	for (const kind of ["file", "folder"] as const) {
+		const goneOfKind = gone.filter((ref) => ref.kind === kind);
+		const addedOfKind = added.filter((ref) => ref.kind === kind);
+		if (goneOfKind.length === 1 && addedOfKind.length === 1) renamed.push({ from: goneOfKind[0], to: addedOfKind[0] });
+		else unpaired.push(...goneOfKind);
+	}
+	return { renamed, gone: unpaired };
+}
+
+/** PR-1 (G5): the vault folder a path sits directly inside — `""` for a vault-root path. Pure string
+ * work, so it answers "is this a direct child of that folder" for a path that no longer exists. */
+export function parentFolderPath(path: string): string {
+	const slash = path.lastIndexOf("/");
+	return slash === -1 ? "" : path.slice(0, slash);
+}
+
 /** PR-6 (R3 fix): the display text a Folder-source child's row showed while its file still
  * existed — a file's bare basename with its extension stripped (matching how a real `unit` row
  * displays it before deletion), or the raw last path segment for a folder (nothing to strip).

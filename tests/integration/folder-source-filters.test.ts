@@ -42,7 +42,6 @@ function addSource(f: Fixture, label: string, rules?: YamlFilterRule[], mode: Fo
 		path: "Jobs",
 		showFiles: true,
 		showFolders: false,
-		refreshOnViewLoad: false,
 		mode,
 		...(rules ? { filters: { files: { yaml: { rules } } } } : {}),
 	};
@@ -260,7 +259,6 @@ const CSV_SOURCE: CsvSourceConfig = {
 	path: "Data/items.csv",
 	mapping: { idField: "id", labelField: "name" },
 	mode: "append",
-	refreshOnViewLoad: false,
 };
 
 const TABLE_SOURCE: MarkdownTableSourceConfig = {
@@ -268,7 +266,6 @@ const TABLE_SOURCE: MarkdownTableSourceConfig = {
 	tableIndex: 0,
 	mapping: { idField: "id", labelField: "name" },
 	mode: "overwrite",
-	refreshOnViewLoad: false,
 };
 
 /** A single meta node carrying one non-Folder source, loaded through the real `ViewsManager` constructor. */

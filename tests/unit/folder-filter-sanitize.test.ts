@@ -14,7 +14,7 @@ function loadFolderSource(folderSource: unknown): FolderSourceConfig | undefined
 }
 
 function folderSourceWith(filters: unknown): FolderSourceConfig {
-	return { type: "folder", location: "inside", path: "Jobs", showFiles: true, showFolders: false, refreshOnViewLoad: false, mode: "merge", filters } as FolderSourceConfig;
+	return { type: "folder", location: "inside", path: "Jobs", showFiles: true, showFolders: false, mode: "merge", filters } as FolderSourceConfig;
 }
 
 describe("sanitizeFolderSource — filters", () => {

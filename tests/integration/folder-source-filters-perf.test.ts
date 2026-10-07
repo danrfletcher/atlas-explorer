@@ -32,7 +32,6 @@ describe("E8: a large folder is evaluated from metadataCache only", () => {
 			path: "Jobs",
 			showFiles: true,
 			showFolders: false,
-			refreshOnViewLoad: false,
 			mode: "merge",
 			filters: { files: { yaml: { rules: [{ key: "status", value: "active" }] } } },
 		};

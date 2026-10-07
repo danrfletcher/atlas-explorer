@@ -17,7 +17,6 @@ function overwriteSource(overrides: Partial<ApiSourceConfig> = {}): ApiSourceCon
 		method: "GET",
 		mapping: { idField: "id", labelField: "name" },
 		mode: "overwrite",
-		refreshOnViewLoad: false,
 		confirmBeforeDelete: true,
 		...overrides,
 	};

@@ -16,7 +16,6 @@ function baseSource(path: string, overrides: Partial<MarkdownTableSourceConfig> 
 		tableIndex: 0,
 		mapping: { idField: "id", labelField: "name" },
 		mode: "merge",
-		refreshOnViewLoad: false,
 		...overrides,
 	};
 }
