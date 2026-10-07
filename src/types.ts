@@ -76,7 +76,12 @@ export type Unit =
 	| { type: "promoted-block"; path: string; subpath: string }
 	/** PR-3 (G3): a file manually added to the inbox via "+" — see `AddedItem`. Always a file (the
 	 * "+" modal only ever offers `app.vault.getFiles()`, never a folder). */
-	| { type: "added-file"; path: string };
+	| { type: "added-file"; path: string }
+	/** PR-1.S1 (G2): a sub-folder manually added to the inbox — see `AddedItem`. Behaves as a module
+	 * everywhere a folder ref does (`unitToRef` maps it to a folder ref): folder icon, icon opens
+	 * Module Contents, never expands inline. Never a vault-root folder (those are already
+	 * `folder-unit`s). */
+	| { type: "added-folder"; path: string };
 
 export function unitKey(unit: Unit): string {
 	return unit.type === "promoted-block" ? `block:${unit.path}#${unit.subpath}` : `${unit.type}:${unit.path}`;
@@ -86,7 +91,7 @@ export function unitToRef(unit: Unit): UnitRef {
 	if (unit.type === "promoted-block") {
 		return { kind: "block", path: unit.path, subpath: unit.subpath };
 	}
-	if (unit.type === "folder-unit" || unit.type === "promoted-folder") {
+	if (unit.type === "folder-unit" || unit.type === "promoted-folder" || unit.type === "added-folder") {
 		return { kind: "folder", path: unit.path };
 	}
 	return { kind: "file", path: unit.path };

@@ -21,6 +21,7 @@ function iconFor(unit: Unit): string {
 	switch (unit.type) {
 		case "folder-unit":
 		case "promoted-folder":
+		case "added-folder":
 			return "folder";
 		case "free-block":
 			return "message-square";
@@ -48,7 +49,7 @@ export async function resolveUnit(
 	const file = app.vault.getAbstractFileByPath(unit.path);
 	if (!file) return null;
 	const promoted = unit.type === "promoted-file" || unit.type === "promoted-folder" || unit.type === "promoted-block";
-	const added = unit.type === "added-file";
+	const added = unit.type === "added-file" || unit.type === "added-folder";
 
 	switch (unit.type) {
 		case "root-file":
@@ -58,6 +59,8 @@ export async function resolveUnit(
 			return { unit, text: file.basename, icon: iconFor(unit), promoted, added, ctime: file.stat.ctime };
 		case "folder-unit":
 		case "promoted-folder":
+		case "added-folder":
+			// PR-1.S1 (G2): an added folder's row text is its folder name, never its path, and follows renames.
 			if (!(file instanceof TFolder)) return null;
 			return { unit, text: file.name, icon: iconFor(unit), promoted, added, ctime: 0 };
 		case "free-block": {
