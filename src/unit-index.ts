@@ -222,6 +222,13 @@ export class UnitIndex {
 		this.addedItems.push({ ref, tag: "added" });
 	}
 
+	/** PR-1.F2 (G10): drops the `addedItems` entry for `ref` (file or folder kind) and nothing else —
+	 * other entries and every dismissal are left as they are, and an unknown ref is a no-op. Only the
+	 * inbox's "(missing)" Remove calls this. Adds to the in-memory list only: the caller persists. */
+	removeAdded(ref: UnitRef): void {
+		this.addedItems = this.addedItems.filter((item) => !(isUsableAddedItem(item) && unitRefsEqual(item.ref, ref)));
+	}
+
 	/** Create Module on a root file: a manual promotion of the file becomes one of the new module
 	 * (folder) instead. Also catches the interface-note path `<folder>/<folder>.md`, in case the
 	 * rename hook ran first; a result equal to the new folder ref is dropped if already present

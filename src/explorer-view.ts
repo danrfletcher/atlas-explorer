@@ -63,6 +63,37 @@ function sanitizeFileName(name: string): string {
 	return name.replace(/[/\\:*?"<>|]/g, "-").trim();
 }
 
+/** PR-1.F2 (G3): one inbox row as the sort sees it. */
+export interface InboxSortRow {
+	unit: Unit;
+	/** The row's displayed text (`RowInfo.text`), used for name order. */
+	text: string;
+}
+
+/** PR-1.F2 (G3): the inbox sort, extracted as a pure comparator so it is unit-testable. Alphabetical
+ * mode orders every row by name, files and modules interleaved. Newest-first (any other mode) puts
+ * files first by ctime, newest first, then every module (folder-kind unit: folder-unit, promoted-folder,
+ * added-folder) ordered by name. Ties on name or ctime fall back to path, so a re-render never reorders
+ * rows that compare equal. `lookup` is the vault's `getAbstractFileByPath`, read only for a file's ctime. */
+export function compareInboxRows(
+	a: InboxSortRow,
+	b: InboxSortRow,
+	alphabetical: boolean,
+	lookup: (path: string) => TAbstractFile | null
+): number {
+	const byName = (): number => a.text.localeCompare(b.text) || a.unit.path.localeCompare(b.unit.path);
+	if (alphabetical) return byName();
+	const aIsModule = unitToRef(a.unit).kind === "folder";
+	const bIsModule = unitToRef(b.unit).kind === "folder";
+	if (aIsModule !== bIsModule) return aIsModule ? 1 : -1;
+	if (aIsModule) return byName();
+	const fileA = lookup(a.unit.path);
+	const fileB = lookup(b.unit.path);
+	const ctimeA = fileA instanceof TFile ? fileA.stat.ctime : 0;
+	const ctimeB = fileB instanceof TFile ? fileB.stat.ctime : 0;
+	return ctimeB - ctimeA || byName();
+}
+
 interface RowInfo {
 	text: string;
 	secondary?: string;
@@ -2048,16 +2079,12 @@ export class AtlasExplorerView extends ItemView {
 			combined.map(async ({ unit, hidden }) => ({ unit, ref: unitToRef(unit), hidden, info: await this.resolveRef(unitToRef(unit)) }))
 		);
 		const filtered = resolved.filter((r) => this.matchesFilter(r.info.text));
-		const sorted =
-			this.sortMode === "alphabetical"
-				? filtered.sort((a, b) => a.info.text.localeCompare(b.info.text))
-				: filtered.sort((a, b) => {
-						const fileA = this.plugin.app.vault.getAbstractFileByPath(a.unit.path);
-						const fileB = this.plugin.app.vault.getAbstractFileByPath(b.unit.path);
-						const ctimeA = fileA instanceof TFile ? fileA.stat.ctime : 0;
-						const ctimeB = fileB instanceof TFile ? fileB.stat.ctime : 0;
-						return ctimeB - ctimeA; // newest first, per spec default
-				  });
+		// PR-1.F2 (G3): every module (folder-kind unit) sorts by name in newest-first mode, not ctime 0.
+		const alphabetical = this.sortMode === "alphabetical";
+		const lookup = (path: string) => this.plugin.app.vault.getAbstractFileByPath(path);
+		const sorted = filtered.sort((a, b) =>
+			compareInboxRows({ unit: a.unit, text: a.info.text }, { unit: b.unit, text: b.info.text }, alphabetical, lookup)
+		);
 
 		// PR 20: captured here (not queried from the DOM like the bucket's) — F11's virtualization
 		// below means most of these rows never actually exist in the DOM at once, so a shift-click on
@@ -2110,12 +2137,16 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, view: View, hidden = false): HTMLElement {
+		// PR-1.F2 (G10): only an "added" item that has gone missing gets the greyed row. A missing row that
+		// is not "added" (promoted, link-derived) keeps today's inbox behaviour.
+		const missingAdded = info.missing && this.plugin.unitIndex.isAdded(ref);
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		const key = unitRefKey(ref);
+		if (missingAdded) row.addClass("atlas-missing");
 		row.dataset.refKey = key;
 		row.dataset.selectKey = key;
 		row.toggleClass("is-selected", this.selectedInboxRefKeys.has(key));
-		row.setAttr("draggable", "true");
+		row.setAttr("draggable", missingAdded ? "false" : "true");
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		setIcon(iconEl, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
@@ -2125,22 +2156,44 @@ export class AtlasExplorerView extends ItemView {
 		// without either clobbering the other, since each is just its own sibling span.
 		if (hidden) row.createSpan({ cls: "atlas-badge", text: "hidden" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
+		if (missingAdded) {
+			// PR-1.F2 (G10): same greyed "(missing)" row and Remove button as the bucket; never auto-removed.
+			row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
+			const removeBtn = row.createDiv({ cls: "atlas-row-action" });
+			setIcon(removeBtn, "x");
+			setTooltip(removeBtn, "Remove from inbox");
+			removeBtn.addEventListener("click", (evt) => {
+				evt.stopPropagation();
+				this.removeMissingAddedRow(ref);
+			});
+		}
 		// PR 9 (issue 2): modules never expand inline anymore, in the inbox or the bucket — the icon
-		// opens the Module Contents modal instead (see `wireModuleRow`).
-		if (ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
+		// opens the Module Contents modal instead (see `wireModuleRow`). A missing added row is never wired.
+		if (ref.kind === "folder" && !missingAdded) this.wireModuleRow(row, iconEl, ref.path);
 
 		this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, key, "inbox", this.inboxSelectOrder);
-			if (!consumed) void this.openRef(ref);
+			if (!consumed && !missingAdded) void this.openRef(ref);
 		});
 		row.addEventListener("dragstart", () => (this.dragPayload = this.buildInboxDragPayload(ref)));
 		row.tabIndex = 0;
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
+			// PR-1.F2 (G10): a missing added row offers only Remove, never Open/Create note/Place (its target is gone).
+			if (missingAdded) return;
 			this.showInboxUnitMenu(evt, ref, view);
 		});
 		return row;
+	}
+
+	/** PR-1.F2 (G10): Remove on an inbox "(missing)" row. Takes the item out of `addedItems`, drops it from
+	 * the selection so no ghost row is left behind, saves immediately, and re-renders. Nothing else changes. */
+	private removeMissingAddedRow(ref: UnitRef): void {
+		this.plugin.unitIndex.removeAdded(ref);
+		this.selectedInboxRefKeys.delete(unitRefKey(ref));
+		void this.plugin.flushSave();
+		void this.render();
 	}
 
 	/** F11: renders only the rows within the scrolled viewport (+ overscan) of a fixed-height,
