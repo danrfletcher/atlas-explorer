@@ -56,7 +56,6 @@ describe("click-action-fence — F1 & F2 Fence checks during click action", () =
 			method: "GET",
 			mapping: { idField: "id", labelField: "name" },
 			mode: "merge",
-			refreshOnViewLoad: false,
 		};
 		// Effective action is open-attachment, NEVER run-command
 		expect(resolveClickAction(defaultSource)).toBe("open-attachment");
