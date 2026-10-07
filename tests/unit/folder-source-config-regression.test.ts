@@ -259,7 +259,6 @@ describe("folder-source-config-regression — G15: Location toggle clears path o
 			path: "Projects",
 			showFiles: true,
 			showFolders: false,
-			refreshOnViewLoad: false,
 			mode: "overwrite" as const,
 		};
 		const modal = new ApiSourceModal({} as any, null, [], vi.fn(), folderSource);

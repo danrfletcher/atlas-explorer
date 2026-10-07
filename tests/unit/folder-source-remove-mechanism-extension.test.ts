@@ -19,7 +19,6 @@ function setupMergeModeDeletedChild() {
 		path: "Projects",
 		showFiles: true,
 		showFolders: true,
-		refreshOnViewLoad: false,
 		mode: "merge",
 	};
 	const child: ViewNode = {

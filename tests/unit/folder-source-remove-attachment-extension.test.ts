@@ -16,7 +16,6 @@ function setup(mode: "append" | "merge" | "overwrite") {
 		path: "Projects",
 		showFiles: true,
 		showFolders: true,
-		refreshOnViewLoad: false,
 		mode,
 	};
 	const child: ViewNode = {
