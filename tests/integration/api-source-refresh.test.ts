@@ -1,9 +1,10 @@
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ApiSourceController, ConfirmDeleteAnswer, ViewLoadTrigger, dotStateFor, dotTooltip } from "../../src/api-source-controller";
 import { RequestFn, ScheduleTimeout } from "../../src/api-http";
-import { ApiSourceConfig, ViewNode } from "../../src/types";
+import { ApiSourceConfig, View, ViewNode } from "../../src/types";
+import { AtlasExplorerView } from "../../src/explorer-view";
 
 function makeNode(id: string): ViewNode {
 	return { id, type: "meta", label: "API folder", children: [] };
@@ -540,5 +541,60 @@ describe("ViewLoadTrigger — G5a: fires once per open, not on every re-render",
 		trigger.deactivate();
 		expect(trigger.activate()).toBe(true);
 		expect(trigger.activate()).toBe(false);
+	});
+});
+
+// R1 (F2b): a sourced unit, not only an Atlas folder, refreshes at load and on its own timer, and
+// a sourced node nested under a unit is found by the same walks. Drives the real explorer methods
+// on a plain object so the walks and the timer wiring run unstubbed; only the refresh call is spied.
+type Fake = Record<string, any>;
+const explorerProto = AtlasExplorerView.prototype as unknown as Record<string, (this: Fake, ...args: unknown[]) => any>;
+
+function explorerOver(view: View): Fake {
+	const fake: Fake = Object.create(AtlasExplorerView.prototype);
+	Object.assign(fake, {
+		plugin: { viewsManager: { getActiveView: () => view } },
+		refreshApiSource: vi.fn(),
+		refreshEveryTimers: { sync: vi.fn() },
+	});
+	return fake;
+}
+
+const timedSource = (overrides: Partial<ApiSourceConfig> = {}): ApiSourceConfig => baseSource("http://example.invalid/timed", { refreshOnViewLoad: true, ...overrides });
+
+describe("F2b — a sourced unit refreshes at load and on its own timer (G11b, E-a)", () => {
+	it("a sourced unit and a sourced meta folder nested under a unit are both refreshed on view load", () => {
+		const nested: ViewNode = { id: "nested", type: "meta", label: "Nested", children: [], apiSource: timedSource() };
+		const unitNode: ViewNode = { id: "u", type: "unit", ref: { kind: "file", path: "Linear.md" }, children: [nested], apiSource: timedSource() };
+		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [unitNode] };
+		const fake = explorerOver(view);
+
+		explorerProto.refreshApiSourcesOnViewLoad.call(fake);
+
+		expect(fake.refreshApiSource).toHaveBeenCalledWith(view, unitNode, "automatic");
+		expect(fake.refreshApiSource).toHaveBeenCalledWith(view, nested, "automatic");
+	});
+
+	it("a sourced unit with refresh-every enabled is scheduled, and its timer refreshes that unit", () => {
+		const unitNode: ViewNode = {
+			id: "u",
+			type: "unit",
+			ref: { kind: "file", path: "Linear.md" },
+			children: [],
+			apiSource: timedSource({ refreshOnViewLoad: false, refreshEveryMinutesEnabled: true, refreshEveryMinutes: 5 }),
+			apiCache: { fetchedAt: 1000, ok: true, error: null, rows: [], skippedCount: 0, truncated: false },
+		};
+		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [unitNode] };
+		const fake = explorerOver(view);
+
+		explorerProto.syncRefreshTimers.call(fake, view);
+
+		const sync = fake.refreshEveryTimers.sync as ReturnType<typeof vi.fn>;
+		expect(sync).toHaveBeenCalledTimes(1);
+		const [entries, onDue] = sync.mock.calls[0] as [{ id: string; minutes: number; lastFetchedAt: number | null }[], (id: string) => void];
+		expect(entries).toEqual([expect.objectContaining({ id: "u", minutes: 5, lastFetchedAt: 1000 })]);
+
+		onDue("u");
+		expect(fake.refreshApiSource).toHaveBeenCalledWith(view, unitNode, "automatic");
 	});
 });

@@ -4,8 +4,15 @@ import { CreateKind, createFromMeta } from "../../src/create-from-meta";
 import { getFreeBlockDisplayTextFromContent } from "../../src/display-text";
 import { LINKS_NOT_UPDATED_MESSAGE } from "../../src/links-notice";
 import { ViewsManager } from "../../src/views";
-import { UnitRef, ViewNode } from "../../src/types";
-import { CARRIED, clone, file, folder, meta, setup, subtreeIds, tEmpty, tGov, tMany, tNested, unit, walk } from "./create-from-meta-fixtures";
+import { ApiSourceConfig, CsvSourceConfig, FolderSourceConfig, UnitRef, View, ViewNode } from "../../src/types";
+import { AtlasExplorerView } from "../../src/explorer-view";
+import { ApiSourceController } from "../../src/api-source-controller";
+import { CsvSourceController } from "../../src/csv-source-controller";
+import { obsidianRequestImpl } from "../../src/api-request-obsidian";
+import { DEFAULT_SETTINGS } from "../../src/settings";
+import { CARRIED, clone, file, folder, meta, setup, subtreeIds, tEmpty, tGov, tMany, tNested, unit, walk, Setup } from "./create-from-meta-fixtures";
+
+vi.mock("../../src/api-request-obsidian", () => ({ obsidianRequestImpl: vi.fn() }));
 
 const KINDS: CreateKind[] = ["block", "file", "module"];
 const POOL_ID = /^_pool\/\d{14}-[0-9a-z]{4}\.md$/;
@@ -659,5 +666,132 @@ describe("F-4/EC-12 a repeated submit makes one item", () => {
 describe("views manager type check", () => {
 	it("the helper this PR reuses is the PR-1 one (no second replace method)", () => {
 		expect(Object.getOwnPropertyNames(ViewsManager.prototype).filter((n) => /replaceMeta|replaceUnit/.test(n))).toEqual(["replaceMetaNodeWithUnit"]);
+	});
+});
+
+// R1 (F2 regression): Create on a sourced Atlas folder must leave a unit whose source rows still
+// render, and still refresh, through the real explorer paths (renderNode, refreshApiSource,
+// refreshCsvSource, refreshFolderSource), not only through the data layer.
+type Fake = Record<string, any>;
+const explorerProto = AtlasExplorerView.prototype as unknown as Record<string, (this: Fake, ...args: unknown[]) => any>;
+
+/** A real `AtlasExplorerView` method set bound to a plain object: `Object.create` keeps every real
+ * prototype method reachable through `this`, so `renderNode` and the refresh wrappers run unstubbed. */
+function explorerFor(s: Setup): Fake {
+	const fake: Fake = Object.create(AtlasExplorerView.prototype);
+	Object.assign(fake, {
+		plugin: {
+			app: s.app,
+			settings: DEFAULT_SETTINGS,
+			statusesManager: s.statuses,
+			viewsManager: s.views,
+			apiSourceController: new ApiSourceController(),
+			csvSourceController: new CsvSourceController(),
+			apiHeadersStore: { get: () => [] },
+			folderSourcePathStore: { get: () => undefined },
+		},
+		filterText: "",
+		expandedTruncationGroups: new Set<string>(),
+		selectedBucketNodeIds: new Set<string>(),
+		selectedInboxRefKeys: new Set<string>(),
+		unitsByRefKey: new Map(),
+		openConfirmDeleteModals: [],
+	});
+	return fake;
+}
+
+async function renderRow(fake: Fake, node: ViewNode, view: View): Promise<HTMLElement> {
+	const container = document.createElement("div");
+	await explorerProto.renderNode.call(fake, node, container, view, 0, []);
+	return container;
+}
+
+const apiRowTexts = (c: HTMLElement) => Array.from(c.querySelectorAll(".atlas-row-api-item .atlas-row-text")).map((el) => el.textContent);
+
+/** The Atlas folder "Field tech" as the user left it: rows fetched, two of them with a status and a note. */
+function sourcedFolder(extra: Partial<ViewNode>): ViewNode {
+	return meta("ft", "Field tech", [], {
+		apiItemState: {
+			"1": { id: "1", label: "One", explicitStatusId: "doing", noteRef: { kind: "file", path: "Notes/one.md" } },
+			"2": { id: "2", label: "Two", explicitStatusId: "idea" },
+		},
+		apiItemOrder: ["1", "2"],
+		...extra,
+	});
+}
+
+const cacheOf = (rows: { id: string; label: string }[]) => ({ fetchedAt: 1000, ok: true, error: null, rows, skippedCount: 0, truncated: false, lastSuccessAt: 1000 });
+
+const API_SOURCE: ApiSourceConfig = { url: "https://api.example.com/issues", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false };
+const CSV_SOURCE: CsvSourceConfig = { path: "Data.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false };
+const FOLDER_SOURCE: FolderSourceConfig = { location: "inside", path: "Archive", showFiles: true, showFolders: true, refreshOnViewLoad: false };
+
+describe.each(KINDS)("F2a/F2b — Create (%s) on a sourced Atlas folder with an API source", (kind) => {
+	it("the unit still renders its rows with status and notes, and a refresh updates them and keeps both", async () => {
+		const s = setup([sourcedFolder({ apiSource: API_SOURCE, apiCache: cacheOf([{ id: "1", label: "One" }, { id: "2", label: "Two" }]) })]);
+		const fake = explorerFor(s);
+		const view = s.views.getView("default")!;
+
+		expect(await createFromMeta(s.deps, kind, "default", "ft", "Field tech")).toMatchObject({ ok: true });
+		const node = s.views.getNode("default", "ft")!;
+		expect(node.type).toBe("unit");
+		expect(apiRowTexts(await renderRow(fake, node, view))).toEqual(["One", "Two"]);
+
+		vi.mocked(obsidianRequestImpl).mockResolvedValue({
+			status: 200,
+			text: JSON.stringify([{ id: "1", name: "One renamed" }, { id: "2", name: "Two" }, { id: "3", name: "Three" }]),
+		});
+		explorerProto.refreshApiSource.call(fake, view, node, "manual");
+		await vi.waitFor(() => expect(node.apiCache?.rows).toHaveLength(3));
+
+		expect(node.apiItemState?.["1"]).toMatchObject({ label: "One renamed", explicitStatusId: "doing", noteRef: { kind: "file", path: "Notes/one.md" } });
+		expect(node.apiItemState?.["2"]).toMatchObject({ explicitStatusId: "idea" });
+		expect(apiRowTexts(await renderRow(fake, node, view))).toEqual(["One renamed", "Two", "Three"]);
+	});
+});
+
+describe.each(KINDS)("F2a/F2b — Create (%s) on a sourced Atlas folder with a CSV source", (kind) => {
+	it("the unit still renders its CSV rows, and a refresh from the vault file updates them and keeps status and notes", async () => {
+		const s = setup([sourcedFolder({ csvSource: CSV_SOURCE, apiCache: cacheOf([{ id: "1", label: "One" }, { id: "2", label: "Two" }]) })]);
+		await s.app.vault.create("Data.csv", "id,name\n1,One\n2,Two\n");
+		const fake = explorerFor(s);
+		const view = s.views.getView("default")!;
+
+		expect(await createFromMeta(s.deps, kind, "default", "ft", "Field tech")).toMatchObject({ ok: true });
+		const node = s.views.getNode("default", "ft")!;
+		expect(node.type).toBe("unit");
+		expect(apiRowTexts(await renderRow(fake, node, view))).toEqual(["One", "Two"]);
+
+		await s.app.vault.modify(s.app.vault.getAbstractFileByPath("Data.csv") as never, "id,name\n1,One renamed\n2,Two\n3,Three\n");
+		explorerProto.refreshCsvSource.call(fake, view, node, "manual");
+		await vi.waitFor(() => expect(node.apiCache?.rows).toHaveLength(3));
+
+		expect(node.apiItemState?.["1"]).toMatchObject({ label: "One renamed", explicitStatusId: "doing", noteRef: { kind: "file", path: "Notes/one.md" } });
+		expect(node.apiItemState?.["2"]).toMatchObject({ explicitStatusId: "idea" });
+		expect(apiRowTexts(await renderRow(fake, node, view))).toEqual(["One renamed", "Two", "Three"]);
+	});
+});
+
+describe.each(KINDS)("F2a/F2b — Create (%s) on a sourced Atlas folder with a linked-folder source", (kind) => {
+	it("the unit still renders its linked children, and a refresh adds a new file from the linked folder", async () => {
+		const s = setup([sourcedFolder({})]);
+		s.views.setFolderSource("default", "ft", FOLDER_SOURCE);
+		s.views.refreshFolderSource("default", "ft");
+		const fake = explorerFor(s);
+		const view = s.views.getView("default")!;
+		expect(s.views.getNode("default", "ft")!.children.map((c) => c.ref.path)).toEqual(["Archive/Archive.md"]);
+
+		expect(await createFromMeta(s.deps, kind, "default", "ft", "Field tech")).toMatchObject({ ok: true });
+		const node = s.views.getNode("default", "ft")!;
+		expect(node.type).toBe("unit");
+		expect(node.folderSource).toEqual(FOLDER_SOURCE);
+		const rendered = await renderRow(fake, node, view);
+		expect(rendered.querySelectorAll(".atlas-row-unit").length).toBeGreaterThan(1);
+
+		await s.app.vault.create("Archive/New.md", "");
+		explorerProto.refreshFolderSource.call(fake, view, node);
+		expect(node.children.map((c) => c.ref.path)).toEqual(["Archive/Archive.md", "Archive/New.md"]);
+		const after = await renderRow(fake, node, view);
+		expect(after.querySelectorAll(".atlas-row-unit").length).toBeGreaterThan(rendered.querySelectorAll(".atlas-row-unit").length);
 	});
 });

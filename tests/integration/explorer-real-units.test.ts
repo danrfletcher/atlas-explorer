@@ -1,8 +1,10 @@
 import type { App } from "obsidian";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AtlasExplorerView } from "../../src/explorer-view";
 import { ViewsManager } from "../../src/views";
 import { UnitRef, View, ViewNode } from "../../src/types";
 import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, rowOrder } from "../unit/explorer-view-sort-truncate-helpers";
+import { fileUnits, keyAt, makeHarness, stubLayout } from "../unit/explorer-view-scroll-helpers";
 
 /** G7/G9: Inside-Vault Folder-source children (`folderSourceManaged: true`) are ordinary real
  * `ViewNode` units — place/nest/reorder, status assign, sort/truncate, and remove-from-view must
@@ -152,3 +154,46 @@ function findByRef(nodes: ViewNode[], ref: UnitRef): ViewNode | null {
 	}
 	return null;
 }
+
+/** PR-1.S1 E1/G9 at integration scope: the real explorer render path, with layout stubbed in the shared
+ * scroll harness. Covers a 5,000-row inbox staying bounded through a re-render and scroll position
+ * surviving a re-render of the same view. */
+describe("PR-1.S1 — E1/G9 at integration scope", () => {
+	let restoreLayout: (() => void) | null = null;
+
+	beforeEach(() => {
+		restoreLayout = stubLayout({ viewportHeight: 280, bucketHeight: 0 });
+	});
+
+	afterEach(() => {
+		restoreLayout?.();
+		restoreLayout = null;
+		document.body.replaceChildren();
+	});
+
+	async function render(explorer: AtlasExplorerView): Promise<void> {
+		await (explorer as unknown as { render: () => Promise<void> }).render();
+	}
+
+	it("E1: a 5,000-row inbox keeps the DOM bounded across a re-render", async () => {
+		const units = fileUnits(5000);
+		const h = makeHarness(units);
+		await render(h.explorer);
+		h.scrollBody().scrollTop = 28 * 2500;
+		h.scrollBody().dispatchEvent(new Event("scroll"));
+		await render(h.explorer);
+
+		expect(h.inboxRowKeys().length).toBeLessThanOrEqual(Math.ceil(280 / 28) + 8 * 2 + 1);
+		expect(h.inboxRowKeys()).toContain(keyAt(units, 2500));
+	});
+
+	it("G9: scrollTop is preserved across a re-render of the same view", async () => {
+		const h = makeHarness(fileUnits(2000));
+		await render(h.explorer);
+		h.scrollBody().scrollTop = 1400;
+		h.scrollBody().dispatchEvent(new Event("scroll"));
+
+		await render(h.explorer);
+		expect(h.scrollBody().scrollTop).toBe(1400);
+	});
+});

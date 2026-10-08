@@ -63,6 +63,9 @@ function setup({ acmeDone = false }: { acmeDone?: boolean } = {}): Harness {
 	const fake = makeFakeExplorer(sm, {
 		plugin: { statusesManager: sm, settings: DEFAULT_SETTINGS, viewsManager: vm } as never,
 		renderNode: proto.renderNode,
+		removeUnitsFromView: proto.removeUnitsFromView,
+		holdsLiveDataSource: proto.holdsLiveDataSource,
+		forgetDeviceLocalSourceState: proto.forgetDeviceLocalSourceState,
 		resolveRef: vi.fn(async (ref: { path: string }) => ({ text: ref.path.replace(/^.*\//, "").replace(/\.md$/, ""), missing: false, promoted: false, added: false })),
 		isOutsideManagedUnit: vi.fn(() => false),
 		renderRowIcon: vi.fn(),

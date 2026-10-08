@@ -113,6 +113,11 @@ export class Vault {
 		return [...this.entries.values()].filter((e): e is TFile => e instanceof TFile);
 	}
 
+	/** Every loaded entry, the vault root included, as Obsidian's `getAllLoadedFiles` does. */
+	getAllLoadedFiles(): TAbstractFile[] {
+		return [this.root, ...this.entries.values()];
+	}
+
 	getMarkdownFiles(): TFile[] {
 		return this.getFiles().filter((f) => f.extension === "md");
 	}
@@ -371,6 +376,8 @@ export class ToggleComponent {}
 export class Setting {
 	constructor(public containerEl: HTMLElement) {}
 }
+
+export const Platform = { isMobile: false, isDesktop: true };
 
 export function setIcon(_el: HTMLElement, _icon: string): void {}
 export function setTooltip(_el: HTMLElement, _tip: string): void {}

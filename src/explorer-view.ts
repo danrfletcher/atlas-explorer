@@ -1,5 +1,6 @@
-import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
+import { App, FuzzyMatch, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TAbstractFile, TFile, TFolder, WorkspaceLeaf, renderResults, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
+import type { AtlasSettings } from "./settings";
 import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import {
 	ApiSourceIdPair,
@@ -37,14 +38,93 @@ const INBOX_ROW_HEIGHT = 28;
 /** Extra rows rendered above/below the visible window, so a fast scroll doesn't show blank gaps
  * before the next frame's window recomputes. */
 const INBOX_OVERSCAN = 8;
+
+/** Row indices `[start, end)` that the inbox must have in the DOM, given the single scroll body's
+ * `scrollTop`, how far the inbox list sits below the top of that body's content (`listOffset`), and
+ * the body's visible height. Pure so the window maths can be tested without a layout engine. A
+ * zero-height body (hidden leaf) yields only the overscan rows; nothing negative ever leaves here. */
+export function computeInboxWindow(
+	scrollTop: number,
+	listOffset: number,
+	viewportHeight: number,
+	rowHeight: number,
+	overscan: number,
+	total: number
+): { start: number; end: number } {
+	const finite = (n: number) => (Number.isFinite(n) ? n : 0);
+	if (total <= 0 || rowHeight <= 0) return { start: 0, end: 0 };
+	const viewTop = finite(scrollTop) - finite(listOffset);
+	const viewBottom = viewTop + Math.max(0, finite(viewportHeight));
+	const firstVisible = Math.floor(Math.max(0, viewTop) / rowHeight);
+	const endVisible = Math.ceil(Math.max(0, viewBottom) / rowHeight);
+	const start = Math.min(total, Math.max(0, firstVisible - overscan));
+	const end = Math.max(start, Math.min(total, endVisible + overscan));
+	return { start, end };
+}
+
+export interface StickyHeaderInput {
+	scrollTop: number;
+	viewportHeight: number;
+	/** Natural top of the bucket section, in scroll-body coordinates. */
+	bucketTop: number;
+	bucketHeaderHeight: number;
+	/** Natural top of the inbox section (where its header sits when not stuck). */
+	inboxTop: number;
+	inboxHeaderHeight: number;
+}
+
+export interface StickyHeaderLayout {
+	/** False when the panel is too short to hold both headers and a row (E2): both stay in flow. */
+	stuck: boolean;
+	/** Scroll-body position of the bucket header. It stays at the top edge for the whole scroll. */
+	bucketY: number;
+	/** Scroll-body position of the inbox header. */
+	inboxY: number;
+	inboxPosition: "flow" | "stacked" | "pinned";
+}
+
+/** PR-1.F1 (G3, G4, E2): where the two section headers sit for a given scroll. The bucket header
+ * always stays at the top edge. The inbox header stays at its natural position, unless that lies
+ * below the bottom edge (pinned there) or above the line directly under the bucket header (stacked
+ * there). Pure, so the boundaries are tested without a layout engine. */
+export function computeStickyHeaders(input: StickyHeaderInput): StickyHeaderLayout {
+	const { scrollTop, viewportHeight, bucketTop, bucketHeaderHeight, inboxTop, inboxHeaderHeight } = input;
+	const inFlow: StickyHeaderLayout = { stuck: false, bucketY: bucketTop, inboxY: inboxTop, inboxPosition: "flow" };
+	if (viewportHeight < bucketHeaderHeight + inboxHeaderHeight + INBOX_ROW_HEIGHT) return inFlow;
+	const bucketY = Math.max(bucketTop, scrollTop);
+	const stackY = scrollTop + bucketHeaderHeight;
+	const pinY = scrollTop + viewportHeight - inboxHeaderHeight;
+	if (inboxTop > pinY) return { stuck: true, bucketY, inboxY: pinY, inboxPosition: "pinned" };
+	if (inboxTop < stackY) return { stuck: true, bucketY, inboxY: stackY, inboxPosition: "stacked" };
+	return { stuck: true, bucketY, inboxY: inboxTop, inboxPosition: "flow" };
+}
+
+/** PR-1.F1 (G5, G7): the scroll position that puts a section's header at its stuck position, with
+ * the headers above it stacked at the top. Title clicks and collapse settles both land here. */
+export function stuckScrollTarget(headerTop: number, stackOffset: number, maxScrollTop: number): number {
+	return Math.min(Math.max(0, maxScrollTop), Math.max(0, headerTop - stackOffset));
+}
+
 /** Must match `.atlas-meta-children`'s and `.atlas-filter-wrap`'s `transition-duration` in
- * styles.css — every state-persisting toggle that triggers a full re-render (meta-folder collapse,
- * the bucket/inbox section headers, the filter-reveal toggle) delays that re-render by this long so
- * the CSS collapse/expand transition finishes playing before the DOM gets rebuilt out from under
- * it. PR 11: originally only the meta-folder chevron used this trick (hence the old name); the
- * bucket/inbox/filter toggles shipped in PR 9 without it, which is why none of them actually
- * animated despite having the CSS for it — same fix, applied to the rest of the collapse toggles. */
+ * styles.css. Toggles that re-render the whole panel (meta-folder collapse, the filter-reveal toggle)
+ * delay that re-render by this long so the CSS collapse/expand transition finishes first. The bucket
+ * and inbox sections don't re-render on collapse (PR-1.F1): both always render their content, so the
+ * click flips the state in place, and the one scroll body keeps its position. Title clicks on a
+ * collapsed section wait this long for the expansion before they scroll. */
 const COLLAPSE_TRANSITION_MS = 160;
+
+type SectionKey = "bucket" | "inbox";
+
+/** The DOM a section's chevron and title act on, passed to the click handlers. */
+interface SectionParts {
+	section: HTMLElement;
+	wrap: HTMLElement;
+	chevron: HTMLElement;
+}
+
+function prefersReducedMotion(): boolean {
+	return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+}
 /** PR 9 (issue 2, point 5): how long a drag has to hover a module (without dropping) before its
  * Contents modal opens automatically, mirroring the "hover a folder while dragging to expand it"
  * pattern most native file managers use. */
@@ -60,6 +140,37 @@ type DragPayload = { kind: "node"; nodeIds: string[]; viewId: string } | { kind:
  * one, so attaching a note/block/module to an item never throws or nests into an unrelated path. */
 function sanitizeFileName(name: string): string {
 	return name.replace(/[/\\:*?"<>|]/g, "-").trim();
+}
+
+/** PR-1.F2 (G3): one inbox row as the sort sees it. */
+export interface InboxSortRow {
+	unit: Unit;
+	/** The row's displayed text (`RowInfo.text`), used for name order. */
+	text: string;
+}
+
+/** PR-1.F2 (G3): the inbox sort, extracted as a pure comparator so it is unit-testable. Alphabetical
+ * mode orders every row by name, files and modules interleaved. Newest-first (any other mode) puts
+ * files first by ctime, newest first, then every module (folder-kind unit: folder-unit, promoted-folder,
+ * added-folder) ordered by name. Ties on name or ctime fall back to path, so a re-render never reorders
+ * rows that compare equal. `lookup` is the vault's `getAbstractFileByPath`, read only for a file's ctime. */
+export function compareInboxRows(
+	a: InboxSortRow,
+	b: InboxSortRow,
+	alphabetical: boolean,
+	lookup: (path: string) => TAbstractFile | null
+): number {
+	const byName = (): number => a.text.localeCompare(b.text) || a.unit.path.localeCompare(b.unit.path);
+	if (alphabetical) return byName();
+	const aIsModule = unitToRef(a.unit).kind === "folder";
+	const bIsModule = unitToRef(b.unit).kind === "folder";
+	if (aIsModule !== bIsModule) return aIsModule ? 1 : -1;
+	if (aIsModule) return byName();
+	const fileA = lookup(a.unit.path);
+	const fileB = lookup(b.unit.path);
+	const ctimeA = fileA instanceof TFile ? fileA.stat.ctime : 0;
+	const ctimeB = fileB instanceof TFile ? fileB.stat.ctime : 0;
+	return ctimeB - ctimeA || byName();
 }
 
 interface RowInfo {
@@ -104,36 +215,82 @@ export class MetaFolderSuggestModal extends FuzzySuggestModal<MetaTarget> {
 
 /** PR-3 (G2): the "+" inbox-add modal. Deliberately broader than auto-promotion eligibility — its
  * list source is every vault file, not the "references outside the module" rule (F3) — narrowed only
- * by `candidateFilesForAdd`'s already-a-unit-somewhere exclusion. */
-export class AddFileSuggestModal extends FuzzySuggestModal<TFile> {
-	constructor(app: AtlasPlugin["app"], private files: TFile[], private onChoose: (file: TFile) => void) {
+ * by the candidate builders' already-a-unit-somewhere exclusion. PR-1.F1: one mixed list of files
+ * and sub-folders; a folder row shows as `path/` with a folder icon, a file row as `path` with a file icon. */
+export class AddFileSuggestModal extends FuzzySuggestModal<TFile | TFolder> {
+	constructor(app: AtlasPlugin["app"], private items: (TFile | TFolder)[], private onChoose: (item: TFile | TFolder) => void) {
 		super(app);
 	}
-	getItems(): TFile[] {
-		return this.files;
+	getItems(): (TFile | TFolder)[] {
+		return this.items;
 	}
-	getItemText(file: TFile): string {
-		return file.path;
+	getItemText(item: TFile | TFolder): string {
+		return item instanceof TFolder ? `${item.path}/` : item.path;
 	}
-	onChooseItem(file: TFile): void {
-		this.onChoose(file);
+	onChooseItem(item: TFile | TFolder): void {
+		this.onChoose(item);
+	}
+	renderSuggestion(match: FuzzyMatch<TFile | TFolder>, el: HTMLElement): void {
+		el.addClass("atlas-add-suggest-item");
+		const iconEl = el.createSpan({ cls: "atlas-add-suggest-icon" });
+		setIcon(iconEl, match.item instanceof TFolder ? "folder" : "file");
+		const textEl = el.createSpan({ cls: "atlas-add-suggest-text" });
+		renderResults(textEl, this.getItemText(match.item), match.match);
 	}
 }
 
 /** PR-3 (G2, E4): every vault file minus any file already a unit somewhere (auto-promoted, manually
  * promoted, already added) or already placed/nested as a node in any view — so picking one from the
  * modal can never produce a duplicate inbox row. List-level exclusion only: no runtime dedupe is
- * exercised once a file is chosen. */
-export function candidateFilesForAdd(allFiles: TFile[], units: Unit[], isPlacedAnywhere: (ref: UnitRef) => boolean): TFile[] {
+ * exercised once a file is chosen. PR-1.F1 (G12): an added folder's interface note (`<Folder>/<Folder>.md`)
+ * is excluded too, until that folder is dismissed for good (`isGloballyDismissed`); a promoted folder's
+ * note is still offered. */
+export function candidateFilesForAdd(
+	allFiles: TFile[],
+	units: Unit[],
+	isPlacedAnywhere: (ref: UnitRef) => boolean,
+	isGloballyDismissed: (ref: UnitRef) => boolean = () => false
+): TFile[] {
 	// R2: only a *file-kind* ref counts as "the file already present as a unit" (G2) — a promoted-block
 	// unit's `.path` is its containing file's path even though it's kind "block" (per `unitToRef`), so
 	// comparing bare paths wrongly excluded a file whose only unit is a promoted block from this list.
 	const fileRefKeys = new Set(
 		units.filter((unit) => unitToRef(unit).kind === "file").map((unit) => unitRefKey(unitToRef(unit)))
 	);
+	for (const unit of units) {
+		if (unit.type !== "added-folder") continue;
+		if (isGloballyDismissed({ kind: "folder", path: unit.path })) continue;
+		const folderName = unit.path.slice(unit.path.lastIndexOf("/") + 1);
+		fileRefKeys.add(unitRefKey({ kind: "file", path: `${unit.path}/${folderName}.md` }));
+	}
 	return allFiles.filter(
 		(file) => !fileRefKeys.has(unitRefKey({ kind: "file", path: file.path })) && !isPlacedAnywhere({ kind: "file", path: file.path })
 	);
+}
+
+/** PR-1.F1 (G1, F2, E9): every sub-folder the "+" picker may offer. Lists the folders itself from
+ * `allLoaded` (`vault.getAllLoadedFiles()`). A folder is offered only when it is not a vault-root
+ * folder, not already a unit (folder-units, promoted, Folder-source-managed or added folders), not
+ * placed in any view (bucket or inbox), not the pool folder or inside it, and not inside an excluded
+ * folder. Unit and placed lookups are Sets built once per call, so the cost is linear in the vault. */
+export function candidateFoldersForAdd(
+	allLoaded: TAbstractFile[],
+	units: Unit[],
+	placedRefKeys: Set<string>,
+	settings: Pick<AtlasSettings, "poolFolder" | "excludedFolders">
+): TFolder[] {
+	const unitFolderKeys = new Set(
+		units.filter((unit) => unitToRef(unit).kind === "folder").map((unit) => unitRefKey(unitToRef(unit)))
+	);
+	const { poolFolder, excludedFolders } = settings;
+	const isWithin = (path: string, parent: string): boolean => path === parent || path.startsWith(`${parent}/`);
+	return allLoaded.filter((entry): entry is TFolder => entry instanceof TFolder).filter((folder) => {
+		const key = unitRefKey({ kind: "folder", path: folder.path });
+		if (folder.isRoot() || !folder.path.includes("/")) return false;
+		if (unitFolderKeys.has(key) || placedRefKeys.has(key)) return false;
+		if (isWithin(folder.path, poolFolder)) return false;
+		return !excludedFolders.some((excluded) => isWithin(folder.path, excluded));
+	});
 }
 
 /** PR 9 (issue 2): replaces inline fold/unfold for modules with a browsable read-only tree of the
@@ -291,11 +448,183 @@ export class ModuleContentsModal extends Modal {
  * (Add block/file/folder) and `createInterfaceNote`, both already on Part 7's allowed list. Every
  * drag/promote/placement path below is plugin-data only.
  */
+/** The explorer methods the shared source/status menu items call. Passed in as `host` rather than read
+ * off `this`, so the helper is a plain function — every call is made from inside a menu click, never while
+ * the menu is being built. */
+interface SourceMenuHost {
+	openStatusesModal(view: View, nodeId: string | null): void;
+	openApiSourceModal(view: View, node: ViewNode): void;
+	refreshApiSource(view: View, node: ViewNode, trigger?: "manual" | "automatic"): void;
+	refreshFolderSource(view: View, node: ViewNode): void;
+	refreshCsvSource(view: View, node: ViewNode, trigger?: "manual" | "automatic"): void;
+	refreshMarkdownTableSource(view: View, node: ViewNode, trigger?: "manual" | "automatic"): void;
+}
+
+/** Display name for a unit node, from its ref's basename — used where a row's own label isn't to hand. */
+function unitBasename(node: ViewNode): string {
+	return node.ref?.path.split("/").pop() ?? "this item";
+}
+
+/** PR-1 (G11e): the Statuses, Data source…, Refresh now and Remove data source items, shared by the
+ * Atlas-folder menu and the unit menu so a sourced unit offers exactly what a sourced folder does.
+ * Statuses shows when the node has children or source rows; Refresh now and Remove data source
+ * show only when that kind of source exists. Adds no trailing separator — the caller owns it. */
+function addSourceAndStatusItems(menu: Menu, plugin: AtlasPlugin, host: SourceMenuHost, view: View, node: ViewNode): void {
+	if (node.children.length > 0 || nodeHasApiRows(node)) {
+		menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => host.openStatusesModal(view, node.id)));
+		menu.addSeparator();
+	}
+	menu.addItem((item) =>
+		item
+			.setTitle("Data source…")
+			.setIcon("plug-zap")
+			.onClick(() => host.openApiSourceModal(view, node))
+	);
+	if (node.apiSource) {
+		menu.addItem((item) =>
+			item
+				.setTitle("Refresh now")
+				.setIcon("refresh-cw")
+				.onClick(() => {
+					// R8/G13: mobile shows cached rows only — say so rather than silently doing nothing.
+					if (Platform.isMobile) {
+						new Notice("Refreshing isn't available on mobile — showing cached rows.");
+						return;
+					}
+					host.refreshApiSource(view, node, "manual");
+				})
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Remove data source")
+				.setIcon("unplug")
+				.onClick(() => {
+					new ConfirmModal(
+						plugin.app,
+						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+						"Remove",
+						() => {
+							plugin.viewsManager.setApiSource(view.id, node.id, undefined);
+							// R4/G4: the source config itself includes headers (device-local, in
+							// ApiHeadersStore) — Remove drops those too, same as Delete folder already
+							// does, so a bearer token doesn't linger on the device or silently reappear
+							// if a source is added back to this Folder later.
+							plugin.apiHeadersStore.delete(node.id);
+						}
+					).open();
+				})
+		);
+	} else if (node.folderSource) {
+		// PR-4 (G10): reuses the exact same menu actions as an API source — "Refresh now" re-runs
+		// the (synchronous, disk-read-only) reconciliation; "Remove data source" just stops it,
+		// since the children it already placed are ordinary real units with nowhere else to go.
+		menu.addItem((item) =>
+			item
+				.setTitle("Refresh now")
+				.setIcon("refresh-cw")
+				.onClick(() => host.refreshFolderSource(view, node))
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Remove data source")
+				.setIcon("unplug")
+				.onClick(() => {
+					new ConfirmModal(
+						plugin.app,
+						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current children stay in place as plain units — it just stops refreshing.`,
+						"Remove",
+						() => plugin.viewsManager.setFolderSource(view.id, node.id, undefined)
+					).open();
+				})
+		);
+	} else if (node.csvSource) {
+		// PR-7: reuses the exact same menu actions as an API source — "Refresh now" re-reads+parses
+		// the file (no mobile guard, see `refreshCsvSource`'s own doc comment); "Remove data source"
+		// just stops it, same as an API source's own Remove (rows stay in place). CSV has no
+		// device-local headers store to clean up on removal.
+		menu.addItem((item) =>
+			item
+				.setTitle("Refresh now")
+				.setIcon("refresh-cw")
+				.onClick(() => host.refreshCsvSource(view, node, "manual"))
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Remove data source")
+				.setIcon("unplug")
+				.onClick(() => {
+					new ConfirmModal(
+						plugin.app,
+						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+						"Remove",
+						() => plugin.viewsManager.setCsvSource(view.id, node.id, undefined)
+					).open();
+				})
+		);
+	} else if (node.markdownTableSource) {
+		// PR-8: reuses the exact same menu actions as a CSV source — "Refresh now" re-reads+parses
+		// the file (no mobile guard, see `refreshMarkdownTableSource`'s own doc comment); "Remove
+		// data source" just stops it, same as a CSV source's own Remove (rows stay in place).
+		// Markdown Table has no device-local headers store to clean up on removal.
+		menu.addItem((item) =>
+			item
+				.setTitle("Refresh now")
+				.setIcon("refresh-cw")
+				.onClick(() => host.refreshMarkdownTableSource(view, node, "manual"))
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Remove data source")
+				.setIcon("unplug")
+				.onClick(() => {
+					new ConfirmModal(
+						plugin.app,
+						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+						"Remove",
+						() => plugin.viewsManager.setMarkdownTableSource(view.id, node.id, undefined)
+					).open();
+				})
+		);
+	}
+}
+
 export class AtlasExplorerView extends ItemView {
 	private filterText = "";
 	private sortMode: "manual" | "alphabetical" = "manual";
+	/** Both sections start open on every load and are never persisted (PR-1.S1 / F8). */
 	private bucketCollapsed = false;
-	private inboxCollapsed = true;
+	private inboxCollapsed = false;
+	/** PR-1.F1: the one scroll body and the section parts the sticky headers and title clicks act on.
+	 * Set by `render()` after each rebuild; null before the first render. */
+	private stickyEls: {
+		body: HTMLElement;
+		bucketEl: HTMLElement;
+		bucketHeader: HTMLElement;
+		inboxEl: HTMLElement;
+		inboxHeader: HTMLElement;
+	} | null = null;
+	/** PR-1.F1: bumped by every header click, so a title scroll still waiting for an expansion is
+	 * dropped once a newer click supersedes it (E4, chevron-then-title). */
+	private sectionClickSeq = 0;
+	private stickyFrameQueued = false;
+	/** Redraws the inbox's virtual window for the current render. Null between renders and after
+	 * close, so a stale scroll/resize callback from a previous render can never draw into the DOM. */
+	private inboxRedraw: (() => void) | null = null;
+	/** Watches everything that moves the inbox without a scroll (bucket collapse, folder fold, filter
+	 * row, toolbar wrap) and calls `inboxRedraw`. Rebuilt on every render, disconnected on close. */
+	private inboxLayoutObserver: ResizeObserver | null = null;
+	/** The inbox row being dragged, kept alive across virtual redraws so an auto-scroll can't drop the
+	 * drag source out from under the browser. */
+	private inboxDragRowEl: HTMLElement | null = null;
+	/** PR-1.S1: the scroll position the newest in-flight render must restore. Set when a render starts
+	 * and cleared once that render has restored it. A render that starts while another is still
+	 * awaiting reads this, because the body it would otherwise read from the DOM is brand-new and
+	 * still at 0. */
+	private pendingScrollTop: number | null = null;
+	/** PR-1.S1: bumped on every `render()`. A render whose number is no longer the latest has been
+	 * superseded (its container was emptied by the newer one) and must stop after each await rather
+	 * than register its redraw/observer against the newer render's DOM. */
+	private renderSeq = 0;
 	/** PR-5 (G7/G8): whether dismissed inbox rows render inline, tagged "hidden". Mirrors
 	 * `inboxCollapsed` — a single instance field rather than per-view, matching this view's existing
 	 * convention that transient section-header UI state is shared across view switches within the
@@ -426,6 +755,7 @@ export class AtlasExplorerView extends ItemView {
 		// timer) whenever a drag ends, regardless of how.
 		this.registerDomEvent(window, "dragend", () => {
 			this.dragPayload = null;
+			this.inboxDragRowEl = null;
 			this.cancelActiveDwell?.();
 			// PR 20 follow-up (reviewer-caught, A27): a successful drop already repaints via
 			// `handleDrop`, but an *abandoned* drag (dropped outside any registered zone, or
@@ -448,6 +778,9 @@ export class AtlasExplorerView extends ItemView {
 	async onClose(): Promise<void> {
 		for (const unsub of this.unsubscribers) unsub();
 		this.refreshEveryTimers.stopAll();
+		this.inboxLayoutObserver?.disconnect();
+		this.inboxLayoutObserver = null;
+		this.inboxRedraw = null;
 		// R1: closing each modal fires its own onClose, which reports "dismissed" and (via the callback
 		// wired in refreshApiSource) removes itself from this array — iterate a copy so that in-loop
 		// mutation of the live array never skips an entry.
@@ -532,13 +865,13 @@ export class AtlasExplorerView extends ItemView {
 		}
 	}
 
+	/** PR-1 (G11b): every node is visited and every node's children are walked, units included, so a
+	 * sourced node nested anywhere in the tree still refreshes at load and on its timer. */
 	private collectApiSourceNodes(nodes: ViewNode[]): ViewNode[] {
 		const out: ViewNode[] = [];
 		for (const node of nodes) {
-			if (node.type === "meta") {
-				if (node.apiSource) out.push(node);
-				out.push(...this.collectApiSourceNodes(node.children));
-			}
+			if (node.apiSource) out.push(node);
+			out.push(...this.collectApiSourceNodes(node.children));
 		}
 		return out;
 	}
@@ -549,10 +882,8 @@ export class AtlasExplorerView extends ItemView {
 	private collectFolderSourceNodes(nodes: ViewNode[]): ViewNode[] {
 		const out: ViewNode[] = [];
 		for (const node of nodes) {
-			if (node.type === "meta") {
-				if (node.folderSource) out.push(node);
-				out.push(...this.collectFolderSourceNodes(node.children));
-			}
+			if (node.folderSource) out.push(node);
+			out.push(...this.collectFolderSourceNodes(node.children));
 		}
 		return out;
 	}
@@ -563,10 +894,8 @@ export class AtlasExplorerView extends ItemView {
 	private collectCsvSourceNodes(nodes: ViewNode[]): ViewNode[] {
 		const out: ViewNode[] = [];
 		for (const node of nodes) {
-			if (node.type === "meta") {
-				if (node.csvSource) out.push(node);
-				out.push(...this.collectCsvSourceNodes(node.children));
-			}
+			if (node.csvSource) out.push(node);
+			out.push(...this.collectCsvSourceNodes(node.children));
 		}
 		return out;
 	}
@@ -575,10 +904,8 @@ export class AtlasExplorerView extends ItemView {
 	private collectMarkdownTableSourceNodes(nodes: ViewNode[]): ViewNode[] {
 		const out: ViewNode[] = [];
 		for (const node of nodes) {
-			if (node.type === "meta") {
-				if (node.markdownTableSource) out.push(node);
-				out.push(...this.collectMarkdownTableSourceNodes(node.children));
-			}
+			if (node.markdownTableSource) out.push(node);
+			out.push(...this.collectMarkdownTableSourceNodes(node.children));
 		}
 		return out;
 	}
@@ -608,7 +935,7 @@ export class AtlasExplorerView extends ItemView {
 	 * every-X-minutes timer, "Refresh now", post-save) — mobile shows cached rows only and can never
 	 * trigger a live request. `trigger` (G5/G6b) distinguishes "Refresh now" (always asks again when a
 	 * delete needs confirming) from the two automatic triggers (ask at most once per Folder). */
-	private refreshApiSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+	refreshApiSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.apiSource || Platform.isMobile) return;
 		const headers = this.plugin.apiHeadersStore.get(node.id);
 		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => this.plugin.viewsManager.notifyExternalMutation(), {
@@ -630,7 +957,7 @@ export class AtlasExplorerView extends ItemView {
 	 * target folder. Purely a data-layer operation (`ViewsManager.refreshFolderSource` only reads the
 	 * vault, never writes it) — the resulting real unit children render for free through the normal
 	 * tree, with no Folder-source-specific rendering path. */
-	private refreshFolderSource(view: View, node: ViewNode): void {
+	refreshFolderSource(view: View, node: ViewNode): void {
 		// PR-5: Outside-Vault reconciliation needs the device-local path, which `ViewsManager` itself
 		// never holds (same reason `apiHeadersStore` lookups live here, not in `ViewsManager`, for API
 		// sources) — looked up fresh on every call so a since-changed path is always current.
@@ -642,7 +969,7 @@ export class AtlasExplorerView extends ItemView {
 	 * for the HTTP fetch, so (unlike `refreshApiSource`) this deliberately has no `Platform.isMobile`
 	 * guard: reading a file already in the vault works offline/on mobile exactly as well as it does on
 	 * desktop, there's no live request to skip. */
-	private refreshCsvSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+	refreshCsvSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.csvSource) return;
 		void this.plugin.csvSourceController.refresh(node, node.csvSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
 			vault: this.plugin.app.vault,
@@ -661,7 +988,7 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-8 (G17-G20/G22-G24): the Markdown Table equivalent of `refreshCsvSource` — same no-mobile-
 	 * guard reasoning (a vault file read, not a live request). */
-	private refreshMarkdownTableSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+	refreshMarkdownTableSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.markdownTableSource) return;
 		void this.plugin.markdownTableSourceController.refresh(node, node.markdownTableSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
 			vault: this.plugin.app.vault,
@@ -678,7 +1005,7 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	private openApiSourceModal(view: View, node: ViewNode): void {
+	openApiSourceModal(view: View, node: ViewNode): void {
 		const headers = this.plugin.apiHeadersStore.get(node.id);
 		const outsidePath = this.plugin.folderSourcePathStore.get(node.id);
 		new ApiSourceModal(
@@ -1006,18 +1333,18 @@ export class AtlasExplorerView extends ItemView {
 
 	private async render(): Promise<void> {
 		const container = this.containerEl.children[1] as HTMLElement;
-		const scrollTop = container.scrollTop;
-		// Dan-found: `container.scrollTop` only covers the *outer* sidebar scroll (which section is
-		// in view) — the inbox's own virtualized viewport (F11, `.atlas-inbox-viewport`) is a
-		// separate `overflow-y: auto` element with its own independent scroll position, rebuilt from
-		// scratch by `container.empty()` below like everything else, with nothing capturing or
-		// restoring *its* scrollTop before now. Any click-driven re-render (this PR's own multi-select
-		// highlighting made that far more frequent for the inbox specifically — a plain click on an
-		// inbox row never used to trigger a re-render at all before PR 20) snapped a scrolled-down
-		// inbox straight back to its top. Captured here, restored in `renderVirtualizedInboxRows`
-		// itself (has to happen before that view's own first `drawWindow()`, not after, since that
-		// read is what decides which rows are even in the initial DOM).
-		const inboxViewportScrollTop = container.querySelector(".atlas-inbox-viewport")?.scrollTop ?? 0;
+		const renderId = ++this.renderSeq;
+		const isCurrent = () => renderId === this.renderSeq;
+		// PR-1.S1: the bucket and inbox share one scroll body (`.atlas-explorer-scroll`) under a
+		// fixed toolbar. Capturing its scrollTop here means a click-driven re-render (multi-select,
+		// status change, drag drop) doesn't snap the panel back to the top; it's restored after the
+		// body is rebuilt, and reset to 0 only on a genuine view switch (below). If another render is
+		// still in flight, its target wins: the live body may not have been restored yet.
+		const scrollTop = this.pendingScrollTop ?? container.querySelector<HTMLElement>(".atlas-explorer-scroll")?.scrollTop ?? 0;
+		this.inboxLayoutObserver?.disconnect();
+		this.inboxLayoutObserver = null;
+		this.inboxRedraw = null;
+		this.inboxDragRowEl = null;
 		// The filter input lives inside `container` and gets torn down by `container.empty()` below
 		// like everything else — every keystroke re-renders the whole view (index/view-change events
 		// and typing both go through this same `render()`). Capture focus/caret here and restore it
@@ -1047,6 +1374,9 @@ export class AtlasExplorerView extends ItemView {
 		const view = this.plugin.viewsManager.getActiveView();
 		const allUnits = this.plugin.unitIndex.getUnits();
 		this.unitsByRefKey = new Map(allUnits.map((u) => [unitRefKey(unitToRef(u)), u]));
+		// G8/E7: a view switch resets the scroll to the top; every other re-render keeps it.
+		const restoreScrollTop = view.id === this.lastRenderedViewId ? scrollTop : 0;
+		this.pendingScrollTop = restoreScrollTop;
 
 		// PR 20: bucket node ids are only meaningful within the view that minted them — switching to
 		// a different view and keeping the old selection around would (extremely unlikely id
@@ -1073,8 +1403,10 @@ export class AtlasExplorerView extends ItemView {
 			this.filterInputEl.setSelectionRange(filterSelectionStart, filterSelectionEnd);
 		}
 
-		const bucketEl = container.createDiv({ cls: "atlas-section atlas-bucket" });
+		const scrollBody = container.createDiv({ cls: "atlas-explorer-scroll" });
+		const bucketEl = scrollBody.createDiv({ cls: "atlas-section atlas-bucket" });
 		await this.renderBucketSection(bucketEl, view);
+		if (!isCurrent()) return;
 
 		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
 		// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
@@ -1083,8 +1415,18 @@ export class AtlasExplorerView extends ItemView {
 		const dismissedUnits = this.showDismissed
 			? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
 			: [];
-		const inboxEl = container.createDiv({ cls: "atlas-section atlas-inbox" });
-		await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, inboxViewportScrollTop);
+		const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
+		await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
+		if (!isCurrent()) return;
+		// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
+		// so later renders can read it from the DOM again.
+		this.pendingScrollTop = null;
+		// Both sections always render their header; a render without them has nothing to stack.
+		const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+		const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+		this.stickyEls = bucketHeader && inboxHeader ? { body: scrollBody, bucketEl, bucketHeader, inboxEl, inboxHeader } : null;
+		this.observeInboxLayout(container, scrollBody, bucketEl);
+		this.updateStickyHeaders();
 
 		if (activeRowKey) {
 			const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
@@ -1095,9 +1437,129 @@ export class AtlasExplorerView extends ItemView {
 			restored?.focus({ preventScroll: true });
 		}
 
-		container.scrollTop = scrollTop;
 		this.updateActiveHighlight();
 		this.syncRefreshTimers(view);
+	}
+
+	/** PR-1.S1: a ResizeObserver on the fixed part of the panel, the scroll body and the bucket. Those
+	 * are the things whose size or position moves the inbox without any scroll (bucket collapse
+	 * animation, folder fold, filter row, toolbar wrap), so each one redraws the inbox window. */
+	private observeInboxLayout(container: HTMLElement, scrollBody: HTMLElement, bucketEl: HTMLElement): void {
+		// PR-1.F1: header heights and panel height move the stacked headers as well, so they re-measure here.
+		const observer = new ResizeObserver(() => {
+			this.inboxRedraw?.();
+			this.updateStickyHeaders();
+		});
+		observer.observe(scrollBody);
+		observer.observe(bucketEl);
+		for (const child of Array.from(container.children)) {
+			if (child !== scrollBody) observer.observe(child);
+		}
+		if (this.stickyEls) {
+			observer.observe(this.stickyEls.bucketHeader);
+			observer.observe(this.stickyEls.inboxHeader);
+		}
+		this.inboxLayoutObserver = observer;
+		scrollBody.addEventListener("scroll", () => this.scheduleStickyUpdate());
+	}
+
+	private scheduleStickyUpdate(): void {
+		if (this.stickyFrameQueued) return;
+		this.stickyFrameQueued = true;
+		window.requestAnimationFrame(() => {
+			this.stickyFrameQueued = false;
+			this.updateStickyHeaders();
+		});
+	}
+
+	/** PR-1.F1 (G3, G4, E2): moves the two section headers for the body's current scroll. Headers stay
+	 * in normal flow and are shifted with a transform, so section layout and the inbox window never
+	 * change. Also keeps `scroll-padding-top` at the stacked header height, so a programmatic scroll
+	 * never hides a row behind them. */
+	private updateStickyHeaders(): void {
+		const s = this.stickyEls;
+		if (!s || !s.body.isConnected) return;
+		const bodyTop = s.body.getBoundingClientRect().top;
+		// Section rects are untransformed, so this is the section's layout position at any scroll.
+		const layoutTop = (el: HTMLElement) => el.getBoundingClientRect().top - bodyTop + s.body.scrollTop;
+		const bucketTop = layoutTop(s.bucketEl);
+		const inboxTop = layoutTop(s.inboxEl);
+		const bucketHeaderHeight = s.bucketHeader.getBoundingClientRect().height;
+		const inboxHeaderHeight = s.inboxHeader.getBoundingClientRect().height;
+		const layout = computeStickyHeaders({
+			scrollTop: s.body.scrollTop,
+			viewportHeight: s.body.clientHeight,
+			bucketTop,
+			bucketHeaderHeight,
+			inboxTop,
+			inboxHeaderHeight,
+		});
+		s.bucketHeader.style.transform = layout.bucketY === bucketTop ? "" : `translateY(${layout.bucketY - bucketTop}px)`;
+		s.inboxHeader.style.transform = layout.inboxY === inboxTop ? "" : `translateY(${layout.inboxY - inboxTop}px)`;
+		s.body.style.scrollPaddingTop = layout.stuck ? `${bucketHeaderHeight + inboxHeaderHeight}px` : "0px";
+	}
+
+	/** PR-1.F1 (G5): where a section's header belongs once stuck: the bucket at the top, the inbox
+	 * directly under the bucket header. Clamped to the scrollable range. */
+	private sectionStuckTarget(key: SectionKey): number {
+		const s = this.stickyEls;
+		if (!s) return 0;
+		const bodyTop = s.body.getBoundingClientRect().top;
+		const sectionEl = key === "bucket" ? s.bucketEl : s.inboxEl;
+		const headerTop = sectionEl.getBoundingClientRect().top - bodyTop + s.body.scrollTop;
+		const stackOffset = key === "bucket" ? 0 : s.bucketHeader.getBoundingClientRect().height;
+		return stuckScrollTarget(headerTop, stackOffset, s.body.scrollHeight - s.body.clientHeight);
+	}
+
+	/** Smooth by default, instant under reduced motion. Skips a scroll that wouldn't move. */
+	private scrollSectionsTo(top: number, instant: boolean): void {
+		const s = this.stickyEls;
+		if (!s || Math.abs(s.body.scrollTop - top) < 1) return;
+		s.body.scrollTo({ top, behavior: instant ? "auto" : "smooth" });
+	}
+
+	private isSectionCollapsed(key: SectionKey): boolean {
+		return key === "bucket" ? this.bucketCollapsed : this.inboxCollapsed;
+	}
+
+	/** Flips a section's state in place. The CSS transition on its wrapper does the animation. */
+	private setSectionCollapsed(key: SectionKey, collapsed: boolean, parts: SectionParts): void {
+		if (key === "bucket") this.bucketCollapsed = collapsed;
+		else this.inboxCollapsed = collapsed;
+		setIcon(parts.chevron, collapsed ? "chevron-right" : "chevron-down");
+		parts.section.toggleClass("is-collapsed", collapsed);
+		parts.wrap.toggleClass("is-collapsed", collapsed);
+		parts.wrap.toggleClass("is-instant", prefersReducedMotion());
+	}
+
+	/** PR-1.F1 (G6, G7): only the chevron collapses or expands its section. Collapsing while the panel
+	 * is scrolled past the section's stuck position settles it there, so no landing mid-inbox. Expanding
+	 * doesn't scroll. */
+	private onSectionChevronClick(key: SectionKey, parts: SectionParts): void {
+		this.sectionClickSeq++;
+		const collapsed = !this.isSectionCollapsed(key);
+		this.setSectionCollapsed(key, collapsed, parts);
+		if (!collapsed) return;
+		// `min`: a section collapsed while the panel is above its stuck position stays where it is.
+		const current = this.stickyEls?.body.scrollTop ?? 0;
+		this.scrollSectionsTo(Math.min(current, this.sectionStuckTarget(key)), prefersReducedMotion());
+	}
+
+	/** PR-1.F1 (G5, E4, GP4-GP7): a title click scrolls its section to the stuck position. A collapsed
+	 * section expands first and scrolls once the expansion has played. A newer click cancels the wait. */
+	private onSectionTitleClick(key: SectionKey, parts: SectionParts): void {
+		const seq = ++this.sectionClickSeq;
+		const reduced = prefersReducedMotion();
+		const scroll = () => {
+			if (seq === this.sectionClickSeq) this.scrollSectionsTo(this.sectionStuckTarget(key), reduced);
+		};
+		if (!this.isSectionCollapsed(key)) {
+			scroll();
+			return;
+		}
+		this.setSectionCollapsed(key, false, parts);
+		if (reduced) scroll();
+		else window.setTimeout(scroll, COLLAPSE_TRANSITION_MS);
 	}
 
 	// --- toolbar -------------------------------------------------------------------------------
@@ -1277,15 +1739,13 @@ export class AtlasExplorerView extends ItemView {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.bucketCollapsed ? "chevron-right" : "chevron-down");
-		header.createSpan({ text: "Bucket" });
+		const title = header.createSpan({ cls: "atlas-section-title", text: "Bucket" });
 
 		// PR 11: the whole section's content used to only render at all when expanded (`if
-		// (this.bucketCollapsed) return`), and the header click handler triggered an immediate full
-		// re-render — so there was never a persisting DOM node for the CSS transition to animate
-		// from/to, just a hard snap between "rendered" and "not rendered". Same fix as the
-		// meta-folder chevron: content always renders into a dedicated wrapper, the collapse is a
-		// CSS transition on that wrapper, and the state-persisting re-render is delayed until the
-		// transition has had time to play.
+		// (this.bucketCollapsed) return`), so there was never a DOM node for the CSS transition to
+		// animate. Content always renders into a dedicated wrapper, and the collapse is a CSS
+		// transition on that wrapper. PR-1.F1: the click no longer re-renders the panel, since that
+		// would rebuild the scroll body mid-animation.
 		const sectionWrap = container.createDiv({ cls: "atlas-meta-children" });
 		sectionWrap.toggleClass("is-collapsed", this.bucketCollapsed);
 		const sectionInner = sectionWrap.createDiv({ cls: "atlas-meta-children-inner" });
@@ -1305,19 +1765,9 @@ export class AtlasExplorerView extends ItemView {
 		// it exactly the same way any other item resolves against its parent node, no special-casing.
 		await this.renderNodeList(view.root, listEl, view, 0, [view]);
 
-		let localCollapsed = this.bucketCollapsed;
-		let pendingPersist: number | undefined;
-		header.addEventListener("click", () => {
-			localCollapsed = !localCollapsed;
-			setIcon(chevron, localCollapsed ? "chevron-right" : "chevron-down");
-			sectionWrap.toggleClass("is-collapsed", localCollapsed);
-			if (pendingPersist !== undefined) window.clearTimeout(pendingPersist);
-			pendingPersist = window.setTimeout(() => {
-				pendingPersist = undefined;
-				this.bucketCollapsed = localCollapsed;
-				void this.render();
-			}, COLLAPSE_TRANSITION_MS);
-		});
+		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
+		chevron.addEventListener("click", () => this.onSectionChevronClick("bucket", parts));
+		title.addEventListener("click", () => this.onSectionTitleClick("bucket", parts));
 	}
 
 	/** PR 19: wires PR 17's hide-completed/hide-cancelled/truncate-statuses settings (captured but
@@ -1361,7 +1811,7 @@ export class AtlasExplorerView extends ItemView {
 					const info = await this.resolveRef(node.ref);
 					if (this.matchesFilter(info.text)) bypass = true;
 				}
-				if (!bypass && node.type === "meta" && this.apiItemsMatchFilter(node)) bypass = true;
+				if (!bypass && this.apiItemsMatchFilter(node)) bypass = true;
 				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children))) bypass = true;
 			}
 			resolved.push({ node, status, governor, bypass, ancestors: rowAncestors });
@@ -1688,7 +2138,7 @@ export class AtlasExplorerView extends ItemView {
 			}
 			// R18: a Folder's API rows are its rows too, just not `ViewNode` children (G10) — a filter
 			// match among them must force-reveal the Folder the same as a matching real descendant would.
-			if (n.type === "meta" && this.apiItemsMatchFilter(n)) return true;
+			if (this.apiItemsMatchFilter(n)) return true;
 			if (n.children.length > 0 && (await this.subtreeHasMatch(n.children))) return true;
 		}
 		return false;
@@ -1745,7 +2195,7 @@ export class AtlasExplorerView extends ItemView {
 		// — see `nodeHasApiRows`'s own doc comment) are passed in as `apiOwner` so they're merged into
 		// this same list's sort/truncate pass, right behind the real children, instead of a second
 		// `renderApiItems` pass with no sort/truncate logic of its own.
-		const apiOwner = node.type === "meta" && nodeHasApiRows(node) ? node : undefined;
+		const apiOwner = nodeHasApiRows(node) ? node : undefined;
 		await this.renderNodeList(node.children, childrenInner, view, depth + 1, [node, ...ancestors], apiOwner);
 
 		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
@@ -1924,8 +2374,6 @@ export class AtlasExplorerView extends ItemView {
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		this.renderRowIcon(iconEl, view, node, ancestors, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
-		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
-		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
 		// PR-1.F2 (G5/G7): "filtered out" takes the place of "last seen". Remove works the same way as on a
@@ -1937,7 +2385,7 @@ export class AtlasExplorerView extends ItemView {
 			setTooltip(removeBtn, "Remove from view");
 			removeBtn.addEventListener("click", (evt) => {
 				evt.stopPropagation();
-				this.plugin.viewsManager.unplaceNode(view.id, node.id);
+				this.removeUnitsFromView(view.id, [node]);
 			});
 		}
 		// PR 9 (issue 2): modules never expand inline anymore, in the bucket or the inbox — the icon
@@ -1966,7 +2414,8 @@ export class AtlasExplorerView extends ItemView {
 			this.showUnitMenu(evt, ref, view, node);
 		});
 
-		if (node.children.length > 0) await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
+		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
+		if (node.children.length > 0 || nodeHasApiRows(node)) await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
 	}
 
 	// --- inbox -----------------------------------------------------------------------------------
@@ -1976,12 +2425,14 @@ export class AtlasExplorerView extends ItemView {
 		view: View,
 		units: Unit[],
 		dismissedUnits: Unit[],
-		viewportScrollTop: number
+		scrollBody: HTMLElement,
+		restoreScrollTop: number,
+		isCurrent: () => boolean = () => true
 	): Promise<void> {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.inboxCollapsed ? "chevron-right" : "chevron-down");
-		header.createSpan({ text: "Inbox" });
+		const title = header.createSpan({ cls: "atlas-section-title", text: "Inbox" });
 		// PR-5: the count badge reflects the real (undismissed) inbox size regardless of whether
 		// dismissed rows are currently revealed — "Show Dismissed" is a temporary peek, not a change
 		// to what's actually in the inbox, so the count shouldn't jump around as it's toggled.
@@ -2017,12 +2468,7 @@ export class AtlasExplorerView extends ItemView {
 		// PR 11: same fix as the bucket section and the meta-folder chevron — content always renders
 		// into a dedicated wrapper so the collapse is a CSS transition, not a hard snap between
 		// "rendered" and "not rendered", and the state-persisting re-render is delayed to let the
-		// transition play first. The inbox additionally needs to stop claiming all remaining
-		// vertical space (via `container`'s own `flex: 1 1 auto`, PR 9 issue 3) once collapsed —
-		// otherwise a collapsed inbox would leave a tall blank void instead of shrinking to just its
-		// header, since flex-grow doesn't know or care that its content just went to zero height.
-		// `.atlas-section.atlas-inbox.is-collapsed` (styles.css) overrides that back to natural
-		// height; `container` is the very element that class already targets.
+		// transition play first.
 		container.toggleClass("is-collapsed", this.inboxCollapsed);
 		const sectionWrap = container.createDiv({ cls: "atlas-meta-children" });
 		sectionWrap.toggleClass("is-collapsed", this.inboxCollapsed);
@@ -2040,17 +2486,15 @@ export class AtlasExplorerView extends ItemView {
 		const resolved = await Promise.all(
 			combined.map(async ({ unit, hidden }) => ({ unit, ref: unitToRef(unit), hidden, info: await this.resolveRef(unitToRef(unit)) }))
 		);
+		// A superseded render must not draw its window or register its redraw against the newer DOM.
+		if (!isCurrent()) return;
 		const filtered = resolved.filter((r) => this.matchesFilter(r.info.text));
-		const sorted =
-			this.sortMode === "alphabetical"
-				? filtered.sort((a, b) => a.info.text.localeCompare(b.info.text))
-				: filtered.sort((a, b) => {
-						const fileA = this.plugin.app.vault.getAbstractFileByPath(a.unit.path);
-						const fileB = this.plugin.app.vault.getAbstractFileByPath(b.unit.path);
-						const ctimeA = fileA instanceof TFile ? fileA.stat.ctime : 0;
-						const ctimeB = fileB instanceof TFile ? fileB.stat.ctime : 0;
-						return ctimeB - ctimeA; // newest first, per spec default
-				  });
+		// PR-1.F2 (G3): every module (folder-kind unit) sorts by name in newest-first mode, not ctime 0.
+		const alphabetical = this.sortMode === "alphabetical";
+		const lookup = (path: string) => this.plugin.app.vault.getAbstractFileByPath(path);
+		const sorted = filtered.sort((a, b) =>
+			compareInboxRows({ unit: a.unit, text: a.info.text }, { unit: b.unit, text: b.info.text }, alphabetical, lookup)
+		);
 
 		// PR 20: captured here (not queried from the DOM like the bucket's) — F11's virtualization
 		// below means most of these rows never actually exist in the DOM at once, so a shift-click on
@@ -2063,46 +2507,45 @@ export class AtlasExplorerView extends ItemView {
 		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
 		// PR 9 (issue 2) replaced inline inbox expansion with the Module Contents modal, so every
 		// inbox row is now fixed-height and the virtualized path always applies.
-		this.renderVirtualizedInboxRows(listEl, sorted, viewportScrollTop, view);
+		this.renderVirtualizedInboxRows(listEl, sorted, view, scrollBody, restoreScrollTop);
 
-		let localCollapsed = this.inboxCollapsed;
-		let pendingPersist: number | undefined;
-		header.addEventListener("click", () => {
-			localCollapsed = !localCollapsed;
-			setIcon(chevron, localCollapsed ? "chevron-right" : "chevron-down");
-			container.toggleClass("is-collapsed", localCollapsed);
-			sectionWrap.toggleClass("is-collapsed", localCollapsed);
-			if (pendingPersist !== undefined) window.clearTimeout(pendingPersist);
-			pendingPersist = window.setTimeout(() => {
-				pendingPersist = undefined;
-				this.inboxCollapsed = localCollapsed;
-				void this.render();
-			}, COLLAPSE_TRANSITION_MS);
-		});
+		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
+		chevron.addEventListener("click", () => this.onSectionChevronClick("inbox", parts));
+		title.addEventListener("click", () => this.onSectionTitleClick("inbox", parts));
 	}
 
 	/** PR-3 (G2, G3): opens the "+" modal over every vault file minus whatever's already a unit or
 	 * placed somewhere, and on selection marks it "added" (terminal state — see `markAdded`) and
 	 * persists immediately, matching the click-driven-action convention `promoteAndPlace` uses. */
 	private openAddFileModal(): void {
-		const units = this.plugin.unitIndex.getUnits();
-		const candidates = candidateFilesForAdd(this.plugin.app.vault.getFiles(), units, (ref) =>
-			this.plugin.viewsManager.isPlacedAnywhere(ref)
-		);
-		new AddFileSuggestModal(this.plugin.app, candidates, (file) => {
-			this.plugin.unitIndex.markAdded({ kind: "file", path: file.path });
+		const { app, settings, unitIndex, viewsManager } = this.plugin;
+		const units = unitIndex.getUnits();
+		// PR-1.F1: one placed-set per open, shared by the file and folder candidate lists.
+		const placed = viewsManager.placedRefKeys();
+		const isPlacedAnywhere = (ref: UnitRef): boolean => placed.has(unitRefKey(ref));
+		const candidates: (TFile | TFolder)[] = [
+			...candidateFilesForAdd(app.vault.getFiles(), units, isPlacedAnywhere, (ref) => unitIndex.isDismissed(ref, "global")),
+			...candidateFoldersForAdd(app.vault.getAllLoadedFiles(), units, placed, settings),
+		];
+		new AddFileSuggestModal(app, candidates, (item) => {
+			const ref: UnitRef = item instanceof TFolder ? { kind: "folder", path: item.path } : { kind: "file", path: item.path };
+			unitIndex.markAdded(ref);
 			void this.plugin.flushSave();
 			void this.render();
 		}).open();
 	}
 
 	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, view: View, hidden = false): HTMLElement {
+		// PR-1.F2 (G10): only an "added" item that has gone missing gets the greyed row. A missing row that
+		// is not "added" (promoted, link-derived) keeps today's inbox behaviour.
+		const missingAdded = info.missing && this.plugin.unitIndex.isAdded(ref);
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		const key = unitRefKey(ref);
+		if (missingAdded) row.addClass("atlas-missing");
 		row.dataset.refKey = key;
 		row.dataset.selectKey = key;
 		row.toggleClass("is-selected", this.selectedInboxRefKeys.has(key));
-		row.setAttr("draggable", "true");
+		row.setAttr("draggable", missingAdded ? "false" : "true");
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		setIcon(iconEl, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
@@ -2112,67 +2555,114 @@ export class AtlasExplorerView extends ItemView {
 		// without either clobbering the other, since each is just its own sibling span.
 		if (hidden) row.createSpan({ cls: "atlas-badge", text: "hidden" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
+		if (missingAdded) {
+			// PR-1.F2 (G10): same greyed "(missing)" row and Remove button as the bucket; never auto-removed.
+			row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
+			const removeBtn = row.createDiv({ cls: "atlas-row-action" });
+			setIcon(removeBtn, "x");
+			setTooltip(removeBtn, "Remove from inbox");
+			removeBtn.addEventListener("click", (evt) => {
+				evt.stopPropagation();
+				this.removeMissingAddedRow(ref);
+			});
+		}
 		// PR 9 (issue 2): modules never expand inline anymore, in the inbox or the bucket — the icon
-		// opens the Module Contents modal instead (see `wireModuleRow`).
-		if (ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
+		// opens the Module Contents modal instead (see `wireModuleRow`). A missing added row is never wired.
+		if (ref.kind === "folder" && !missingAdded) this.wireModuleRow(row, iconEl, ref.path);
 
 		this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, key, "inbox", this.inboxSelectOrder);
-			if (!consumed) void this.openRef(ref);
+			if (!consumed && !missingAdded) void this.openRef(ref);
 		});
-		row.addEventListener("dragstart", () => (this.dragPayload = this.buildInboxDragPayload(ref)));
+		row.addEventListener("dragstart", () => {
+			this.dragPayload = this.buildInboxDragPayload(ref);
+			this.inboxDragRowEl = row;
+		});
 		row.tabIndex = 0;
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
+			// PR-1.F2 (G10): a missing added row offers only Remove, never Open/Create note/Place (its target is gone).
+			if (missingAdded) return;
 			this.showInboxUnitMenu(evt, ref, view);
 		});
 		return row;
 	}
 
-	/** F11: renders only the rows within the scrolled viewport (+ overscan) of a fixed-height,
-	 * absolutely-positioned window, with a full-height spacer so the scrollbar reflects the true
-	 * list length. Redraws on scroll (rAF-throttled) rather than re-running the whole view's
-	 * `render()`, so scrolling thousands of rows doesn't re-resolve/re-sort/re-render the toolbar
-	 * and bucket section on every frame. */
+	/** PR-1.F2 (G10): Remove on an inbox "(missing)" row. Takes the item out of `addedItems`, drops it from
+	 * the selection so no ghost row is left behind, saves immediately, and re-renders. Nothing else changes. */
+	private removeMissingAddedRow(ref: UnitRef): void {
+		this.plugin.unitIndex.removeAdded(ref);
+		this.selectedInboxRefKeys.delete(unitRefKey(ref));
+		void this.plugin.flushSave();
+		void this.render();
+	}
+
+	/** F11: renders only the rows within the visible part of a fixed-height, absolutely-positioned
+	 * window, with a full-height spacer so the scroll body's length reflects the true list length.
+	 * PR-1.S1: the inbox no longer has its own scroll viewport; it virtualises against the one scroll
+	 * body the bucket and inbox share. Redraws are rAF-throttled and only rebuild the rows when the
+	 * window's `[start, end)` actually changes, so scrolling doesn't re-render the whole view. */
 	private renderVirtualizedInboxRows(
 		listEl: HTMLElement,
 		sorted: { ref: UnitRef; info: RowInfo; unit: Unit; hidden: boolean }[],
-		viewportScrollTop: number,
-		view: View
+		view: View,
+		scrollBody: HTMLElement,
+		restoreScrollTop: number
 	): void {
-		const viewport = listEl.createDiv({ cls: "atlas-inbox-viewport" });
-		const spacer = viewport.createDiv({ cls: "atlas-inbox-spacer" });
+		const spacer = listEl.createDiv({ cls: "atlas-inbox-spacer" });
 		spacer.style.height = `${sorted.length * INBOX_ROW_HEIGHT}px`;
-		// Dan-found: restores the inbox's own scroll position across a re-render (see `render()`'s
-		// own doc comment on why this is separate from the outer container's scrollTop). Has to be
-		// set before the first `drawWindow()` call below, not after — that call reads
-		// `viewport.scrollTop` synchronously to decide which rows even belong in the initial DOM, so
-		// setting it later would draw the wrong window first and only fix itself on the next scroll.
-		viewport.scrollTop = viewportScrollTop;
+		// Has to be set before the first `drawWindow()` below: the window is decided from the body's
+		// scrollTop, so restoring it later would draw the wrong rows first. The spacer above already
+		// gives the body its full scroll length, so the value isn't clamped here.
+		scrollBody.scrollTop = restoreScrollTop;
 
 		let frameQueued = false;
+		let drawnStart = -1;
+		let drawnEnd = -1;
+		const scheduleDraw = () => {
+			if (frameQueued) return;
+			frameQueued = true;
+			window.requestAnimationFrame(drawWindow);
+		};
 		const drawWindow = () => {
 			frameQueued = false;
-			spacer.empty();
-			const viewportHeight = viewport.clientHeight || 300;
-			const start = Math.max(0, Math.floor(viewport.scrollTop / INBOX_ROW_HEIGHT) - INBOX_OVERSCAN);
-			const count = Math.ceil(viewportHeight / INBOX_ROW_HEIGHT) + INBOX_OVERSCAN * 2;
-			const end = Math.min(sorted.length, start + count);
+			// Stale callbacks from an earlier render (or after close) must not touch the current DOM.
+			if (!spacer.isConnected || this.inboxRedraw !== scheduleDraw) return;
+			const listOffset = spacer.getBoundingClientRect().top - scrollBody.getBoundingClientRect().top + scrollBody.scrollTop;
+			const { start, end } = computeInboxWindow(scrollBody.scrollTop, listOffset, scrollBody.clientHeight, INBOX_ROW_HEIGHT, INBOX_OVERSCAN, sorted.length);
+			if (start === drawnStart && end === drawnEnd) return;
+			drawnStart = start;
+			drawnEnd = end;
+
+			// A row's module-icon dwell timer dies with its element, and `dragleave` never fires for a
+			// removed node, so cancel any pending dwell before the rows it belongs to are swapped out.
+			this.cancelActiveDwell?.();
+			// The row being dragged is kept in the DOM even when it scrolls out of the window (hidden),
+			// so the browser's drag source survives. Everything else is rebuilt for the new window.
+			const dragged = this.inboxDragRowEl;
+			for (const child of Array.from(spacer.children)) {
+				if (child !== dragged) child.remove();
+			}
+			let draggedInWindow = false;
 			for (let i = start; i < end; i++) {
 				const { ref, info, hidden } = sorted[i];
+				if (dragged && dragged.dataset.refKey === unitRefKey(ref)) {
+					draggedInWindow = true;
+					dragged.style.top = `${i * INBOX_ROW_HEIGHT}px`;
+					dragged.style.display = "";
+					continue;
+				}
 				const row = this.renderInboxRow(spacer, ref, info, view, hidden);
 				row.addClass("atlas-row-virtual");
 				row.style.top = `${i * INBOX_ROW_HEIGHT}px`;
 			}
+			if (dragged && !draggedInWindow) dragged.style.display = "none";
 		};
 
+		this.inboxRedraw = scheduleDraw;
 		drawWindow();
-		viewport.addEventListener("scroll", () => {
-			if (frameQueued) return;
-			frameQueued = true;
-			window.requestAnimationFrame(drawWindow);
-		});
+		scrollBody.addEventListener("scroll", scheduleDraw);
 	}
 
 	/** F3: promotes and places a module's internal file/folder — called from the Module Contents
@@ -2239,12 +2729,16 @@ export class AtlasExplorerView extends ItemView {
 			if (payload.kind === "node") {
 				const draggedView = this.plugin.viewsManager.getView(payload.viewId);
 				if (draggedView) {
-					for (const nodeId of payload.nodeIds) {
-						const dragged = this.findNodeAnywhere(draggedView.root, nodeId);
-						// PR 13: unplaceNode removes this exact dragged instance, not every duplicate of
-						// the same unit that might also be placed elsewhere in this view.
-						if (dragged?.node.type === "unit") this.plugin.viewsManager.unplaceNode(payload.viewId, nodeId);
-					}
+					// PR 13: each dragged instance is removed by its own id, not every duplicate of the same unit.
+					// PR-1 (G15b): a sourced unit in the drag asks once, through the shared removal path.
+					const units = payload.nodeIds
+						.map((nodeId) => this.findNodeAnywhere(draggedView.root, nodeId)?.node)
+						.filter((node): node is ViewNode => node?.type === "unit");
+					this.removeUnitsFromView(payload.viewId, units, () => {
+						this.selectedBucketNodeIds.clear();
+						this.queueRender();
+					});
+					return;
 				}
 			}
 			this.selectedBucketNodeIds.clear();
@@ -2406,10 +2900,9 @@ export class AtlasExplorerView extends ItemView {
 		// PR 15 fix (Dan-found): status assignment governs this item's own *children*, not the item
 		// itself — an item with no children has nothing for the option to apply to, so it's hidden
 		// entirely rather than offered and doing nothing when toggled.
-		if (node.children.length > 0) {
-			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
-			menu.addSeparator();
-		}
+		// PR-1 (G11e): same Statuses / Data source… / Refresh now / Remove data source items as an Atlas folder.
+		addSourceAndStatusItems(menu, this.plugin, this, view, node);
+		menu.addSeparator();
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
 		// the same label is expected — see duplicateNode's own doc comment for why).
@@ -2418,9 +2911,9 @@ export class AtlasExplorerView extends ItemView {
 			item
 				.setTitle("Remove from view")
 				.setIcon("x")
-				// PR 13: unplaceNode removes this exact row, not every duplicate of the same unit
-				// that might also be placed elsewhere in this view.
-				.onClick(() => this.plugin.viewsManager.unplaceNode(view.id, node.id))
+				// PR 13: removes this exact row, not every duplicate of the same unit that might also be
+				// placed elsewhere in this view. PR-1 (G15a): a sourced unit confirms first.
+				.onClick(() => this.removeUnitsFromView(view.id, [node]))
 		);
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
 		// Create Module: only on a placed row for a root-level .md file (not inbox rows, not free
@@ -2467,7 +2960,7 @@ export class AtlasExplorerView extends ItemView {
 	 * PR 17) — both read/write through `ViewsManager`'s generic `getStatusGovernance`/
 	 * `updateStatusGovernance`, so this one method serves both without knowing which kind of
 	 * governor it's actually editing. */
-	private openStatusesModal(view: View, nodeId: string | null): void {
+	openStatusesModal(view: View, nodeId: string | null): void {
 		const governance = this.plugin.viewsManager.getStatusGovernance(view.id, nodeId);
 		if (!governance) return;
 		new StatusesModal(this.plugin.app, this.plugin.statusesManager.getStatusSets(), governance, (patch) =>
@@ -2523,21 +3016,91 @@ export class AtlasExplorerView extends ItemView {
 		// explorer is showing Global view it writes the single global-scope entry instead (G5), which
 		// `getInboxUnits`' dismissed-OR-check (view-scope reads global-or-own-view, global-scope reads
 		// only the global set) then applies at render time for every view, including ones never opened.
-		menu.addItem((item) =>
-			item
-				.setTitle("Dismiss")
-				.setIcon("x")
-				.onClick(() => {
-					if (view.inboxMode === "global") {
-						this.plugin.unitIndex.setDismissed(ref, "global", true);
-					} else {
-						this.plugin.unitIndex.setDismissed(ref, "view", true, view.id);
-					}
-					void this.plugin.flushSave();
-					void this.render();
-				})
-		);
+		// Polish R1 (PR-5 finding): a row already dismissed-and-revealed (via "Show Dismissed") gets
+		// an "Unhide" item that flips the same dismiss flag back off, instead of a second "Dismiss"
+		// that would just no-op. "hidden" is derived the same way `ViewsManager.getDismissedInboxUnits`
+		// already classifies this row for this exact (viewId, mode) — never a separate stored flag.
+		const scope = view.inboxMode === "global" ? "global" : "view";
+		const hidden =
+			scope === "global" ? this.plugin.unitIndex.isDismissed(ref, "global") : this.plugin.unitIndex.isDismissed(ref, "view", view.id);
+		if (hidden) {
+			menu.addItem((item) =>
+				item
+					.setTitle("Unhide")
+					.setIcon("eye")
+					.onClick(() => {
+						// Clears both scopes, not just the current mode's — a view-mode OR-check can read
+						// "hidden" off a Global dismiss, and clearing only the (empty) per-view entry in
+						// that case would leave the row silently still dismissed. Unhide always means
+						// "actually bring it back" (the PR-5 finding's own wording), so both writes run
+						// unconditionally; the one with nothing to clear is just a no-op.
+						this.plugin.unitIndex.setDismissed(ref, "global", false);
+						this.plugin.unitIndex.setDismissed(ref, "view", false, view.id);
+						void this.plugin.flushSave();
+						void this.render();
+					})
+			);
+		} else {
+			// Polish R1 (PR-4 finding): label only, per Dan's testing feedback overriding F1/G6 —
+			// manually-added (via "+") rows read "Remove", everything else still reads "Dismiss". The
+			// underlying write is identical either way, so this never special-cases by provenance.
+			const added = this.plugin.unitIndex.isAdded(ref);
+			menu.addItem((item) =>
+				item
+					.setTitle(added ? "Remove" : "Dismiss")
+					.setIcon("x")
+					.onClick(() => {
+						if (scope === "global") {
+							this.plugin.unitIndex.setDismissed(ref, "global", true);
+						} else {
+							this.plugin.unitIndex.setDismissed(ref, "view", true, view.id);
+						}
+						void this.plugin.flushSave();
+						void this.render();
+					})
+			);
+		}
 		menu.showAtMouseEvent(evt);
+	}
+
+	/** PR-1 (G15): true when a node holds a live data source. Its device-local headers and Outside path
+	 * are what a removal would otherwise leave behind on this device. Static rows left by "Remove data
+	 * source" don't count — that action already cleared the headers. */
+	private holdsLiveDataSource(node: ViewNode): boolean {
+		return Boolean(node.apiSource || node.csvSource || node.markdownTableSource || node.folderSource);
+	}
+
+	/** PR-1 (G15e): drops a node's device-local source state — its headers (`ApiHeadersStore`) and its
+	 * Outside-Vault path (`FolderSourcePathStore`). Both are keyed by node id and never synced. Shared
+	 * by every path that deletes a sourced node, so none of them can forget one of the two. */
+	private forgetDeviceLocalSourceState(nodeId: string): void {
+		this.plugin.apiHeadersStore.delete(nodeId);
+		this.plugin.folderSourcePathStore.delete(nodeId);
+	}
+
+	/** PR-1 (G15a/b): the one "remove these units from the view" path, used by Remove from view, the
+	 * Delete key (single and multi-selection), drag-to-inbox and a missing row's own remove button.
+	 * Units holding a live source get a single confirm for the whole batch; confirming clears each one's
+	 * device-local state, cancelling changes nothing (`after` runs only once removal has happened).
+	 * Units without a live source are removed straight away, as before. */
+	private removeUnitsFromView(viewId: string, units: ViewNode[], after?: () => void): void {
+		const removeAll = () => {
+			for (const node of units) {
+				if (this.holdsLiveDataSource(node)) this.forgetDeviceLocalSourceState(node.id);
+				this.plugin.viewsManager.unplaceNode(viewId, node.id);
+			}
+			after?.();
+		};
+		const sourced = units.filter((node) => this.holdsLiveDataSource(node));
+		if (sourced.length === 0) {
+			removeAll();
+			return;
+		}
+		const message =
+			sourced.length === 1
+				? `Remove "${unitBasename(sourced[0])}" from this view? Its data source will stop refreshing, and its saved headers and folder path on this device will be deleted. Nothing on disk changes.`
+				: `Remove ${sourced.length} items with data sources from this view? Their data sources will stop refreshing, and their saved headers and folder paths on this device will be deleted. Nothing on disk changes.`;
+		new ConfirmModal(this.plugin.app, message, "Remove", removeAll).open();
 	}
 
 	private showMetaFolderMenu(evt: MouseEvent, node: ViewNode, view: View): void {
@@ -2560,126 +3123,7 @@ export class AtlasExplorerView extends ItemView {
 		// keeps its place, settings and children). Offered on every meta folder, whatever its children,
 		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
-		// R6: an API-only Folder has no real children yet still governs its API rows' statuses (G8) —
-		// without `node.apiSource` here, such a Folder could never configure a status set at all. G4:
-		// a Folder whose source was removed can still be carrying static rows from before — same reason
-		// applies just as much to those.
-		if (node.children.length > 0 || nodeHasApiRows(node)) {
-			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
-		}
-		menu.addSeparator();
-		menu.addItem((item) =>
-			item
-				.setTitle("Data source…")
-				.setIcon("plug-zap")
-				.onClick(() => this.openApiSourceModal(view, node))
-		);
-		if (node.apiSource) {
-			menu.addItem((item) =>
-				item
-					.setTitle("Refresh now")
-					.setIcon("refresh-cw")
-					.onClick(() => {
-						// R8/G13: mobile shows cached rows only — say so rather than silently doing nothing.
-						if (Platform.isMobile) {
-							new Notice("Refreshing isn't available on mobile — showing cached rows.");
-							return;
-						}
-						this.refreshApiSource(view, node, "manual");
-					})
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle("Remove data source")
-					.setIcon("unplug")
-					.onClick(() => {
-						new ConfirmModal(
-							this.plugin.app,
-							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
-							"Remove",
-							() => {
-								this.plugin.viewsManager.setApiSource(view.id, node.id, undefined);
-								// R4/G4: the source config itself includes headers (device-local, in
-								// ApiHeadersStore) — Remove drops those too, same as Delete folder already
-								// does, so a bearer token doesn't linger on the device or silently reappear
-								// if a source is added back to this Folder later.
-								this.plugin.apiHeadersStore.delete(node.id);
-							}
-						).open();
-					})
-			);
-		} else if (node.folderSource) {
-			// PR-4 (G10): reuses the exact same menu actions as an API source — "Refresh now" re-runs
-			// the (synchronous, disk-read-only) reconciliation; "Remove data source" just stops it,
-			// since the children it already placed are ordinary real units with nowhere else to go.
-			menu.addItem((item) =>
-				item
-					.setTitle("Refresh now")
-					.setIcon("refresh-cw")
-					.onClick(() => this.refreshFolderSource(view, node))
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle("Remove data source")
-					.setIcon("unplug")
-					.onClick(() => {
-						new ConfirmModal(
-							this.plugin.app,
-							`Remove the data source from "${node.label}"? Its current children stay in place as plain units — it just stops refreshing.`,
-							"Remove",
-							() => this.plugin.viewsManager.setFolderSource(view.id, node.id, undefined)
-						).open();
-					})
-			);
-		} else if (node.csvSource) {
-			// PR-7: reuses the exact same menu actions as an API source — "Refresh now" re-reads+parses
-			// the file (no mobile guard, see `refreshCsvSource`'s own doc comment); "Remove data source"
-			// just stops it, same as an API source's own Remove (rows stay in place). CSV has no
-			// device-local headers store to clean up on removal.
-			menu.addItem((item) =>
-				item
-					.setTitle("Refresh now")
-					.setIcon("refresh-cw")
-					.onClick(() => this.refreshCsvSource(view, node, "manual"))
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle("Remove data source")
-					.setIcon("unplug")
-					.onClick(() => {
-						new ConfirmModal(
-							this.plugin.app,
-							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
-							"Remove",
-							() => this.plugin.viewsManager.setCsvSource(view.id, node.id, undefined)
-						).open();
-					})
-			);
-		} else if (node.markdownTableSource) {
-			// PR-8: reuses the exact same menu actions as a CSV source — "Refresh now" re-reads+parses
-			// the file (no mobile guard, see `refreshMarkdownTableSource`'s own doc comment); "Remove
-			// data source" just stops it, same as a CSV source's own Remove (rows stay in place).
-			// Markdown Table has no device-local headers store to clean up on removal.
-			menu.addItem((item) =>
-				item
-					.setTitle("Refresh now")
-					.setIcon("refresh-cw")
-					.onClick(() => this.refreshMarkdownTableSource(view, node, "manual"))
-			);
-			menu.addItem((item) =>
-				item
-					.setTitle("Remove data source")
-					.setIcon("unplug")
-					.onClick(() => {
-						new ConfirmModal(
-							this.plugin.app,
-							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
-							"Remove",
-							() => this.plugin.viewsManager.setMarkdownTableSource(view.id, node.id, undefined)
-						).open();
-					})
-			);
-		}
+		addSourceAndStatusItems(menu, this.plugin, this, view, node);
 		menu.addSeparator();
 		menu.addItem((item) =>
 			item
@@ -2692,8 +3136,9 @@ export class AtlasExplorerView extends ItemView {
 						"Delete",
 						() => {
 							// E6: the device-local headers entry has no home in the synced view data, so
-							// it's cleaned up here rather than inside `deleteMetaFolder` itself.
-							this.plugin.apiHeadersStore.delete(node.id);
+							// it's cleaned up here rather than inside `deleteMetaFolder` itself. PR-1 (G15e):
+							// the stored Outside-Vault path goes with it.
+							this.forgetDeviceLocalSourceState(node.id);
 							this.plugin.viewsManager.deleteMetaFolder(view.id, node.id);
 						}
 					).open();
@@ -2937,16 +3382,18 @@ export class AtlasExplorerView extends ItemView {
 			// have keyboard focus — same "drag moves the whole selection" spirit, applied to the one
 			// other batch-shaped action this view already had.
 			if (this.selectedBucketNodeIds.has(node.id) && this.selectedBucketNodeIds.size > 1) {
-				for (const id of this.selectedBucketNodeIds) {
-					const found = this.findNodeAnywhere(view.root, id);
-					if (found?.node.type === "unit") this.plugin.viewsManager.unplaceNode(view.id, id);
-				}
-				this.selectedBucketNodeIds.clear();
-				void this.render();
+				// PR-1 (G15b): one confirm for the whole selection when any of it holds a live source.
+				const units = [...this.selectedBucketNodeIds]
+					.map((id) => this.findNodeAnywhere(view.root, id)?.node)
+					.filter((n): n is ViewNode => n?.type === "unit");
+				this.removeUnitsFromView(view.id, units, () => {
+					this.selectedBucketNodeIds.clear();
+					void this.render();
+				});
 			} else if (node.type === "unit") {
-				// PR 13: unplaceNode removes this exact focused row, not every duplicate of the same
-				// unit that might also be placed elsewhere in this view.
-				this.plugin.viewsManager.unplaceNode(view.id, node.id);
+				// PR 13: removes this exact focused row, not every duplicate of the same unit that might
+				// also be placed elsewhere in this view. PR-1 (G15b): a sourced unit confirms first.
+				this.removeUnitsFromView(view.id, [node]);
 			}
 		} else if (evt.key === "F2" && node.type === "meta") {
 			evt.preventDefault();

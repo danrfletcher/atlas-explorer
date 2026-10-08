@@ -8,6 +8,8 @@ import { AtlasExplorerView } from "../../src/explorer-view";
 import { resolveOutsidePath } from "../../src/folder-source-outside";
 import { View, ViewNode } from "../../src/types";
 import { meta } from "../integration/create-from-meta-fixtures";
+import { App } from "obsidian";
+import { ViewsManager } from "../../src/views";
 
 /** Mirrors exactly what `renderNode` computes for the explorer row's dot class (`src/explorer-view.ts`,
  * the `node.folderSource?.location === "outside"` block) — kept as its own tiny helper here rather than
@@ -201,5 +203,84 @@ describe("G6/G11 — red/green state-transition rule: the explorer row's dot rec
 
 	it("an empty/never-configured path renders red, same as any other unresolved path", () => {
 		expect(dotClassFor("")).toBe("red");
+	});
+});
+
+// PR-1 (E-c, T3): an Outside-Vault source on a unit (not only on an Atlas folder) resolves its path from
+// `FolderSourcePathStore`, keyed by the unit's own node id, and its managed rows render and refresh from it.
+describe("PR-1 E-c — an Outside-Vault source on a unit resolves its path from FolderSourcePathStore by node id", () => {
+	let dir: string;
+	beforeEach(() => {
+		dir = fs.mkdtempSync(path.join(os.tmpdir(), "atlas-unit-outside-"));
+		fs.writeFileSync(path.join(dir, "Alpha.md"), "a");
+		fs.writeFileSync(path.join(dir, "Beta.md"), "b");
+	});
+	afterEach(() => {
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	function unitWithOutside(id: string): ViewNode {
+		const node: ViewNode = { id, type: "unit", ref: { kind: "file", path: "Linear.md" }, children: [] };
+		node.folderSource = { location: "outside", path: "", showFiles: true, showFolders: false, refreshOnViewLoad: false };
+		return node;
+	}
+
+	// The `this` the real explorer methods see: a viewsManager whose `getNode` finds nodes in `view`,
+	// and a `folderSourcePathStore` standing in for the device-local store under test.
+	function bindRef(view: View, store: Record<string, string>, refreshFolderSource = vi.fn()): Record<string, unknown> {
+		const nodeIndex = new Map<string, ViewNode>();
+		const walk = (ns: ViewNode[]) => ns.forEach((n) => (nodeIndex.set(n.id, n), walk(n.children)));
+		walk(view.root);
+		return {
+			plugin: {
+				viewsManager: { getNode: (_viewId: string, id: string) => nodeIndex.get(id), refreshFolderSource },
+				folderSourcePathStore: { get: (id: string) => store[id] ?? "" },
+			},
+		};
+	}
+
+	it("a managed child of a unit owner is shown while the owner's stored path resolves, and hidden while it does not", () => {
+		const owner = unitWithOutside("unit-owner");
+		const child: ViewNode = { id: "child", type: "unit", ref: { kind: "file", path: "Alpha.md" }, children: [], folderSourceManaged: true, folderSourceOwnerId: owner.id };
+		owner.children = [child];
+		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [owner] };
+
+		const resolving = bindRef(view, { "unit-owner": dir });
+		expect(proto.isOutsideManagedAndUnresolved.call(resolving, view, child)).toBe(false);
+
+		const unresolving = bindRef(view, { "unit-owner": path.join(dir, "missing") });
+		expect(proto.isOutsideManagedAndUnresolved.call(unresolving, view, child)).toBe(true);
+	});
+
+	it("refreshing an Outside-Vault unit passes the stored path for its own node id to the view manager", () => {
+		const owner = unitWithOutside("unit-owner");
+		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [owner] };
+		const refreshFolderSource = vi.fn();
+		const ref = bindRef(view, { "unit-owner": dir }, refreshFolderSource);
+		proto.refreshFolderSource.call(ref, view, owner);
+		expect(refreshFolderSource).toHaveBeenCalledWith(view.id, owner.id, dir);
+	});
+
+	it("an Outside-Vault unit with no stored path refreshes with an empty path and leaves its rows unresolved", () => {
+		const owner = unitWithOutside("unit-owner");
+		const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [owner] };
+		const refreshFolderSource = vi.fn();
+		const ref = bindRef(view, {}, refreshFolderSource);
+		proto.refreshFolderSource.call(ref, view, owner);
+		expect(refreshFolderSource).toHaveBeenCalledWith(view.id, owner.id, "");
+	});
+
+	it("an Outside-Vault source on a unit builds its managed rows from the stored path, owned by that unit's id, and refreshes them", () => {
+		const vm = new ViewsManager(new App() as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		vm.placeUnit(view.id, { kind: "file", path: "Linear.md" }, null);
+		const unit = vm.getViews()[0].root[0];
+		vm.setFolderSource(view.id, unit.id, { location: "outside", path: "", showFiles: true, showFolders: false, refreshOnViewLoad: false });
+
+		vm.refreshFolderSource(view.id, unit.id, dir);
+
+		const managed = vm.getNode(view.id, unit.id)!.children;
+		expect(managed).toHaveLength(2);
+		expect(managed.every((c) => c.folderSourceManaged && c.folderSourceOwnerId === unit.id)).toBe(true);
 	});
 });

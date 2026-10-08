@@ -483,6 +483,13 @@ export function nodeHasApiRows(node: Pick<ViewNode, "apiSource" | "csvSource" | 
 	);
 }
 
+/** PR-1 (G11a): every bucket node can hold a data source — an Atlas folder (meta), a unit (file, module,
+ * block or promoted folder). One predicate serves every source setter, `refreshFolderSource`, and the
+ * explorer's source walks, so no call site needs to know which kind of node it was handed. */
+export function canHoldSource(node: Pick<ViewNode, "type">): boolean {
+	return node.type === "meta" || node.type === "unit";
+}
+
 export interface MetaTarget {
 	id: string | null;
 	label: string;
@@ -645,6 +652,21 @@ export class ViewsManager {
 
 	isPlacedAnywhere(ref: UnitRef): boolean {
 		return this.views.some((v) => this.findUnitNode(v.root, ref) !== null);
+	}
+
+	/** PR-1.F1: every unit ref key placed in any view, collected in one walk. The "+" picker tests
+	 * each candidate against this Set rather than calling `isPlacedAnywhere` per folder (a tree walk
+	 * each time). Skips the same Outside-owned nodes `findUnitNode` skips. */
+	placedRefKeys(): Set<string> {
+		const keys = new Set<string>();
+		const collect = (nodes: ViewNode[], root: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.type === "unit" && node.ref && !this.isOutsideOwned(root, node)) keys.add(unitRefKey(node.ref));
+				collect(node.children, root);
+			}
+		};
+		for (const view of this.views) collect(view.root, view.root);
+		return keys;
 	}
 
 	/** Every placement of this ref across every view, as breadcrumb-able (view name, meta-folder
@@ -981,6 +1003,7 @@ export class ViewsManager {
 		if (!unitIndex) return placed;
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
+			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
 			return mode === "global" ? !unitIndex.isDismissed(ref, "global") : !unitIndex.isDismissed(ref, "view", viewId);
 		});
 	}
@@ -997,6 +1020,7 @@ export class ViewsManager {
 				: allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
+			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
 			return mode === "global" ? unitIndex.isDismissed(ref, "global") : unitIndex.isDismissed(ref, "view", viewId);
 		});
 	}
@@ -1137,7 +1161,7 @@ export class ViewsManager {
 	setApiSource(viewId: string, nodeId: string, source: ApiSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!found || !canHoldSource(found.node)) return;
 		const hadOtherSource = found.node.csvSource !== undefined || found.node.markdownTableSource !== undefined;
 		found.node.apiSource = source;
 		if (source) {
@@ -1159,7 +1183,7 @@ export class ViewsManager {
 	setCsvSource(viewId: string, nodeId: string, source: CsvSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!found || !canHoldSource(found.node)) return;
 		const hadOtherSource = found.node.apiSource !== undefined || found.node.markdownTableSource !== undefined;
 		found.node.csvSource = source;
 		if (source) {
@@ -1182,7 +1206,7 @@ export class ViewsManager {
 	setMarkdownTableSource(viewId: string, nodeId: string, source: MarkdownTableSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!found || !canHoldSource(found.node)) return;
 		const hadOtherSource = found.node.apiSource !== undefined || found.node.csvSource !== undefined;
 		found.node.markdownTableSource = source;
 		if (source) {
@@ -1204,7 +1228,7 @@ export class ViewsManager {
 	setFolderSource(viewId: string, nodeId: string, source: FolderSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!found || !canHoldSource(found.node)) return;
 		// PR-1.F2 (G4): only a change to the rules is a definition that flags rows. An unchanged save, or a
 		// mode change alone, leaves every flag as it was.
 		const rulesBefore = JSON.stringify(found.node.folderSource?.filters ?? null);
@@ -1223,7 +1247,7 @@ export class ViewsManager {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const found = this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta" || !found.node.folderSource) return;
+		if (!found || !canHoldSource(found.node) || !found.node.folderSource) return;
 		const ownerId = found.node.id;
 		const before = JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]);
 		// PR-2 (R2-Q2): an Outside-Vault source's deletes and renames are reconciled before the add pass,

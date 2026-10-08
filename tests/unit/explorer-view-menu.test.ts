@@ -115,3 +115,53 @@ describe("G29 — existing API-item behavior is unchanged", () => {
 		expect(menu.titles()).not.toContain("Remove attachment");
 	});
 });
+
+// PR-1 (G11e): Statuses, Data source…, Refresh now and Remove data source come from one shared helper,
+// so an Atlas-folder menu and a unit menu list them with the same labels, order and conditions.
+describe("PR-1 G11e — shared source/status menu items on a meta and a unit menu", () => {
+	const SOURCE_TITLES = ["Data source…", "Refresh now", "Remove data source"];
+	const apiSource = { url: "https://x", method: "GET" as const, mapping: { idField: "id", labelField: "name" }, mode: "merge" as const, refreshOnViewLoad: false };
+
+	function fakeFor(): Record<string, unknown> {
+		const plugin = { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null } };
+		const target: Record<string, unknown> = { plugin };
+		return new Proxy(target, {
+			get: (t, prop: string) => (prop in t ? t[prop] : vi.fn()),
+		});
+	}
+
+	function menuTitles(method: "showMetaFolderMenu" | "showUnitMenu", node: ViewNode, ref?: { kind: "file"; path: string }): string[] {
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		const args = method === "showUnitMenu" ? [new MouseEvent("contextmenu"), ref ?? { kind: "file", path: "U.md" }, view, node] : [new MouseEvent("contextmenu"), node, view];
+		(AtlasExplorerView.prototype as unknown as Record<string, (...a: unknown[]) => void>)[method].call(fakeFor(), ...args);
+		show.mockRestore();
+		return built!.titles();
+	}
+
+	const sourceOf = (titles: string[]) => titles.filter((t) => SOURCE_TITLES.includes(t));
+
+	it("a unit with no source offers Data source… and no Refresh now or Remove data source", () => {
+		const unit: ViewNode = { id: "u", type: "unit", ref: { kind: "file", path: "U.md" }, children: [] };
+		const titles = menuTitles("showUnitMenu", unit);
+		expect(titles).toContain("Data source…");
+		expect(titles).not.toContain("Refresh now");
+		expect(titles).not.toContain("Remove data source");
+	});
+
+	it("a unit with an API source lists Data source…, Refresh now, Remove data source in the same order as an Atlas folder", () => {
+		const unit: ViewNode = { id: "u", type: "unit", ref: { kind: "file", path: "U.md" }, children: [], apiSource };
+		const folder: ViewNode = { id: "f", type: "meta", label: "Linear issues", children: [], apiSource };
+		expect(sourceOf(menuTitles("showUnitMenu", unit))).toEqual(SOURCE_TITLES);
+		expect(sourceOf(menuTitles("showMetaFolderMenu", folder))).toEqual(SOURCE_TITLES);
+	});
+
+	it("an Atlas folder without a source offers the same single Data source… item as a unit does", () => {
+		const folder: ViewNode = { id: "f", type: "meta", label: "Plain", children: [] };
+		const unit: ViewNode = { id: "u", type: "unit", ref: { kind: "file", path: "U.md" }, children: [] };
+		expect(sourceOf(menuTitles("showMetaFolderMenu", folder))).toEqual(["Data source…"]);
+		expect(sourceOf(menuTitles("showUnitMenu", unit))).toEqual(["Data source…"]);
+	});
+});

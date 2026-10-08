@@ -76,7 +76,12 @@ export type Unit =
 	| { type: "promoted-block"; path: string; subpath: string }
 	/** PR-3 (G3): a file manually added to the inbox via "+" — see `AddedItem`. Always a file (the
 	 * "+" modal only ever offers `app.vault.getFiles()`, never a folder). */
-	| { type: "added-file"; path: string };
+	| { type: "added-file"; path: string }
+	/** PR-1.S1 (G2): a sub-folder manually added to the inbox — see `AddedItem`. Behaves as a module
+	 * everywhere a folder ref does (`unitToRef` maps it to a folder ref): folder icon, icon opens
+	 * Module Contents, never expands inline. Never a vault-root folder (those are already
+	 * `folder-unit`s). */
+	| { type: "added-folder"; path: string };
 
 export function unitKey(unit: Unit): string {
 	return unit.type === "promoted-block" ? `block:${unit.path}#${unit.subpath}` : `${unit.type}:${unit.path}`;
@@ -86,7 +91,7 @@ export function unitToRef(unit: Unit): UnitRef {
 	if (unit.type === "promoted-block") {
 		return { kind: "block", path: unit.path, subpath: unit.subpath };
 	}
-	if (unit.type === "folder-unit" || unit.type === "promoted-folder") {
+	if (unit.type === "folder-unit" || unit.type === "promoted-folder" || unit.type === "added-folder") {
 		return { kind: "folder", path: unit.path };
 	}
 	return { kind: "file", path: unit.path };
@@ -147,14 +152,14 @@ export interface StatusGovernance {
 	sortReverse?: boolean;
 }
 
-/** F9 — a node in a view's bucket tree. Unit nodes have no children; meta nodes are labels with
- * no disk presence and nest without limit. */
+/** F9 — a node in a view's bucket tree. Meta nodes are labels with no disk presence; unit nodes
+ * point at a file, folder or block and can nest items too (PR 12). Both kinds nest without limit. */
 export interface ViewNode extends StatusGovernance {
 	id: string;
 	type: "meta" | "unit";
 	label?: string; // meta only
 	ref?: UnitRef; // unit only
-	children: ViewNode[]; // meta nodes only; unit nodes always []
+	children: ViewNode[]; // any node can nest items, meta or unit
 	collapsed?: boolean;
 	/** PR 16: which status within a *governing parent's* set this exact node currently shows —
 	 * never about this node's own children (that's `statusEnabled`/`statusSetId`, inherited from
@@ -162,8 +167,8 @@ export interface ViewNode extends StatusGovernance {
 	 * same as before this PR existed. */
 	explicitStatusId?: string;
 	/** PR-2 (API-backed Atlas Folders): request/mapping config for a "Folder" (meta node) whose rows
-	 * are pulled from a JSON API instead of (or alongside) manually placed children. Only ever set on
-	 * a `type: "meta"` node. Headers (including any bearer token) are deliberately absent from this
+	 * are pulled from a JSON API instead of (or alongside) manually placed children. Set on any bucket
+	 * node, meta or unit (PR-1), so a swapped-in spot keeps its source. Headers (including any bearer token) are deliberately absent from this
 	 * shape — see `ApiHeadersStore` — so this object is safe to persist in synced `data.json` (G13).
 	 *
 	 * E7 (ticket 34n6ct71muguncxk, not yet built anywhere in this repo as of PR-3 either): whatever code
@@ -192,7 +197,7 @@ export interface ViewNode extends StatusGovernance {
 	 * placeholder/API-item rows; it only decides which real `ViewNode` unit children belong under this
 	 * meta node (via `buildFolderSourceChildren`/`reconcileManagedChildren` in `folder-source.ts`), so
 	 * those children go through the exact same place/nest/reorder/status/missing-ref machinery as any
-	 * other unit (G7/G9/G16). Only ever set on a `type: "meta"` node. */
+	 * other unit (G7/G9/G16). Set on any bucket node, meta or unit (PR-1). */
 	folderSource?: FolderSourceConfig;
 	/** PR-4: true only on a `type: "unit"` child this Folder's own reconciliation created/owns, so a
 	 * later refresh can tell its managed rows apart from anything the user separately nested in here by
@@ -212,11 +217,11 @@ export interface ViewNode extends StatusGovernance {
 	 * API-item rows exactly like `apiSource` (same `apiCache`/`apiItemState`/`apiItemOrder`/
 	 * `apiAwaitingConfirmation` fields below, shared with `apiSource` rather than duplicated), just
 	 * triggered by a file-change/view-load/timer instead of a network fetch. Only ever set on a
-	 * `type: "meta"` node, and never set at the same time as `apiSource` on the same node. */
+	 * bucket node, meta or unit (PR-1), and never set at the same time as `apiSource` on the same node. */
 	csvSource?: CsvSourceConfig;
 	/** PR-8 (G17-G20/G22-G24): a markdown pipe-table source — same `apiCache`/`apiItemState`/
 	 * `apiItemOrder`/`apiAwaitingConfirmation` fields shared with `apiSource`/`csvSource` above. Only
-	 * ever set on a `type: "meta"` node, and never set at the same time as `apiSource`/`csvSource` on
+	 * set on any bucket node, meta or unit (PR-1), and never set at the same time as `apiSource`/`csvSource` on
 	 * the same node. */
 	markdownTableSource?: MarkdownTableSourceConfig;
 }
