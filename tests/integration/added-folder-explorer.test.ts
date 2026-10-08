@@ -53,6 +53,9 @@ const REAL = [
 	"findNodeAnywhere",
 	"matchesFilter",
 	"trackModuleModal",
+	"removeUnitsFromView",
+	"holdsLiveDataSource",
+	"forgetDeviceLocalSourceState",
 ] as const;
 
 interface Ctx {

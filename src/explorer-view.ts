@@ -19,6 +19,7 @@ import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
+import { SwapCandidate, SwapPickerModal, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
 import { generateBlockId } from "./display-text";
 import { ApiSourceModal } from "./api-source-modal";
@@ -463,6 +464,26 @@ interface SourceMenuHost {
 /** Display name for a unit node, from its ref's basename — used where a row's own label isn't to hand. */
 function unitBasename(node: ViewNode): string {
 	return node.ref?.path.split("/").pop() ?? "this item";
+}
+
+interface SwapMenuHost {
+	openSwapPicker(view: View, node: ViewNode): void;
+	openSwapForFolder(view: View, node: ViewNode, displayName: string): void;
+}
+
+/** PR-2 (G1-G4): the Swap items. "Swap with…" on any swappable bucket node; "Swap for Atlas folder" only on
+ * a unit, since an Atlas folder already is one (G4). Adds no separator — the caller owns it. */
+function addSwapItems(menu: Menu, host: SwapMenuHost, view: View, node: ViewNode, displayName: string): void {
+	if (!canSwapNode(node)) return;
+	menu.addItem((item) => item.setTitle("Swap with…").setIcon("replace").onClick(() => host.openSwapPicker(view, node)));
+	if (canSwapForAtlasFolder(node)) {
+		menu.addItem((item) =>
+			item
+				.setTitle("Swap for Atlas folder")
+				.setIcon("folder-plus")
+				.onClick(() => host.openSwapForFolder(view, node, displayName))
+		);
+	}
 }
 
 /** PR-1 (G11e): the Statuses, Data source…, Refresh now and Remove data source items, shared by the
@@ -2373,7 +2394,7 @@ export class AtlasExplorerView extends ItemView {
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showUnitMenu(evt, ref, view, node);
+			this.showUnitMenu(evt, ref, view, node, info.text);
 		});
 
 		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
@@ -2844,7 +2865,7 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- context menus -----------------------------------------------------------------------------
 
-	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode): void {
+	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode, displayName: string): void {
 		const menu = new Menu();
 		menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
 		menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
@@ -2869,6 +2890,8 @@ export class AtlasExplorerView extends ItemView {
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
 		// the same label is expected — see duplicateNode's own doc comment for why).
 		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.duplicateFolder(view, node)));
+		// PR-2 (G3): directly above "Remove from view".
+		addSwapItems(menu, this, view, node, displayName);
 		menu.addItem((item) =>
 			item
 				.setTitle("Remove from view")
@@ -2915,6 +2938,65 @@ export class AtlasExplorerView extends ItemView {
 			view.id,
 			node.id
 		);
+	}
+
+	/** PR-2 (G6): the "Swap with…" picker over every vault file and folder plus every known block, minus
+	 * excluded and dot-folders and the item being replaced. Block labels need their text resolved first,
+	 * so this is async; the picker itself is opened once the list is ready. */
+	async openSwapPicker(view: View, node: ViewNode): Promise<void> {
+		const { plugin } = this;
+		const units = plugin.unitIndex.getUnits();
+		const blockUnits = units.filter((unit) => unit.type === "free-block" || unit.type === "promoted-block");
+		const blocks = await Promise.all(
+			blockUnits.map(async (unit) => {
+				const resolved = await resolveUnit(plugin.app, plugin.settings, unit, plugin.freeBlockTextCache);
+				return { ref: unitToRef(unit), text: resolved?.text ?? "" };
+			})
+		);
+		const vault = plugin.app.vault;
+		const candidates = buildSwapCandidates({
+			files: vault.getFiles().map((file) => ({ path: file.path, name: file.name })),
+			folderPaths: vault
+				.getAllLoadedFiles()
+				.filter((file): file is TFolder => file instanceof TFolder && !file.isRoot())
+				.map((folder) => folder.path),
+			blocks,
+			knownKeys: new Set(units.map((unit) => unitRefKey(unitToRef(unit)))),
+			excludedFolders: plugin.settings.excludedFolders,
+			poolFolder: plugin.settings.poolFolder,
+			replacedRef: node.type === "unit" ? node.ref : undefined,
+		});
+		new SwapPickerModal(plugin.app, candidates, (candidate) => void this.swapPicked(view, node, candidate)).open();
+	}
+
+	/** PR-2 (G7/G8/E1): applies one picked candidate to the one spot. A target that has vanished since the
+	 * picker opened changes nothing and says so. A unit Atlas doesn't know yet is hand-promoted first, so
+	 * it resolves rather than showing "(missing)"; a known unit is used as-is with no second record. */
+	private async swapPicked(view: View, node: ViewNode, candidate: SwapCandidate): Promise<void> {
+		const { plugin } = this;
+		const vault = plugin.app.vault;
+		const candidateKey = unitRefKey(candidate.ref);
+		const known = plugin.unitIndex.getUnits().some((unit) => unitRefKey(unitToRef(unit)) === candidateKey);
+		const onDisk = vault.getAbstractFileByPath(candidate.path);
+		const exists = candidate.kind === "folder" ? onDisk instanceof TFolder : onDisk instanceof TFile && (candidate.kind !== "block" || known);
+		if (!exists) {
+			new Notice(`Couldn't find ${candidate.name}, nothing changed.`);
+			return;
+		}
+		if (!known) plugin.unitIndex.addManualPromotion(candidate.ref);
+		if (!plugin.viewsManager.swapNodeWithUnit(view.id, node.id, candidate.ref)) return;
+		await plugin.flushSave();
+		this.queueRender();
+	}
+
+	/** PR-2 (G4/G9/E5): the "Swap for Atlas folder" name box, prefilled with the item's own name. Cancel
+	 * closes it without calling back, so nothing changes; an empty name changes nothing either. */
+	openSwapForFolder(view: View, node: ViewNode, displayName: string): void {
+		new TextPromptModal(this.plugin.app, "Swap for Atlas folder", displayName, (label) => {
+			if (!this.plugin.viewsManager.swapNodeForAtlasFolder(view.id, node.id, label)) return;
+			void this.plugin.flushSave();
+			this.queueRender();
+		}).open();
 	}
 
 	/** PR 15/17: the "Statuses" modal — opened from a bucket unit or meta folder's own context menu
@@ -3085,6 +3167,8 @@ export class AtlasExplorerView extends ItemView {
 		// keeps its place, settings and children). Offered on every meta folder, whatever its children,
 		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
+		// PR-2 (G3): on an Atlas folder, right after "Create". Only "Swap with…" applies here (G4).
+		addSwapItems(menu, this, view, node, node.label ?? "");
 		addSourceAndStatusItems(menu, this.plugin, this, view, node);
 		menu.addSeparator();
 		menu.addItem((item) =>
