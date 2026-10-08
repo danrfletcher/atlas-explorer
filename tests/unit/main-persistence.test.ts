@@ -68,3 +68,61 @@ describe("AtlasPlugin.persistNow", () => {
 		expect(data.addedItems).toEqual([addedItem]);
 	});
 });
+
+describe("noAutoPromoteFolders persistence (G1)", () => {
+	it("a data.json without the key loads as []", () => {
+		const plugin = makePlugin();
+		(plugin as unknown as { loadFromData(d: unknown): void }).loadFromData({
+			settings: { poolFolder: "_pool", excludedFolders: [] },
+			manualPromotions: [],
+			views: [],
+			activeViewId: "default",
+			expandedModuleFolders: [],
+			statusSets: [],
+			colorPalette: [],
+		});
+		expect((plugin as unknown as { settings: AtlasSettings }).settings.noAutoPromoteFolders).toEqual([]);
+	});
+
+	it("the loaded array is never shared with DEFAULT_SETTINGS or with an earlier load", () => {
+		const plugin = makePlugin();
+		const load = () => {
+			(plugin as unknown as { loadFromData(d: unknown): void }).loadFromData({ settings: { poolFolder: "_pool" } });
+			return (plugin as unknown as { settings: AtlasSettings }).settings.noAutoPromoteFolders;
+		};
+		const first = load();
+		first.push("Mutated");
+		const second = load();
+		expect(second).toEqual([]);
+		expect(second).not.toBe(first);
+		expect(DEFAULT_SETTINGS.noAutoPromoteFolders).toEqual([]);
+	});
+
+	it("a hand-edited entry is normalised on load", () => {
+		const plugin = makePlugin();
+		(plugin as unknown as { loadFromData(d: unknown): void }).loadFromData({
+			settings: { poolFolder: "_pool", noAutoPromoteFolders: [" /Attachments/ ", "", "_pool/"] },
+		});
+		expect((plugin as unknown as { settings: AtlasSettings }).settings.noAutoPromoteFolders).toEqual(["Attachments"]);
+	});
+
+	it("save and reload round-trips the list", async () => {
+		const plugin = makePlugin();
+		const app = new App();
+		const settings: AtlasSettings = { ...DEFAULT_SETTINGS, poolFolder: "_pool", noAutoPromoteFolders: ["Attachments", "Projects/Old/assets"] };
+		const saved: unknown[] = [];
+		Object.assign(plugin, {
+			settings,
+			unitIndex: new UnitIndex(app, settings, []),
+			viewsManager: new ViewsManager(app, [], "default", () => {}),
+			statusesManager: new StatusesManager([], [], () => {}),
+			expandedModuleFolders: new Set<string>(),
+			saveData: async (data: unknown) => {
+				saved.push(data);
+			},
+		});
+		await (plugin as unknown as { persistNow(): Promise<void> }).persistNow();
+		(plugin as unknown as { loadFromData(d: unknown): void }).loadFromData(saved[0]);
+		expect((plugin as unknown as { settings: AtlasSettings }).settings.noAutoPromoteFolders).toEqual(["Attachments", "Projects/Old/assets"]);
+	});
+});

@@ -1,5 +1,5 @@
 import { App, TAbstractFile, TFile, TFolder } from "obsidian";
-import type { AtlasSettings } from "./settings";
+import { AtlasSettings, isCoveredByNoAutoPromote, normalizeNoAutoPromoteFolders } from "./settings";
 import { AddedItem, DismissScope, Unit, UnitRef, rewriteRefPath, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 
 /** PR-2: adds or removes `ref` from `list` by `unitRefKey` equality, returning a new array only when
@@ -212,6 +212,18 @@ export class UnitIndex {
 
 	isAdded(ref: UnitRef): boolean {
 		return this.addedItems.some((item) => isUsableAddedItem(item) && unitRefsEqual(item.ref, ref));
+	}
+
+	/** True when `unit` is promoted only because a link or embed reaches it, and its path sits under a
+	 * folder listed in `noAutoPromoteFolders`. Manual promotions and "added" items are never blocked.
+	 * Read by the inbox lists only: promotion itself is unchanged, so placed items keep resolving. */
+	isLinkOnlyInNoAutoPromoteFolder(unit: Unit): boolean {
+		if (unit.type !== "promoted-file" && unit.type !== "promoted-folder" && unit.type !== "promoted-block") return false;
+		const folders = normalizeNoAutoPromoteFolders(this.settings.noAutoPromoteFolders, this.settings.poolFolder);
+		if (!isCoveredByNoAutoPromote(unit.path, folders)) return false;
+		const ref = unitToRef(unit);
+		if (this.isAdded(ref)) return false;
+		return !this.manualPromotions.some((manual) => unitRefsEqual(manual, ref));
 	}
 
 	/** No corresponding "unmark added" — per F1, dismiss is the only removal mechanism for every

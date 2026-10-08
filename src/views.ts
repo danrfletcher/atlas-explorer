@@ -861,6 +861,7 @@ export class ViewsManager {
 		if (!unitIndex) return placed;
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
+			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
 			return mode === "global" ? !unitIndex.isDismissed(ref, "global") : !unitIndex.isDismissed(ref, "view", viewId);
 		});
 	}
@@ -877,6 +878,7 @@ export class ViewsManager {
 				: allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
+			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
 			return mode === "global" ? unitIndex.isDismissed(ref, "global") : unitIndex.isDismissed(ref, "view", viewId);
 		});
 	}
