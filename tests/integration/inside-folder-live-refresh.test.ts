@@ -2,6 +2,7 @@ import { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AtlasPlugin from "../../src/main";
 import { FolderLiveRefresh } from "../../src/folder-live-refresh";
+import { DEFAULT_SETTINGS } from "../../src/settings";
 import { ViewsManager } from "../../src/views";
 import { FolderSourceConfig, View, ViewNode } from "../../src/types";
 
@@ -92,6 +93,7 @@ function setup(root: ViewNode[], entries: TAbstractFile[] = [], leafCount = 0): 
 	Object.assign(plugin, {
 		app,
 		viewsManager,
+		settings: { ...DEFAULT_SETTINGS, noAutoPromoteFolders: [] },
 		unitIndex: { onVaultCreate: vi.fn(), onVaultDelete: vi.fn(), onVaultRename: () => false },
 		graduation,
 		onModuleFolderRename: () => false,
