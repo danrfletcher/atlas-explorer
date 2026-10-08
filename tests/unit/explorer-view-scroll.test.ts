@@ -286,12 +286,15 @@ describe("PR-1.S1 — G11/E8: a dragged inbox row survives virtual redraws", () 
 
 		const dwell = vi.fn();
 		explorer.cancelActiveDwell = dwell;
+		const setCssStyles = vi.spyOn(row, "setCssStyles");
 		scrollTo(h, ROW * 1000); // auto-scroll far away from the dragged row
 		expect(dwell).toHaveBeenCalled();
 		expect(row.isConnected).toBe(true);
+		expect(setCssStyles).toHaveBeenLastCalledWith({ display: "none" });
 		expect(row.style.display).toBe("none");
 
 		scrollTo(h, 0); // back in view: the same element is reused, not a second copy
+		expect(setCssStyles).toHaveBeenLastCalledWith({ display: "" });
 		expect(row.style.display).toBe("");
 		expect(h.panel().querySelectorAll(`[data-ref-key="${keyAt(units, 5)}"]`)).toHaveLength(1);
 
