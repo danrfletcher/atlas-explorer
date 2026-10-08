@@ -22,6 +22,7 @@ const noop = () => {};
  * `resolveOutsideManagedRowInfo` return the given RowInfo so the test controls promoted/added. */
 function fakeBucketThis(info: PillRowInfo, outsideManaged = false) {
 	return {
+		plugin: { viewsManager: { managedRowFilterState: vi.fn(() => "shown") } },
 		selectedBucketNodeIds: new Set<string>(),
 		isOutsideManagedUnit: vi.fn(() => outsideManaged),
 		resolveOutsideManagedRowInfo: vi.fn(() => info),

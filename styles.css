@@ -244,6 +244,11 @@
 	opacity: 0.5;
 }
 
+/* PR-1.F2 (G5): a merge-mode Folder row whose file stopped matching its YAML rules. Greyed like a missing row. */
+.atlas-row.atlas-filtered-out {
+	opacity: 0.5;
+}
+
 .atlas-row.atlas-drop-target {
 	outline: 2px dashed var(--interactive-accent);
 	outline-offset: -2px;
@@ -436,6 +441,14 @@
 	color: var(--text-error, #e53935);
 	font-size: var(--font-ui-smaller);
 	margin: 0 0 8px;
+}
+
+/* PR-1.F1 (E5): a File filters rule whose key is empty is outlined red; its "Key required" text is
+ * the atlas-api-field-error line directly beneath it. The extra terms outrank Obsidian's
+ * `input[type=text] { outline: none }` and its hover/focus rules, which otherwise hide the outline. */
+input.atlas-yaml-key-invalid[type="text"]:not(:disabled) {
+	outline: 1px solid var(--text-error, #e53935);
+	outline-offset: -1px;
 }
 
 /* PR-4 (G3): persistent unsandboxed-code warning next to the JS mapping editor — visible without

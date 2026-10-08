@@ -176,6 +176,7 @@ export default class AtlasPlugin extends Plugin {
 		this.registerEvent(this.app.vault.on("modify", (file) => this.onVaultModifyEvent(file)));
 		this.registerEvent(
 			this.app.metadataCache.on("resolved", () => {
+				this.viewsManager.onMetadataResolved();
 				this.unitIndex.onMetadataResolved();
 				this.graduation.handleResolved();
 			})

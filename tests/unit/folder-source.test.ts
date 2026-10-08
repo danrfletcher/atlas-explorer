@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { App } from "obsidian";
-import { App as MockApp, TFolder, Vault } from "../../tests/mocks/obsidian";
+import { App as MockApp, TFile, TFolder, Vault } from "../../tests/mocks/obsidian";
 import { buildFolderSourceChildren, folderToRows, isAncestorOrSelf, reconcileManagedChildren } from "../../src/folder-source";
 import { ViewsManager } from "../../src/views";
 import { FolderSourceConfig, UnitRef, ViewNode } from "../../src/types";
@@ -514,5 +514,131 @@ describe("R1 end-to-end — a managed row survives refresh after being moved or 
 		vm.refreshFolderSource(view.id, folder.id);
 
 		expect(countRef(view.root, aRef)).toBe(0);
+	});
+});
+
+/** PR-1.F2: reconcile with YAML rules. Existing managed rows are always kept, a new non-matching file never
+ * joins, and a removed "filtered out" row only comes back once its file matches. The hidden-at-save flag is
+ * set by `ViewsManager`, so its per-mode table is checked through that manager at the end. The fixture is a
+ * mocked metadataCache with frontmatter for acme, beta and gamma, plus a PDF with none. */
+const FRONTMATTER: Record<string, Record<string, unknown> | undefined> = {
+	"Jobs/acme.md": { status: "active" },
+	"Jobs/beta.md": { status: "done" },
+	"Jobs/gamma.md": { status: "active" },
+};
+const ACTIVE_RULES = [{ key: "status", value: "active" }];
+
+function jobsVault(): Vault {
+	const vault = new Vault();
+	vault.seedFolder("Jobs");
+	for (const path of ["Jobs/acme.md", "Jobs/beta.md", "Jobs/gamma.md", "Jobs/brief.pdf"]) vault.seedFile(path);
+	return vault;
+}
+
+function jobsSource(rules?: { key: string; value: string }[]): FolderSourceConfig {
+	return source({ path: "Jobs", ...(rules ? { filters: { files: { yaml: { rules } } } } : {}) });
+}
+
+const managedRow = (path: string): ViewNode => unitNode({ kind: "file", path }, { folderSourceManaged: true, folderSourceOwnerId: "folder" });
+
+function reconcileJobs(existing: ViewNode[], config: FolderSourceConfig, vault = jobsVault()): ViewNode[] {
+	const filter = { metadataResolved: true, frontmatterOf: (file: { path: string }) => FRONTMATTER[file.path] };
+	return buildFolderSourceChildren(vault, config, existing, (ref) => managedRow(ref.path), { sourceNodeId: "folder", viewRoot: existing, filter });
+}
+
+const pathsOf = (nodes: ViewNode[]): (string | undefined)[] => nodes.map((n) => n.ref?.path);
+
+describe("PR-1.F2 — reconcile widens the desired set, and never drops a non-matching managed row", () => {
+	it("keeps an existing row that no longer matches in its slot, adds a matching new file, and never adds the PDF", () => {
+		const out = reconcileJobs([managedRow("Jobs/acme.md"), managedRow("Jobs/beta.md")], jobsSource(ACTIVE_RULES));
+		expect(pathsOf(out)).toEqual(["Jobs/acme.md", "Jobs/beta.md", "Jobs/gamma.md"]);
+	});
+
+	it("a new non-matching file is never added; a new matching one is", () => {
+		FRONTMATTER["Jobs/delta.md"] = { status: "done" };
+		FRONTMATTER["Jobs/eps.md"] = { status: "active" };
+		try {
+			const vault = jobsVault();
+			vault.seedFile("Jobs/delta.md");
+			vault.seedFile("Jobs/eps.md");
+			const out = reconcileJobs([managedRow("Jobs/acme.md")], jobsSource(ACTIVE_RULES), vault);
+			expect(pathsOf(out)).toContain("Jobs/eps.md");
+			expect(pathsOf(out)).not.toContain("Jobs/delta.md");
+		} finally {
+			delete FRONTMATTER["Jobs/delta.md"];
+			delete FRONTMATTER["Jobs/eps.md"];
+		}
+	});
+
+	it("a removed filtered-out row is not re-added while it does not match, and returns at the end once it does", () => {
+		// The user removed beta while it was filtered out, so it is absent from the existing children.
+		const first = reconcileJobs([managedRow("Jobs/acme.md")], jobsSource(ACTIVE_RULES));
+		expect(pathsOf(first)).not.toContain("Jobs/beta.md");
+
+		FRONTMATTER["Jobs/beta.md"] = { status: "active" };
+		try {
+			const second = reconcileJobs(first, jobsSource(ACTIVE_RULES));
+			expect(pathsOf(second)).toEqual(["Jobs/acme.md", "Jobs/gamma.md", "Jobs/beta.md"]);
+			expect(second[second.length - 1].children).toEqual([]);
+		} finally {
+			FRONTMATTER["Jobs/beta.md"] = { status: "done" };
+		}
+	});
+
+	it("a PDF fails every rule, since it has no frontmatter", () => {
+		const out = reconcileJobs([], jobsSource([{ key: "status", value: "active" }, { key: "company", value: "" }]));
+		expect(pathsOf(out)).not.toContain("Jobs/brief.pdf");
+	});
+
+	it("with no usable rule, every file joins as before", () => {
+		const out = reconcileJobs([], jobsSource([{ key: " ", value: "x" }]));
+		expect(pathsOf(out)).toEqual(["Jobs/acme.md", "Jobs/beta.md", "Jobs/gamma.md", "Jobs/brief.pdf"]);
+	});
+});
+
+describe("PR-1.F2 — the hidden-at-save flag per mode, set on Save and cleared on match", () => {
+	function managerWith(mode: "merge" | "append" | "overwrite") {
+		const app = new MockApp();
+		app.vault.seedFolder("Jobs");
+		for (const path of ["Jobs/acme.md", "Jobs/beta.md", "Jobs/gamma.md"]) app.vault.seedFile(path);
+		app.vault.seedFile("Jobs/brief.pdf");
+		app.metadataCache.getFileCache = ((file: TFile) => ({ frontmatter: FRONTMATTER[file.path] })) as unknown as typeof app.metadataCache.getFileCache;
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const viewId = vm.getViews()[0].id;
+		const folder = vm.addMetaFolder(viewId, null, "Job search")!;
+		vm.setFolderSource(viewId, folder.id, { ...jobsSource(), mode });
+		vm.refreshFolderSource(viewId, folder.id);
+		vm.onMetadataResolved();
+		const rowOf = (path: string) => vm.getNode(viewId, folder.id)!.children.find((c) => c.ref?.path === path)!;
+		return { vm, viewId, folder, rowOf };
+	}
+
+	for (const mode of ["merge", "overwrite"] as const) {
+		it(`${mode}: Save flags the non-matching rows, including the PDF`, () => {
+			const { vm, viewId, folder, rowOf } = managerWith(mode);
+			vm.setFolderSource(viewId, folder.id, { ...jobsSource(ACTIVE_RULES), mode });
+			vm.onMetadataResolved();
+			expect(rowOf("Jobs/beta.md").folderSourceHiddenAtSave).toBe(true);
+			expect(rowOf("Jobs/brief.pdf").folderSourceHiddenAtSave).toBe(true);
+			expect(rowOf("Jobs/acme.md").folderSourceHiddenAtSave).toBeUndefined();
+		});
+	}
+
+	it("append: Save never flags a row", () => {
+		const { vm, viewId, folder, rowOf } = managerWith("append");
+		vm.setFolderSource(viewId, folder.id, { ...jobsSource(ACTIVE_RULES), mode: "append" });
+		vm.onMetadataResolved();
+		expect(rowOf("Jobs/beta.md").folderSourceHiddenAtSave).toBeUndefined();
+	});
+
+	it("the flag clears once its row matches again, and removing every rule clears them all", () => {
+		const { vm, viewId, folder, rowOf } = managerWith("merge");
+		vm.setFolderSource(viewId, folder.id, { ...jobsSource(ACTIVE_RULES), mode: "merge" });
+		vm.onMetadataResolved();
+		vm.setFolderSource(viewId, folder.id, { ...jobsSource([{ key: "status", value: "done" }]), mode: "merge" });
+		expect(rowOf("Jobs/beta.md").folderSourceHiddenAtSave).toBeUndefined();
+		expect(rowOf("Jobs/acme.md").folderSourceHiddenAtSave).toBe(true);
+		vm.setFolderSource(viewId, folder.id, { ...jobsSource(), mode: "merge" });
+		expect(vm.getNode(viewId, folder.id)!.children.some((c) => c.folderSourceHiddenAtSave)).toBe(false);
 	});
 });

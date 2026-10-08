@@ -1,17 +1,61 @@
-import { TFolder } from "obsidian";
+import { TAbstractFile, TFile, TFolder } from "obsidian";
 import { ApiItemState, FolderSourceConfig, PLACEHOLDER_ROW_KIND, UnitRef, ViewNode, unitRefKey } from "./types";
 import { listOutsideChildren, resolveOutsidePath } from "./folder-source-outside";
+import { matchesYamlRules, type YamlFilterRule } from "./folder-filter";
+
+/** PR-1.S1: what a rule-filtered Folder source needs from the plugin to decide whether a file joins.
+ * Frontmatter comes from `app.metadataCache` only, never from file content. */
+export interface FolderFileFilterContext {
+	/** False until `metadataCache` has resolved once (E10). Rule-filtered sources hold back new files
+	 * until then, so no unfiltered rows flash at startup. */
+	metadataResolved: boolean;
+	frontmatterOf(file: TFile): unknown;
+}
+
+/** PR-1.F2: the rules a Folder source actually filters by. Empty-key rules are ignored, and none left
+ * means the source is unfiltered. */
+export function activeFolderRules(source: FolderSourceConfig): YamlFilterRule[] {
+	return (source.filters?.files?.yaml?.rules ?? []).filter((rule) => rule.key.trim() !== "");
+}
+
+/** PR-1.F2 (G3): whether one vault file satisfies a source's rules. Non-notes fail any rule, since they
+ * have no frontmatter. Frontmatter comes from the caller's `frontmatterOf`, which reads the metadata cache. */
+export function fileMatchesFolderRules(
+	file: TAbstractFile,
+	rules: YamlFilterRule[],
+	frontmatterOf: (file: TFile) => unknown
+): boolean {
+	if (!(file instanceof TFile) || file.extension !== "md") return false;
+	return matchesYamlRules(frontmatterOf(file), rules);
+}
+
+/** G3/G8: the per-file predicate for a rule-filtered Folder source. `undefined` means the source is
+ * unfiltered (no valid rule left), so every file passes exactly as before. */
+function fileFilterFor(
+	source: FolderSourceConfig,
+	context: FolderFileFilterContext | undefined
+): ((file: TAbstractFile) => boolean) | undefined {
+	const rules = activeFolderRules(source);
+	if (rules.length === 0) return undefined;
+	return (file) => context?.metadataResolved === true && fileMatchesFolderRules(file, rules, context.frontmatterOf);
+}
 
 /** G3/G4: the direct children of `folder`, filtered independently by `showFiles`/`showFolders` —
  * both the simplest reading of "the target folder's children render... as real units" (direct
  * children only; a nested subfolder is its own real folder-unit, browsed via the normal module
- * pipeline rather than flattened in) and what keeps this function trivially pure/testable. */
-export function folderToRows(folder: TFolder, options: { showFiles: boolean; showFolders: boolean }): UnitRef[] {
+ * pipeline rather than flattened in) and what keeps this function trivially pure/testable.
+ * PR-1.S1: `fileFilter`, when given, decides which files join. Existing managed rows are not
+ * affected, since `reconcileManagedChildren` keeps every one it already has. */
+export function folderToRows(
+	folder: TFolder,
+	options: { showFiles: boolean; showFolders: boolean },
+	fileFilter?: (file: TAbstractFile) => boolean
+): UnitRef[] {
 	const refs: UnitRef[] = [];
 	for (const child of folder.children) {
 		if (child instanceof TFolder) {
 			if (options.showFolders) refs.push({ kind: "folder", path: child.path });
-		} else if (options.showFiles) {
+		} else if (options.showFiles && (!fileFilter || fileFilter(child))) {
 			refs.push({ kind: "file", path: child.path });
 		}
 	}
@@ -144,7 +188,7 @@ export function buildFolderSourceChildren(
 	source: FolderSourceConfig,
 	existingChildren: ViewNode[],
 	makeNode: (ref: UnitRef) => ViewNode,
-	context: { sourceNodeId: string; viewRoot: ViewNode[] } = { sourceNodeId: "", viewRoot: existingChildren },
+	context: { sourceNodeId: string; viewRoot: ViewNode[]; filter?: FolderFileFilterContext } = { sourceNodeId: "", viewRoot: existingChildren },
 	outsidePath?: string
 ): ViewNode[] {
 	if (source.location === "outside") return buildOutsideFolderChildren(outsidePath ?? "", source, existingChildren, makeNode, context);
@@ -154,7 +198,7 @@ export function buildFolderSourceChildren(
 		const sentinelRef: UnitRef = { kind: "folder", path: source.path };
 		return [...existingChildren, makeNode(sentinelRef)];
 	}
-	const desiredRefs = folderToRows(target, source);
+	const desiredRefs = folderToRows(target, source, fileFilterFor(source, context.filter));
 	const managedElsewhere = collectManagedRefKeys(context.viewRoot, context.sourceNodeId);
 	const removedRefs = new Set(source.removedRefs ?? []);
 	return reconcileManagedChildren(existingChildren, desiredRefs, source, makeNode, { managedElsewhere, removedRefs });

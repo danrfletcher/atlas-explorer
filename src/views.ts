@@ -1,13 +1,16 @@
-import { App } from "obsidian";
+import { App, TFile } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
 import {
+	activeFolderRules,
 	basenameForDeletedRef,
 	buildFolderSourceChildren,
 	diffOutsideChildren,
+	fileMatchesFolderRules,
 	parentFolderPath,
 	reconcileFolderSourceChildDelete,
 } from "./folder-source";
+import { type FolderRowFilterState, folderRowFilterState, type YamlFilterRule } from "./folder-filter";
 import { listOutsideChildren, resolveOutsidePath } from "./folder-source-outside";
 import {
 	ApiClickAction,
@@ -32,6 +35,15 @@ import {
 	unitRefsEqual,
 	unitToRef,
 } from "./types";
+
+/** PR-1.S1 (T1): whether `metadataCache` had already finished indexing before this plugin instance
+ * loaded (e.g. the plugin was re-enabled mid-session). Obsidian fires "resolved" once per indexing
+ * pass, so without this a later instance would hold rule-filtered files back until some note changed.
+ * `inProgressTaskCount` is not in the public typings, so it is read defensively: when it is absent
+ * this stays false and the "resolved" event decides, as before. */
+function metadataCacheIdle(app: App): boolean {
+	return (app as unknown as { metadataCache?: { inProgressTaskCount?: unknown } }).metadataCache?.inProgressTaskCount === 0;
+}
 
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -213,6 +225,7 @@ function sanitizeFolderSource(node: ViewNode): void {
 		return;
 	}
 	const rawRemoved = raw.removedRefs;
+	const filters = sanitizeFolderFilters(raw.filters);
 	node.folderSource = {
 		type: "folder",
 		location: raw.location === "outside" ? "outside" : "inside",
@@ -224,7 +237,34 @@ function sanitizeFolderSource(node: ViewNode): void {
 		removedRefs: Array.isArray(rawRemoved) ? rawRemoved.filter((key): key is string => typeof key === "string") : undefined,
 		// PR-6: same three-value `mode` as `ApiSourceConfig`, same "merge" default on anything else.
 		mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
+		// PR-1.S1: absent (not `undefined`-valued) when no valid rule survives, so the source is unfiltered.
+		...(filters ? { filters } : {}),
 	};
+}
+
+/** PR-1.S1 (G3): `data.json` is free-form JSON, so only well-formed YAML rules are kept. A rule
+ * needs a string `key` and a string `value` (a non-string is malformed); the key is trimmed and an
+ * empty key is dropped; the value is trimmed, so a whitespace-only value becomes "key present".
+ * Anything else (non-object `filters`, non-array `rules`, `null`, non-object entries) is dropped, and
+ * when no rule survives `filters` is omitted, which leaves the source unfiltered without throwing. */
+export function sanitizeFolderFilters(raw: unknown): FolderSourceConfig["filters"] {
+	if (!raw || typeof raw !== "object") return undefined;
+	const files = (raw as { files?: unknown }).files;
+	if (!files || typeof files !== "object") return undefined;
+	const yaml = (files as { yaml?: unknown }).yaml;
+	if (!yaml || typeof yaml !== "object") return undefined;
+	const rawRules = (yaml as { rules?: unknown }).rules;
+	if (!Array.isArray(rawRules)) return undefined;
+	const rules: YamlFilterRule[] = [];
+	for (const entry of rawRules) {
+		if (!entry || typeof entry !== "object") continue;
+		const { key, value } = entry as { key?: unknown; value?: unknown };
+		if (typeof key !== "string" || typeof value !== "string") continue;
+		const trimmedKey = key.trim();
+		if (trimmedKey === "") continue;
+		rules.push({ key: trimmedKey, value: value.trim() });
+	}
+	return rules.length > 0 ? { files: { yaml: { rules } } } : undefined;
 }
 
 /** PR-7 (G17-G19): `data.json` is free-form JSON — hand-edited or corrupted, `csvSource.path`/
@@ -330,6 +370,16 @@ function sanitizeViewsApiFields(views: View[]): void {
 	}
 }
 
+/** PR-1.F2 (C25): a duplicated Folder source's managed rows must belong to the copy, not the original, so
+ * each source's flags and visibility are decided by its own rules. Rows nested under a managed row keep
+ * their owner too, so the whole duplicated subtree is walked. Rows owned by any other source are left alone. */
+function remapFolderSourceOwner(nodes: ViewNode[], fromOwnerId: string, toOwnerId: string): void {
+	for (const node of nodes) {
+		if (node.folderSourceOwnerId === fromOwnerId) node.folderSourceOwnerId = toOwnerId;
+		remapFolderSourceOwner(node.children, fromOwnerId, toOwnerId);
+	}
+}
+
 /** G7: a deep copy of a source config — `duplicateNode`'s clone must never share `mapping` (or any
  * later-added nested object) by reference with the original, or editing one's field mapping would
  * silently edit the other's too. */
@@ -340,6 +390,17 @@ function cloneApiSource(source: ApiSourceConfig): ApiSourceConfig {
 			...source.mapping,
 			extraFields: source.mapping.extraFields ? { ...source.mapping.extraFields } : undefined,
 		},
+	};
+}
+
+/** PR-1.S1: same deep-copy reasoning as `cloneApiSource`, applied to `folderSource`. `filters` must
+ * not share its rule objects with the original, and `removedRefs` is copied too, since it is the same
+ * kind of list. */
+function cloneFolderSource(source: FolderSourceConfig): FolderSourceConfig {
+	return {
+		...source,
+		removedRefs: source.removedRefs ? [...source.removedRefs] : undefined,
+		filters: source.filters ? structuredClone(source.filters) : undefined,
 	};
 }
 
@@ -466,11 +527,14 @@ export class ViewsManager {
 	private views: View[];
 	private activeViewId: string;
 	private changeListeners = new Set<() => void>();
+	/** PR-1.S1 (E10): false until `metadataCache` has resolved, seeded in the constructor (T1). */
+	private metadataResolved: boolean;
 
 	constructor(private app: App, initialViews: View[], initialActiveViewId: string, private persist: () => void) {
 		sanitizeViewsApiFields(initialViews);
 		this.views = initialViews.length > 0 ? initialViews : [createEmptyView(generateNodeId(), DEFAULT_VIEW_NAME)];
 		this.activeViewId = this.views.some((v) => v.id === initialActiveViewId) ? initialActiveViewId : this.views[0].id;
+		this.metadataResolved = metadataCacheIdle(app);
 	}
 
 	onChange(cb: () => void): () => void {
@@ -709,12 +773,89 @@ export class ViewsManager {
 	 * or whose owning node no longer carries a Folder source. */
 	private rememberFolderSourceRemoval(view: View, node: ViewNode): void {
 		if (!node.folderSourceManaged || !node.ref || !node.folderSourceOwnerId) return;
+		// PR-1.F2 (F4/G7): removing a "filtered out" row never blocks it. If it matches again, it returns as
+		// a fresh row on the next refresh, so nothing is remembered.
+		if (this.managedRowFilterState(view.id, node) === "filteredOut") return;
 		const owner = this.findNode(view.root, node.folderSourceOwnerId);
 		const source = owner?.node.folderSource;
 		if (!source) return;
 		const key = unitRefKey(node.ref);
 		if (!source.removedRefs) source.removedRefs = [key];
 		else if (!source.removedRefs.includes(key)) source.removedRefs.push(key);
+	}
+
+	/** PR-1.F2 (G5/G6/E11): the render-time state of one managed row under its Folder source's YAML rules,
+	 * read from the metadata cache on every call and never stored. Before the cache resolves, a row of a
+	 * rule-filtered source is `hidden`, so no unfiltered row flashes (E10). A row whose file is gone keeps
+	 * its normal look, since the existing delete rule owns that case. */
+	managedRowFilterState(viewId: string, node: ViewNode): FolderRowFilterState {
+		if (!node.folderSourceManaged || node.type !== "unit" || node.ref?.kind !== "file" || !node.folderSourceOwnerId) return "shown";
+		const source = this.getNode(viewId, node.folderSourceOwnerId)?.folderSource;
+		const rules = source && source.location === "inside" ? activeFolderRules(source) : [];
+		if (!source || rules.length === 0) return "shown";
+		if (!this.metadataResolved) return "hidden";
+		const matches = this.rowMatches(node, rules);
+		if (matches === undefined) return "shown";
+		return folderRowFilterState(node, source.mode ?? "merge", matches);
+	}
+
+	/** PR-1.F2: whether a managed file row's file currently satisfies `rules`. `undefined` when the file is
+	 * not in the vault (deleted or missing), so the caller leaves the row alone. Frontmatter comes from
+	 * `metadataCache` only. */
+	private rowMatches(node: ViewNode, rules: YamlFilterRule[]): boolean | undefined {
+		const file = node.ref ? this.app.vault.getAbstractFileByPath(node.ref.path) : null;
+		if (!(file instanceof TFile)) return undefined;
+		return fileMatchesFolderRules(file, rules, (f) => this.app.metadataCache.getFileCache(f)?.frontmatter);
+	}
+
+	/** PR-1.F2 (G4): Save with changed rules sets or clears each managed row of this owner. A row that
+	 * doesn't match is flagged hidden-at-save in merge and overwrite, and append never hides a row. A row
+	 * that matches is unflagged, and every row is unflagged once no rules remain. Mode changes alone do
+	 * not re-flag anything, so E11's render-time mode switch stays as it is. */
+	private applyRulesToHiddenAtSave(view: View, ownerId: string, source: FolderSourceConfig | undefined): void {
+		const rules = source && source.location === "inside" ? activeFolderRules(source) : [];
+		const walk = (nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.folderSourceManaged && node.type === "unit" && node.ref?.kind === "file" && node.folderSourceOwnerId === ownerId) {
+					const matches = rules.length === 0 ? true : this.rowMatches(node, rules);
+					if (matches === true) delete node.folderSourceHiddenAtSave;
+					else if (matches === false && source?.mode !== "append") node.folderSourceHiddenAtSave = true;
+				}
+				walk(node.children);
+			}
+		};
+		walk(view.root);
+	}
+
+	/** PR-1.F2 (G6): unflags every managed file row that matches again, in every view or in one owner's
+	 * rows only. Returns whether anything changed, so a caller saves only when there is something to save. */
+	private clearMatchedHiddenAtSave(views: View[], ownerId?: string): boolean {
+		let changed = false;
+		for (const view of views) {
+			const owners = new Map<string, FolderSourceConfig>();
+			const index = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					if (node.folderSource?.location === "inside") owners.set(node.id, node.folderSource);
+					index(node.children);
+				}
+			};
+			index(view.root);
+			const walk = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					const source = node.folderSourceOwnerId ? owners.get(node.folderSourceOwnerId) : undefined;
+					if (node.folderSourceHiddenAtSave && source && (ownerId === undefined || node.folderSourceOwnerId === ownerId)) {
+						const rules = activeFolderRules(source);
+						if (rules.length === 0 || this.rowMatches(node, rules) === true) {
+							delete node.folderSourceHiddenAtSave;
+							changed = true;
+						}
+					}
+					walk(node.children);
+				}
+			};
+			walk(view.root);
+		}
+		return changed;
 	}
 
 	addMetaFolder(viewId: string, parentId: string | null, label: string): ViewNode | null {
@@ -815,7 +956,8 @@ export class ViewsManager {
 
 		// PR-4: same reference-sharing hazard as `apiSource` above — a shallow `{...node}` spread
 		// would leave both nodes' `folderSource` pointing at the very same object.
-		clone.folderSource = node.folderSource ? { ...node.folderSource } : node.folderSource;
+		clone.folderSource = node.folderSource ? cloneFolderSource(node.folderSource) : node.folderSource;
+		if (node.folderSource) remapFolderSourceOwner(clone.children, node.id, clone.id);
 
 		return clone;
 	}
@@ -1120,7 +1262,11 @@ export class ViewsManager {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found || !canHoldSource(found.node)) return;
+		// PR-1.F2 (G4): only a change to the rules is a definition that flags rows. An unchanged save, or a
+		// mode change alone, leaves every flag as it was.
+		const rulesBefore = JSON.stringify(found.node.folderSource?.filters ?? null);
 		found.node.folderSource = source;
+		if (view && rulesBefore !== JSON.stringify(source?.filters ?? null)) this.applyRulesToHiddenAtSave(view, nodeId, source);
 		this.save();
 	}
 
@@ -1155,15 +1301,22 @@ export class ViewsManager {
 				folderSourceManaged: true,
 				folderSourceOwnerId: ownerId,
 			}),
-			{ sourceNodeId: ownerId, viewRoot: view.root },
+			{
+				sourceNodeId: ownerId,
+				viewRoot: view.root,
+				// PR-1.S1: frontmatter comes from the metadata cache only (never file content).
+				filter: { metadataResolved: this.metadataResolved, frontmatterOf: (file) => this.app.metadataCache.getFileCache(file)?.frontmatter },
+			},
 			outsidePath
 		);
 		this.sweepFolderSourceDeletedPlaceholders(found.node);
+		// PR-1.F2 (G6): unflag this owner's rows that match the rules again before deciding whether to save.
+		const unflagged = this.clearMatchedHiddenAtSave([view], ownerId);
 		// PR-1 (F2): a refresh that finds nothing new writes nothing — every view load and every live
 		// folder event runs through here, so an unchanged source must not cost a `data.json` write.
 		// PR-1 (R1): but it still re-renders, because an unchanged Outside-Vault source can change what
 		// the explorer shows (unplugged or reconnected drive) without any stored data changing.
-		if (JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]) !== before) this.save();
+		if (unflagged || JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]) !== before) this.save();
 		else this.notifyChange();
 	}
 
@@ -1186,6 +1339,33 @@ export class ViewsManager {
 		};
 		walk(view.root);
 		return ids;
+	}
+
+	/** PR-1.S1 (E10): called from `main.ts`'s existing `metadataCache "resolved"` listener, before
+	 * `UnitIndex.onMetadataResolved`. On the first resolve only, it flips the held-back flag and
+	 * re-reconciles every rule-filtered Folder source, so files held back at startup appear now.
+	 * Later resolves do nothing: new files join only on a refresh (G8/F7), and re-saving on every
+	 * metadata event would be wasted work. `refreshFolderSource` saves, which notifies the explorer
+	 * through the existing change path, so no second listener is needed. */
+	onMetadataResolved(): void {
+		if (this.metadataResolved) {
+			// PR-1.F2 (G5/G6): a later resolve re-evaluates rows only. It unflags rows that match again, and
+			// the render reads drop-outs from the cache. It never adds a file, so new files still join only
+			// on a refresh (F7). Notify even without a save, so a live drop-out repaints.
+			if (this.clearMatchedHiddenAtSave(this.views)) this.save();
+			else this.notifyChange();
+			return;
+		}
+		this.metadataResolved = true;
+		const filtered: { viewId: string; nodeId: string }[] = [];
+		const walk = (viewId: string, nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.type === "meta" && node.folderSource?.filters) filtered.push({ viewId, nodeId: node.id });
+				walk(viewId, node.children);
+			}
+		};
+		for (const view of this.views) walk(view.id, view.root);
+		for (const { viewId, nodeId } of filtered) this.refreshFolderSource(viewId, nodeId);
 	}
 
 	/** PR-6: the "next reconciliation pass" half of the mode-switch edge cases — re-applies

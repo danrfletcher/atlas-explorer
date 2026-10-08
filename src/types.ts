@@ -209,6 +209,10 @@ export interface ViewNode extends StatusGovernance {
 	 * what lets a refresh find a managed row again no matter where the user dragged or nested it,
 	 * instead of only looking at the source's own direct children. */
 	folderSourceOwnerId?: string;
+	/** PR-1.F2 (G4/G6): set on a managed row when Save with YAML rules found it not matching (merge and
+	 * overwrite only). Such a row is hidden silently, with no "filtered out" marker, until it matches
+	 * again, which clears this flag. A row that drops out live, after Save, never has this flag. */
+	folderSourceHiddenAtSave?: true;
 	/** PR-7 (G17-G19/G21-G23): a CSV-file source — unlike `folderSource`, this produces placeholder/
 	 * API-item rows exactly like `apiSource` (same `apiCache`/`apiItemState`/`apiItemOrder`/
 	 * `apiAwaitingConfirmation` fields below, shared with `apiSource` rather than duplicated), just
@@ -321,6 +325,12 @@ export interface FolderSourceConfig {
 	 * cleared, "overwrite" removes it immediately with no placeholder. Defaults to "merge" when absent
 	 * (sanitized in `sanitizeFolderSource`), matching `ApiSourceConfig`'s own default. */
 	mode?: "append" | "merge" | "overwrite";
+	/** PR-1.S1 (G3/G8): file filters. A file joins this source only if every YAML rule in
+	 * `files.yaml.rules` matches its frontmatter (ANDed). Absent means unfiltered. A `folders` slot is
+	 * reserved for Folder filters (not in v1): code comment only, no type member, no logic and no UI. */
+	filters?: {
+		files?: { yaml?: { rules: { key: string; value: string }[] } };
+	};
 }
 
 /** PR-8 (G17-G20/G22-G24): a markdown pipe-table inside a vault `.md` file, parsed from scratch

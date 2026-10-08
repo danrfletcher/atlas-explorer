@@ -1,4 +1,6 @@
-import { App, ButtonComponent, Modal, Notice, Platform, Setting, TFile, TFolder, setTooltip } from "obsidian";
+import { App, ButtonComponent, Modal, Notice, Platform, Setting, TFile, TFolder, TextComponent, setTooltip } from "obsidian";
+import { collectFrontmatterKeys, filterYamlKeySuggestions } from "./yaml-key-suggest";
+import { sanitizeFolderFilters } from "./views";
 import { canSaveApiSource, findArrayFields, isMapError, isValidExtraFieldName, mapResponseRows, sampleFieldsForArrayField } from "./api-mapping";
 import { generateJsFromMapping, runJsMapping, validateJsSource } from "./api-js-mapping";
 import { httpGetJson } from "./api-http";
@@ -10,6 +12,12 @@ import { resolveOutsidePath } from "./folder-source-outside";
 import { parseCsv } from "./csv-parsing";
 import { detectMarkdownTables, needsTableIndexPrompt, MarkdownTable } from "./markdown-table-mapping";
 import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig, CsvSourceConfig, DataSourceType, FolderSourceConfig, MarkdownTableSourceConfig } from "./types";
+
+/** PR-1.F1 (G2): one YAML rule as the modal edits it. The key and value stay raw until Save. */
+interface YamlRuleDraft {
+	key: string;
+	value: string;
+}
 
 /** PR-4 (G1): now a real discriminated union — a Folder result carries its own `FolderSourceConfig`
  * and no headers (it has none), instead of widening the "api" shape to cover both. PR-5: also
@@ -97,6 +105,12 @@ export class ApiSourceModal extends Modal {
 	 * saving after only changing a toggle or path must not forget them and let reconcile resurrect
 	 * rows the user deliberately removed. */
 	private removedRefs: string[] | undefined;
+	/** PR-1.F1 (G2): the File filters section's YAML rules, edited in place. Kept in memory while the
+	 * section is hidden (Show files off, or an Outside-vault source) so toggling it back restores them.
+	 * Only Save reads them, through the S1 sanitizer, so an empty-key rule is dropped there. */
+	private yamlRules: YamlRuleDraft[];
+	/** PR-1.F1 (G1): the vault's frontmatter keys, read once per modal open for the key suggester. */
+	private yamlKeyCache: string[] | null = null;
 	/** PR-7 (G18): CSV's own vault-relative file path — CSV otherwise reuses the API mapping/fill-mode/
 	 * guard/refresh fields verbatim below, since only one type is ever selected at a time. */
 	private csvPath: string;
@@ -162,6 +176,7 @@ export class ApiSourceModal extends Modal {
 			this.showFiles = initialFolderSource.showFiles ?? true;
 			this.showFolders = initialFolderSource.showFolders ?? true;
 			this.removedRefs = initialFolderSource.removedRefs;
+			this.yamlRules = (initialFolderSource.filters?.files?.yaml?.rules ?? []).map((rule) => ({ key: rule.key, value: rule.value }));
 			this.mode = initialFolderSource.mode ?? "merge";
 		}
 		if (initialCsvSource) {
@@ -232,6 +247,7 @@ export class ApiSourceModal extends Modal {
 		this.showFiles = true;
 		this.showFolders = true;
 		this.removedRefs = undefined;
+		this.yamlRules = [];
 		this.mode = "merge";
 		this.resetSharedRefreshFields();
 	}
@@ -967,9 +983,15 @@ export class ApiSourceModal extends Modal {
 			this.renderFolderPathSuggester(contentEl);
 		}
 
+		// PR-1.F1 (G9): flipping Show files reveals or hides the File filters section at once.
 		new Setting(contentEl)
 			.setName("Show files")
-			.addToggle((toggle) => toggle.setValue(this.showFiles).onChange((value) => (this.showFiles = value)));
+			.addToggle((toggle) =>
+				toggle.setValue(this.showFiles).onChange((value) => {
+					this.showFiles = value;
+					this.render();
+				})
+			);
 		new Setting(contentEl)
 			.setName("Show folders")
 			.addToggle((toggle) => toggle.setValue(this.showFolders).onChange((value) => (this.showFolders = value)));
@@ -992,6 +1014,98 @@ export class ApiSourceModal extends Modal {
 						this.mode = value as "append" | "merge" | "overwrite";
 					})
 			);
+
+		// PR-1.F1 (G9/G10/G11): File filters only for Inside-vault sources with Show files on. Show
+		// folders never changes this section, and no Folder filters UI exists in v1.
+		if (this.showFiles && this.folderLocation === "inside") this.renderFileFiltersSection(contentEl);
+	}
+
+	/** PR-1.F1 (G1/G2): the "File filters" section at the bottom of the Folder modal. Each row is a
+	 * `key = value` YAML rule, ANDed on match. Rules are edited in place, and their trash button removes
+	 * them. Saved with the modal's existing Save. */
+	private renderFileFiltersSection(contentEl: HTMLElement): void {
+		new Setting(contentEl).setName("File filters").setHeading();
+		for (let i = 0; i < this.yamlRules.length; i++) {
+			this.renderYamlRuleRow(contentEl, this.yamlRules[i], i);
+		}
+		new Setting(contentEl).addButton((btn) =>
+			btn.setButtonText("+ Add YAML rule").onClick(() => {
+				this.yamlRules.push({ key: "", value: "" });
+				this.render();
+			})
+		);
+	}
+
+	/** PR-1.F1 (G1/E5/F8): one rule row. The key field suggests vault frontmatter keys while it has
+	 * focus, and accepts free text. The value field is plain text with no suggester. An empty key is
+	 * outlined red with "Key required", which clears as soon as a key is typed. Save stays enabled. */
+	private renderYamlRuleRow(contentEl: HTMLElement, rule: YamlRuleDraft, index: number): void {
+		let keyField: TextComponent | null = null;
+		let focused = false;
+		const row = new Setting(contentEl);
+		row.addText((text) => {
+			keyField = text;
+			text
+				.setPlaceholder("Key")
+				.setValue(rule.key)
+				.onChange((value) => {
+					rule.key = value;
+					updateKeyState();
+					renderSuggestions();
+				});
+			text.inputEl.addEventListener("focus", () => {
+				focused = true;
+				renderSuggestions();
+			});
+			text.inputEl.addEventListener("blur", () => {
+				focused = false;
+				listEl.empty();
+			});
+		});
+		row.addText((text) =>
+			text
+				.setPlaceholder("Value")
+				.setValue(rule.value)
+				.onChange((value) => (rule.value = value))
+		);
+		row.addExtraButton((btn) =>
+			btn.setIcon("trash").setTooltip("Remove rule").onClick(() => {
+				this.yamlRules.splice(index, 1);
+				this.render();
+			})
+		);
+
+		const errorEl = contentEl.createEl("p", { cls: "atlas-api-field-error atlas-yaml-key-error" });
+		const listEl = contentEl.createEl("div", { cls: "atlas-folder-suggest-list atlas-yaml-key-suggest" });
+
+		const updateKeyState = () => {
+			const missing = rule.key.trim() === "";
+			keyField?.inputEl.classList.toggle("atlas-yaml-key-invalid", missing);
+			errorEl.setText(missing ? "Key required" : "");
+		};
+		const renderSuggestions = () => {
+			listEl.empty();
+			if (!focused) return;
+			for (const key of filterYamlKeySuggestions(this.vaultFrontmatterKeys(), rule.key)) {
+				const item = listEl.createEl("div", { cls: "atlas-folder-suggest-item", text: key });
+				// mousedown (not click) with preventDefault keeps focus in the key field while picking.
+				item.addEventListener("mousedown", (evt) => {
+					evt.preventDefault();
+					rule.key = key;
+					keyField?.setValue(key);
+					listEl.empty();
+					updateKeyState();
+				});
+			}
+		};
+		updateKeyState();
+	}
+
+	/** PR-1.F1 (G1): the vault's frontmatter keys, read from `app.metadataCache` and cached for this
+	 * modal's lifetime. */
+	private vaultFrontmatterKeys(): string[] {
+		this.yamlKeyCache ??= collectFrontmatterKeys(this.app);
+		return this.yamlKeyCache;
 	}
 
 	/** PR-5 (G6/G11): the Outside-Vault raw path field — no vault-folder suggester (there is nothing
@@ -1240,6 +1354,12 @@ export class ApiSourceModal extends Modal {
 				showFolders: this.showFolders,
 				removedRefs: this.removedRefs,
 				mode: this.mode,
+				// PR-1.F1 (G3/E5/F3): Save keeps only well-formed rules, so empty-key rules are dropped, and
+				// no valid rule leaves the source unfiltered. Outside-vault sources never carry rules.
+				filters:
+					this.folderLocation === "inside"
+						? sanitizeFolderFilters({ files: { yaml: { rules: this.yamlRules } } })
+						: undefined,
 			};
 			this.close();
 			this.onSave({ type: "folder", source, outsidePath: this.folderLocation === "outside" ? this.outsidePath.trim() : "" });
