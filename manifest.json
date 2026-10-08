@@ -1,7 +1,7 @@
 {
 	"id": "atlas-explorer",
 	"name": "Atlas Explorer",
-	"version": "0.7.0",
+	"version": "0.7.1",
 	"minAppVersion": "1.13.1",
 	"description": "A replacement file explorer that shows every meaningful unit in the vault (blocks, files, folders) as one flat list, and lets you arrange those units into as many hierarchies as you like, without ever moving anything on disk.",
 	"author": "Dan Fletcher",
