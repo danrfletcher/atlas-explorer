@@ -20,6 +20,7 @@ declare global {
 		removeClass(...cls: string[]): void;
 		toggleClass(cls: string, on: boolean): void;
 		setAttr(name: string, value: string): void;
+		setCssStyles(styles: Partial<CSSStyleDeclaration>): void;
 	}
 }
 
@@ -61,6 +62,9 @@ proto.toggleClass = function (cls: string, on: boolean) {
 };
 proto.setAttr = function (name: string, value: string) {
 	this.setAttribute(name, value);
+};
+proto.setCssStyles = function (styles: Partial<CSSStyleDeclaration>) {
+	Object.assign(this.style, styles);
 };
 
 // --- Vault model --------------------------------------------------------------------------------

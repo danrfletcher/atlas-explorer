@@ -2671,14 +2671,14 @@ export class AtlasExplorerView extends ItemView {
 				if (dragged && dragged.dataset.refKey === unitRefKey(ref)) {
 					draggedInWindow = true;
 					dragged.style.top = `${i * INBOX_ROW_HEIGHT}px`;
-					dragged.style.display = "";
+					dragged.setCssStyles({ display: "" });
 					continue;
 				}
 				const row = this.renderInboxRow(spacer, ref, info, view, hidden);
 				row.addClass("atlas-row-virtual");
 				row.style.top = `${i * INBOX_ROW_HEIGHT}px`;
 			}
-			if (dragged && !draggedInWindow) dragged.style.display = "none";
+			if (dragged && !draggedInWindow) dragged.setCssStyles({ display: "none" });
 		};
 
 		this.inboxRedraw = scheduleDraw;
