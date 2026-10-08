@@ -1147,6 +1147,39 @@ export class ViewsManager {
 		return true;
 	}
 
+	/** PR-2 (G8/G9/G10/G5): swaps the spot `nodeId` in place to point at `ref`. Same id, position, nested
+	 * children, `explicitStatusId`, and data source; only `type`/`ref` change and any old label goes. Works
+	 * on the one spot only, so other placements of the old or new item are untouched. Never goes through
+	 * `placeUnit`/`findUnitNode`, which move the first copy they find. Returns false, changing nothing, for
+	 * a missing view or node, a `folderSourceManaged` node (G2), or a swap to the node's own current ref. */
+	swapNodeWithUnit(viewId: string, nodeId: string, ref: UnitRef): boolean {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found || found.node.folderSourceManaged) return false;
+		if (found.node.type === "unit" && found.node.ref && unitRefsEqual(found.node.ref, ref)) return false;
+		found.node.type = "unit";
+		found.node.ref = ref;
+		delete found.node.label;
+		this.save();
+		return true;
+	}
+
+	/** PR-2 (G4/G9/G10): turns the spot `nodeId` into an Atlas folder called `label`, in place. Same id,
+	 * position, nested children, `explicitStatusId`, and data source as `swapNodeWithUnit`; the old ref goes.
+	 * Returns false, changing nothing, for a missing view or node, a `folderSourceManaged` node, a node that
+	 * is already an Atlas folder, or an empty label. */
+	swapNodeForAtlasFolder(viewId: string, nodeId: string, label: string): boolean {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		const trimmed = label.trim();
+		if (!found || found.node.folderSourceManaged || found.node.type !== "unit" || !trimmed) return false;
+		found.node.type = "meta";
+		found.node.label = trimmed;
+		delete found.node.ref;
+		this.save();
+		return true;
+	}
+
 	/** G1/G4/E6: sets a Folder's API data source, or removes it (passing `undefined` — "Remove data
 	 * source", G4). Removing drops the cache and the awaiting-confirmation flag (meaningless without a
 	 * live source, and it stops refreshing entirely — no more dot at all) but deliberately keeps

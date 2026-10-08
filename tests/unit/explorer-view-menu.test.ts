@@ -165,3 +165,97 @@ describe("PR-1 G11e — shared source/status menu items on a meta and a unit men
 		expect(sourceOf(menuTitles("showUnitMenu", unit))).toEqual(["Data source…"]);
 	});
 });
+
+// PR-2 (G1-G4): Swap items. "Swap with…" on any swappable bucket node; "Swap for Atlas folder" on units only;
+// both directly above "Remove from view" on a unit, and "Swap with…" right after "Create" on an Atlas folder.
+describe("PR-2 G1-G4 — Swap menu items", () => {
+	const SWAP = ["Swap with…", "Swap for Atlas folder"];
+
+	function swapFake() {
+		return {
+			plugin: { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null } },
+			openSwapPicker: vi.fn(),
+			openSwapForFolder: vi.fn(),
+		};
+	}
+
+	function build(method: "showMetaFolderMenu" | "showUnitMenu", node: ViewNode, ref: { kind: "file"; path: string } = { kind: "file", path: "U.md" }, displayName = "U") {
+		const fake = swapFake();
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		const args = method === "showUnitMenu" ? [new MouseEvent("contextmenu"), ref, view, node, displayName] : [new MouseEvent("contextmenu"), node, view];
+		(AtlasExplorerView.prototype as unknown as Record<string, (...a: unknown[]) => void>)[method].call(fake, ...args);
+		show.mockRestore();
+		return { menu: built!, fake };
+	}
+
+	const unitNode = (over: Partial<ViewNode> = {}): ViewNode => ({ id: "u", type: "unit", ref: { kind: "file", path: "U.md" }, children: [], ...over });
+	const metaNode = (over: Partial<ViewNode> = {}): ViewNode => ({ id: "m", type: "meta", label: "Folder", children: [], ...over });
+
+	it("a unit's Swap items sit directly above Remove from view, after Duplicate (Meta)", () => {
+		const titles = build("showUnitMenu", unitNode()).menu.titles();
+		const at = titles.indexOf("Remove from view");
+		expect(titles.slice(at - 3, at)).toEqual(["Duplicate (Meta)", ...SWAP]);
+	});
+
+	it.each([
+		["a file", { kind: "file" as const, path: "U.md" }],
+		["a folder", { kind: "folder" as const, path: "Boat" }],
+		["a block", { kind: "block" as const, path: "U.md", subpath: "^abc" }],
+		["a promoted folder (nested, not a module)", { kind: "folder" as const, path: "Projects/Career" }],
+		["a promoted block", { kind: "block" as const, path: "Projects/Career.md", subpath: "^abc" }],
+		["a free block", { kind: "file" as const, path: "_pool/20260101000000-aaaa.md" }],
+	])("offers both items for %s units (G1)", (_label, ref) => {
+		const titles = build("showUnitMenu", unitNode({ ref })).menu.titles();
+		expect(titles).toEqual(expect.arrayContaining(SWAP));
+	});
+
+	it("an Atlas folder offers only Swap with…, straight after Create", () => {
+		const titles = build("showMetaFolderMenu", metaNode()).menu.titles();
+		expect(titles).not.toContain("Swap for Atlas folder");
+		const at = titles.indexOf("Create");
+		expect(titles[at + 1]).toBe("Swap with…");
+	});
+
+	it("a linked-folder (folderSourceManaged) unit has no Swap items at all", () => {
+		expect(build("showUnitMenu", unitNode({ folderSourceManaged: true })).menu.titles()).not.toEqual(expect.arrayContaining(SWAP));
+	});
+
+	it("a linked-folder Atlas folder has no Swap item", () => {
+		expect(build("showMetaFolderMenu", metaNode({ folderSourceManaged: true })).menu.titles()).not.toContain("Swap with…");
+	});
+
+	it("Swap with… opens the picker for this exact spot", () => {
+		const node = unitNode();
+		const { menu, fake } = build("showUnitMenu", node);
+		menu.items.find((i) => i.title === "Swap with…")!.clickHandler!();
+		expect(fake.openSwapPicker).toHaveBeenCalledWith(view, node);
+	});
+
+	it("Swap for Atlas folder opens the name box with the row's display name", () => {
+		const node = unitNode();
+		const { menu, fake } = build("showUnitMenu", node, { kind: "file", path: "Boat.md" }, "Boat");
+		menu.items.find((i) => i.title === "Swap for Atlas folder")!.clickHandler!();
+		expect(fake.openSwapForFolder).toHaveBeenCalledWith(view, node, "Boat");
+	});
+
+	it("the API-row menu has no Swap item", () => {
+		const fake = { plugin: { viewsManager: { removeApiItem: vi.fn(), clearApiItemNoteRef: vi.fn() } } };
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		const row: ApiItemState = { id: "1", label: "Row", kind: "placeholder", notFound: true, noteRef: { kind: "file", path: "N.md" } };
+		(AtlasExplorerView.prototype as unknown as { showApiItemMenu: (...a: unknown[]) => void }).showApiItemMenu.call(
+			fake,
+			new MouseEvent("contextmenu"),
+			view,
+			metaNode({ id: "folder" }),
+			row
+		);
+		show.mockRestore();
+		expect(built!.titles()).not.toEqual(expect.arrayContaining(SWAP));
+	});
+});
