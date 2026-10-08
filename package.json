@@ -1,6 +1,6 @@
 {
 	"name": "atlas",
-	"version": "0.6.1",
+	"version": "0.7.0",
 	"description": "A replacement file explorer for Obsidian that arranges units into hierarchies without moving anything on disk.",
 	"main": "main.js",
 	"scripts": {
