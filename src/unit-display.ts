@@ -11,7 +11,8 @@ export interface ResolvedUnit {
 	icon: string;
 	promoted: boolean;
 	/** PR-3 (G3): true for a unit manually added via the inbox "+" modal — renders an "added" badge
-	 * instead of (never alongside) the "promoted" badge. */
+	 * instead of (never alongside) the "promoted" badge. PR-1 (polish): both badges are inbox-only;
+	 * a bucket row never shows either, even when this flag is true. */
 	added: boolean;
 	/** ctime of the underlying file/folder, for the inbox's "newest first" default sort. */
 	ctime: number;
