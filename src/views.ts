@@ -753,18 +753,29 @@ export class ViewsManager {
 		if (changed) this.save();
 	}
 
+	/** PR-1 T5: a folder-source owner's own managed children (`folderSourceManaged` with
+	 * `folderSourceOwnerId` pointing at `node`) have no identity once that owner is gone — an
+	 * Outside-Vault one's `ref.path` isn't even a real vault path without the owner to keep its
+	 * "never open/drag/rename this" protections active (see `isOutsideManagedNodeId`), so promoting
+	 * it to a plain top-level row the same way an ordinary child is promoted would leave it broken
+	 * and live. Dropped along with the owner instead; a manually-placed, non-managed child is
+	 * promoted as before. */
+	private promotableChildren(node: ViewNode): ViewNode[] {
+		return node.children.filter((child) => !(child.folderSourceManaged && child.folderSourceOwnerId === node.id));
+	}
+
 	/** Removes one specific node instance by id, regardless of what other placements of the same
 	 * unit (if any, via PR 13's duplication) might also exist — this is what "Remove from view",
 	 * the Delete key, and dragging a row back to the inbox all actually mean: get rid of *this* row,
 	 * not every copy of the unit it happens to reference. Same children-promotion rule as
-	 * `unplaceUnit`/`deleteMetaFolder`. */
+	 * `unplaceUnit`/`deleteMetaFolder`, minus this node's own managed children (`promotableChildren`). */
 	unplaceNode(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const found = this.findNode(view.root, nodeId);
 		if (!found) return;
 		this.rememberFolderSourceRemoval(view, found.node);
-		found.siblings.splice(found.index, 1, ...found.node.children);
+		found.siblings.splice(found.index, 1, ...this.promotableChildren(found.node));
 		this.save();
 	}
 
@@ -882,12 +893,14 @@ export class ViewsManager {
 	}
 
 	/** Deleting a meta folder moves its children up one level, at the position it occupied — never
-	 * deletes the children themselves, and never touches disk (they're labels, not folders). */
+	 * deletes the children themselves, and never touches disk (they're labels, not folders).
+	 * PR-1 T5: an Atlas folder can be a folder-source owner too, so it shares `unplaceNode`'s
+	 * `promotableChildren` rule — its own managed children are dropped with it, not orphaned. */
 	deleteMetaFolder(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found || found.node.type !== "meta") return;
-		found.siblings.splice(found.index, 1, ...found.node.children);
+		found.siblings.splice(found.index, 1, ...this.promotableChildren(found.node));
 		this.save();
 	}
 
