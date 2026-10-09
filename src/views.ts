@@ -484,8 +484,11 @@ export function nodeHasApiRows(node: Pick<ViewNode, "apiSource" | "csvSource" | 
 }
 
 /** PR-1 (G11a): every bucket node can hold a data source — an Atlas folder (meta), a unit (file, module,
- * block or promoted folder). One predicate serves every source setter, `refreshFolderSource`, and the
- * explorer's source walks, so no call site needs to know which kind of node it was handed. */
+ * block or promoted folder). Every node type is currently `"meta"` or `"unit"`, so this is effectively
+ * "the node exists" — a deliberate seam for PR-2 rather than a real type-narrowing check. One predicate
+ * serves every source setter and `refreshFolderSource`, so no call site needs to know which kind of
+ * node it was handed. PR-1 R6: the explorer's own source walks (`nodeHasApiRows` and friends) don't call
+ * this — it only gates the setters above. */
 export function canHoldSource(node: Pick<ViewNode, "type">): boolean {
 	return node.type === "meta" || node.type === "unit";
 }
@@ -1086,13 +1089,15 @@ export class ViewsManager {
 	/** PR 12: also collapses unit nodes that have gained meta-nested children — meta folders always
 	 * collapse here regardless of child count (existing behavior, a folder is always a foldable
 	 * concept even empty), but a unit only ever shows a chevron once it actually has a child (Q5),
-	 * so collapsing a childless one would be a no-op with nothing to reflect it visually anyway. */
+	 * so collapsing a childless one would be a no-op with nothing to reflect it visually anyway.
+	 * PR-1 R5: a unit with source rows but no children also shows a chevron (renderFoldableChildren's
+	 * G11c gate), so it's collapsed here too. */
 	collapseAll(viewId: string): void {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const walk = (nodes: ViewNode[]) => {
 			for (const node of nodes) {
-				if (node.type === "meta" || node.children.length > 0) {
+				if (node.type === "meta" || node.children.length > 0 || nodeHasApiRows(node)) {
 					node.collapsed = true;
 					walk(node.children);
 				}
