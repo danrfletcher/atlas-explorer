@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
+import * as os from "node:os";
 import { EventEmitter } from "node:events";
 import { FolderSourceOutsideWatchers, OUTSIDE_WATCH_DEBOUNCE_MS, isIgnoredOutsideEvent } from "../../src/folder-source-outside-watcher";
 
@@ -156,6 +157,47 @@ describe("folder-source-outside-watcher — two sources, one watcher (E4 guard, 
 		registry.sync(new Map([["node-a", "/Docs/Receipts"]]));
 		expect(watch.mock.calls.map((c) => c[0])).toEqual(["/Docs/Invoices", "/Docs/Receipts"]);
 		expect(watchers[0].watcher.close).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("folder-source-outside-watcher — PR-2 R5: keyed by resolved path, not raw text (G9)", () => {
+	let dir: string;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		dir = mkdtempSync(join(os.tmpdir(), "atlas-outside-watcher-"));
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("a trailing slash on one source's path is still the same folder as the other's — one watcher, not two", () => {
+		const { registry, watch } = setup();
+		registry.sync(
+			new Map([
+				["node-a", dir],
+				["node-b", `${dir}/`],
+			])
+		);
+		expect(watch).toHaveBeenCalledTimes(1);
+	});
+
+	it("a symlinked alias of the same real folder shares the one watcher its target already has", () => {
+		const alias = `${dir}-alias`;
+		symlinkSync(dir, alias, "dir");
+		const { registry, watch } = setup();
+
+		registry.sync(
+			new Map([
+				["node-a", dir],
+				["node-b", alias],
+			])
+		);
+
+		expect(watch).toHaveBeenCalledTimes(1);
+		rmSync(alias, { force: true });
 	});
 });
 
