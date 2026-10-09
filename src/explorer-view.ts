@@ -1366,6 +1366,14 @@ export class AtlasExplorerView extends ItemView {
 		// body is rebuilt, and reset to 0 only on a genuine view switch (below). If another render is
 		// still in flight, its target wins: the live body may not have been restored yet.
 		const scrollTop = this.pendingScrollTop ?? container.querySelector<HTMLElement>(".atlas-explorer-scroll")?.scrollTop ?? 0;
+		if (this.inboxDragRowEl) {
+			// PR-1.S1 R4 hardening: `container.empty()` below is about to detach the dragged row (an
+			// index refresh mid-drag, say). Once it's detached, the window-level `dragend` backstop
+			// (registered in `onOpen`) never fires on it, so the drag would otherwise leak as a live,
+			// orphaned payload that outlives the gesture. Clear it here too, same as that backstop does.
+			this.dragPayload = null;
+			this.cancelActiveDwell?.();
+		}
 		this.inboxLayoutObserver?.disconnect();
 		this.inboxLayoutObserver = null;
 		this.inboxRedraw = null;
