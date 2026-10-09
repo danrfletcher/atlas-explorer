@@ -1506,6 +1506,13 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** PR-1 R4 fix: the `CsvSourceController`/`MarkdownTableSourceController` equivalent of
+	 * `refreshFolderSource`'s own no-op branch — re-renders so an in-memory-only change (e.g. the dot's
+	 * `fetchedAt`) is still visible, without writing `data.json` for a refresh that found no change. */
+	notifyChangeOnly(): void {
+		this.notifyChange();
+	}
+
 	/** F9 rename integrity: rewrite every matching ref (exact + prefix) across every view. */
 	onVaultRename(oldPath: string, newPath: string): void {
 		let changed = false;

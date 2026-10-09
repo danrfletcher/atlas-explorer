@@ -64,4 +64,20 @@ describe("MarkdownTableSourceController — integration: save-triggered refresh 
 		expect(node.apiCache?.ok).toBe(true);
 		expect(node.apiCache?.rows).toEqual([{ id: "a", label: "Widget" }]);
 	});
+
+	it("PR-1 R4: a refresh that finds the table unchanged reports changed=false, so the caller can skip persisting", async () => {
+		const app = new App();
+		await app.vault.create("table.md", "| id | name |\n|---|---|\n| 1 | One |\n| 2 | Two |\n");
+		const node = makeNode("n1");
+		const controller = new MarkdownTableSourceController();
+		const changes: boolean[] = [];
+		const refresh = (now: number) =>
+			controller.refresh(node, baseSource("table.md"), (changed) => changes.push(changed), { vault: app.vault, now: () => now });
+
+		await refresh(1000);
+		expect(changes).toEqual([true]); // first refresh always moves apiCache.ok from undefined to true
+
+		await refresh(2000);
+		expect(changes).toEqual([true, false]); // same rows/itemState/order the second time — nothing to persist
+	});
 });

@@ -992,38 +992,52 @@ export class AtlasExplorerView extends ItemView {
 	 * desktop, there's no live request to skip. */
 	refreshCsvSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.csvSource) return;
-		void this.plugin.csvSourceController.refresh(node, node.csvSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
-			vault: this.plugin.app.vault,
-			trigger,
-			confirmDelete: (count) =>
-				new Promise((resolve) => {
-					const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
-						this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
-						resolve(answer);
-					});
-					this.openConfirmDeleteModals.push(modal);
-					modal.open();
-				}),
-		});
+		// PR-1 R4 fix: a refresh that found nothing comparably different still re-renders (so the dot's
+		// "just now" is real) without writing data.json — this runs on every view load/switch with no
+		// toggle, so an unconditional save here would churn data.json for a no-op refresh.
+		void this.plugin.csvSourceController.refresh(
+			node,
+			node.csvSource,
+			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChangeOnly()),
+			{
+				vault: this.plugin.app.vault,
+				trigger,
+				confirmDelete: (count) =>
+					new Promise((resolve) => {
+						const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
+							this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
+							resolve(answer);
+						});
+						this.openConfirmDeleteModals.push(modal);
+						modal.open();
+					}),
+			}
+		);
 	}
 
 	/** PR-8 (G17-G20/G22-G24): the Markdown Table equivalent of `refreshCsvSource` — same no-mobile-
 	 * guard reasoning (a vault file read, not a live request). */
 	refreshMarkdownTableSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.markdownTableSource) return;
-		void this.plugin.markdownTableSourceController.refresh(node, node.markdownTableSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
-			vault: this.plugin.app.vault,
-			trigger,
-			confirmDelete: (count) =>
-				new Promise((resolve) => {
-					const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
-						this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
-						resolve(answer);
-					});
-					this.openConfirmDeleteModals.push(modal);
-					modal.open();
-				}),
-		});
+		// PR-1 R4 fix: same no-op-persist guard as `refreshCsvSource` above.
+		void this.plugin.markdownTableSourceController.refresh(
+			node,
+			node.markdownTableSource,
+			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChangeOnly()),
+			{
+				vault: this.plugin.app.vault,
+				trigger,
+				confirmDelete: (count) =>
+					new Promise((resolve) => {
+						const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
+							this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
+							resolve(answer);
+						});
+						this.openConfirmDeleteModals.push(modal);
+						modal.open();
+					}),
+			}
+		);
 	}
 
 	openApiSourceModal(view: View, node: ViewNode): void {
