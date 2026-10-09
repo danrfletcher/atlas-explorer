@@ -31,6 +31,9 @@ const DEBOUNCE_MODULE = "src/folder-live-refresh.ts";
 
 const TIMER_CONSTRUCT = /\b(setInterval|setTimeout|requestAnimationFrame|requestIdleCallback|queueMicrotask|FileSystemWatcher|fs\.watch|fs\.watchFile|setImmediate)\b/;
 const FS_WATCH_CALL = /\bfs\.watch\s*\(/;
+// PR-2 R3 fix: the namespace-call sweep above only catches `fs.watch(...)` — a file that instead
+// wrote `import { watch } from "fs"` and called `watch(...)` bare would never match it.
+const FS_WATCH_NAMED_IMPORT = /import\s*\{[^}]*\bwatch\b[^}]*\}\s*from\s*["']node:fs["']|import\s*\{[^}]*\bwatch\b[^}]*\}\s*from\s*["']fs["']/;
 const ALWAYS_FORBIDDEN = /\b(setInterval|FileSystemWatcher|watchFile)\b/;
 
 function slice(file: string, startMarker: string, endMarker: string): string {
@@ -57,6 +60,13 @@ describe("F4 static sweep — fs.watch and timer constructs are confined to the 
 			expect(read(file), file).not.toMatch(FS_WATCH_CALL);
 		}
 		expect(read(WATCHER_MODULE)).toMatch(FS_WATCH_CALL);
+	});
+
+	it("no file imports fs.watch by its bare named export, side-stepping the fs.watch( sweep above", () => {
+		for (const file of srcFiles) {
+			if (file === WATCHER_MODULE) continue;
+			expect(read(file), file).not.toMatch(FS_WATCH_NAMED_IMPORT);
+		}
 	});
 
 	it("the watcher module's only timer is the shared debounce (no timer of its own)", () => {

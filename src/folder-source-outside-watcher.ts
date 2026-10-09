@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import { resolve as resolvePath } from "path";
 import { FolderLiveRefresh, FolderLiveRefreshTimers } from "./folder-live-refresh";
 
 /** PR-2 (G6): quiet time after the last outside-folder event before a rescan. Finder copies and
@@ -25,6 +26,24 @@ const defaultWatch: OutsideWatchFn = (path, listener) => fs.watch(path, listener
  * rescans to be safe (this is also how a Windows buffer overflow arrives). */
 export function isIgnoredOutsideEvent(filename: string | null): boolean {
 	return filename !== null && filename.startsWith(".");
+}
+
+/** PR-2 R5 fix: the registry's own doc comment already claimed "keyed by resolved outside path", but
+ * `retain`/`release` used the raw stored path as-is — '/x/Invoices' and '/x/Invoices/', or a symlinked
+ * alias, keyed two different entries and opened two watchers on the same folder, against G9's
+ * one-watcher rule. `path.resolve` normalizes the textual form; `fs.realpathSync` additionally
+ * collapses a symlink to the real folder it points at. A blank/unset path is left alone (never resolved
+ * against cwd), and a path that doesn't exist yet (so `realpathSync` throws) falls back to the
+ * textually-resolved form — `isResolved`/`open` below decide separately whether it's watchable. */
+function normalizeOutsidePath(path: string): string {
+	const trimmed = path.trim();
+	if (!trimmed) return "";
+	const resolved = resolvePath(trimmed);
+	try {
+		return fs.realpathSync(resolved);
+	} catch {
+		return resolved;
+	}
 }
 
 interface OutsideWatchEntry {
@@ -62,12 +81,15 @@ export class FolderSourceOutsideWatchers {
 	}
 
 	/** Brings the registry in line with `sources` (node id → device-local path, possibly blank or
-	 * unresolved). Sources that left are released; new ones are retained. */
+	 * unresolved). Sources that left are released; new ones are retained. PR-2 R5 fix: normalized here,
+	 * once, so every downstream comparison/key (`sourcePaths`, `entries`) stays in the same canonical
+	 * space regardless of which textual spelling a source was configured with. */
 	sync(sources: Map<string, string>): void {
+		const normalized = new Map(Array.from(sources, ([nodeId, path]) => [nodeId, normalizeOutsidePath(path)]));
 		for (const [nodeId, path] of Array.from(this.sourcePaths)) {
-			if (sources.get(nodeId) !== path) this.release(nodeId);
+			if (normalized.get(nodeId) !== path) this.release(nodeId);
 		}
-		for (const [nodeId, path] of sources) {
+		for (const [nodeId, path] of normalized) {
 			if (!this.sourcePaths.has(nodeId)) this.retain(nodeId, path);
 		}
 	}

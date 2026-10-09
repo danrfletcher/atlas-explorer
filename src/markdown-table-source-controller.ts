@@ -28,6 +28,33 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
 	};
 }
 
+/** PR-1 R4 fix: same comparison `CsvSourceController` uses — everything a refresh can write that
+ * matters for "did anything actually change". `fetchedAt`/`lastSuccessAt` are deliberately excluded,
+ * since they stamp every refresh (including a no-op one) by design. Per-row `lastSeenAt` is the same
+ * kind of bookkeeping stamp (`mergeApiItems` touches it on every present row, every refresh — R13),
+ * so it's stripped from each entry before comparing too. `notFound` is normalized to a real boolean:
+ * `mergeApiItems` leaves it absent on a row's first-ever appearance but writes an explicit `false`
+ * once the row has a `prev` to spread — same meaning, different JSON shape, which would otherwise
+ * read as a change on every second refresh. */
+function cacheSnapshot(node: ViewNode): string {
+	const itemState = node.apiItemState;
+	const comparableItemState = itemState
+		? Object.fromEntries(
+				Object.entries(itemState).map(([id, item]) => [id, { ...item, lastSeenAt: undefined, notFound: item.notFound ?? false }])
+			)
+		: itemState;
+	return JSON.stringify([
+		node.apiCache?.ok,
+		node.apiCache?.error,
+		node.apiCache?.rows,
+		node.apiCache?.skippedCount,
+		node.apiCache?.truncated,
+		comparableItemState,
+		node.apiItemOrder,
+		node.apiAwaitingConfirmation,
+	]);
+}
+
 /**
  * PR-8 (G17-G20/G22-G24): the Markdown Table equivalent of `CsvSourceController` — same in-flight
  * dedup, `sourceChanged()` race-guard, and read→parse→map→plan→confirm→apply→persist shape, with
@@ -39,7 +66,7 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
 export class MarkdownTableSourceController {
 	private inFlight = new Map<string, { promise: Promise<void>; sourceKey: string }>();
 
-	refresh(node: ViewNode, source: MarkdownTableSourceConfig, persist: () => void, deps: MarkdownTableRefreshDeps): Promise<void> {
+	refresh(node: ViewNode, source: MarkdownTableSourceConfig, persist: (changed: boolean) => void, deps: MarkdownTableRefreshDeps): Promise<void> {
 		const sourceKey = JSON.stringify(source);
 		const existing = this.inFlight.get(node.id);
 		if (existing) {
@@ -54,7 +81,7 @@ export class MarkdownTableSourceController {
 	private runRefresh(
 		node: ViewNode,
 		source: MarkdownTableSourceConfig,
-		persist: () => void,
+		persist: (changed: boolean) => void,
 		deps: MarkdownTableRefreshDeps,
 		sourceKey: string
 	): Promise<void> {
@@ -66,7 +93,7 @@ export class MarkdownTableSourceController {
 		return run;
 	}
 
-	private async doRefresh(node: ViewNode, source: MarkdownTableSourceConfig, persist: () => void, deps: MarkdownTableRefreshDeps): Promise<void> {
+	private async doRefresh(node: ViewNode, source: MarkdownTableSourceConfig, persist: (changed: boolean) => void, deps: MarkdownTableRefreshDeps): Promise<void> {
 		const now = deps.now ?? (() => Date.now());
 		const trigger = deps.trigger ?? "manual";
 		// Same race-guard `CsvSourceController.doRefresh` uses: re-checked after every await so a
@@ -78,6 +105,11 @@ export class MarkdownTableSourceController {
 			if (node.markdownTableSource === undefined || startingSource === undefined) return true;
 			return JSON.stringify(node.markdownTableSource) !== JSON.stringify(startingSource);
 		};
+		// PR-1 R4 fix: same reasoning as `CsvSourceController.doRefresh` — this now runs on every view
+		// load/switch with no toggle, so persisting unconditionally would churn data.json even when the
+		// file hadn't changed.
+		const before = cacheSnapshot(node);
+		const persistIfChanged = () => persist(cacheSnapshot(node) !== before);
 
 		try {
 			const file = deps.vault.getAbstractFileByPath(source.path);
@@ -85,7 +117,7 @@ export class MarkdownTableSourceController {
 				// G23/E4: the source file is missing — reported the same way a dead API URL/missing CSV
 				// file would be.
 				node.apiCache = emptyCache(node.apiCache, now(), `File not found: ${source.path}`);
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -105,7 +137,7 @@ export class MarkdownTableSourceController {
 
 			if (isMapError(mapped)) {
 				node.apiCache = emptyCache(node.apiCache, now(), mapped.error);
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -142,7 +174,7 @@ export class MarkdownTableSourceController {
 				node.apiItemOrder = plan.result.order;
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -159,22 +191,22 @@ export class MarkdownTableSourceController {
 				node.apiItemOrder = plan.result.order;
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
 			if (answer === "cancelled" || trigger === "manual") {
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
 			node.apiAwaitingConfirmation = true;
-			persist();
+			persistIfChanged();
 		} catch (err) {
 			node.apiCache = emptyCache(node.apiCache, now(), err instanceof Error ? err.message : "Unexpected error");
-			persist();
+			persistIfChanged();
 		}
 	}
 }

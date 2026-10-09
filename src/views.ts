@@ -1282,7 +1282,13 @@ export class ViewsManager {
 		const found = this.findNode(view.root, nodeId);
 		if (!found || !canHoldSource(found.node) || !found.node.folderSource) return;
 		const ownerId = found.node.id;
-		const before = JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]);
+		// PR-1 R2 fix: `reconcileOutsideChildChanges` below can rename or demote a managed row the user
+		// re-nested anywhere else in the view (`collectManagedMatches` walks the whole `view.root`, not
+		// just this owner's own children) — snapshotting only `found.node`'s own subtree missed those
+		// writes, so the save-vs-notify decision below could choose notifyChange() (render only) for a
+		// refresh that actually mutated a differently-nested node. Snapshotting the whole view root
+		// covers every node the reconcile can touch.
+		const before = JSON.stringify(view.root);
 		// PR-2 (R2-Q2): an Outside-Vault source's deletes and renames are reconciled before the add pass,
 		// so a renamed row keeps its node and a deleted one is demoted per mode. An unresolved path is
 		// left alone, as it always was.
@@ -1316,7 +1322,7 @@ export class ViewsManager {
 		// folder event runs through here, so an unchanged source must not cost a `data.json` write.
 		// PR-1 (R1): but it still re-renders, because an unchanged Outside-Vault source can change what
 		// the explorer shows (unplugged or reconnected drive) without any stored data changing.
-		if (unflagged || JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]) !== before) this.save();
+		if (unflagged || JSON.stringify(view.root) !== before) this.save();
 		else this.notifyChange();
 	}
 
@@ -1506,6 +1512,13 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** PR-1 R4 fix: the `CsvSourceController`/`MarkdownTableSourceController` equivalent of
+	 * `refreshFolderSource`'s own no-op branch — re-renders so an in-memory-only change (e.g. the dot's
+	 * `fetchedAt`) is still visible, without writing `data.json` for a refresh that found no change. */
+	notifyChangeOnly(): void {
+		this.notifyChange();
+	}
+
 	/** F9 rename integrity: rewrite every matching ref (exact + prefix) across every view. */
 	onVaultRename(oldPath: string, newPath: string): void {
 		let changed = false;
@@ -1514,7 +1527,11 @@ export class ViewsManager {
 		// the source's mode, exactly as a delete does. Checked before the rewrite below, so the owner
 		// folder's path is first rewritten here (a renamed source folder still counts as "still inside").
 		const leftSource = (owner: ViewNode | undefined): boolean => {
-			if (!owner?.folderSource) return true;
+			// R3 fix: an owner that cannot be found at all (its id is stale/missing) is not the same as an
+			// owner that exists but no longer carries a folderSource — only rewrite the ref, same as before
+			// this detach rule existed, rather than silently splicing the row out of the tree.
+			if (!owner) return false;
+			if (!owner.folderSource) return true;
 			const sourcePath = owner.folderSource.path;
 			// R2: a renamed parent folder's child can arrive before the folder's own rename event, so the
 			// source path is still the old one here. A source folder that no longer exists at its old path

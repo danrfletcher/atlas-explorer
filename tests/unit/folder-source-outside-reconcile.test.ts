@@ -169,3 +169,44 @@ describe("diffOutsideChildren (pure rename detection)", () => {
 		expect(diffOutsideChildren([file("a.pdf")], [file("a.pdf")], new Set())).toEqual({ renamed: [], gone: [] });
 	});
 });
+
+describe("PR-1 R2: a managed row re-nested elsewhere in the view still gets its rename persisted", () => {
+	it("saves (not just notifies) when reconcileOutsideChildChanges renames a node outside the owner's own subtree", () => {
+		write("a.pdf", "b.pdf");
+		const nodeA: ViewNode = {
+			id: "node-a",
+			type: "unit",
+			ref: { kind: "file", path: "a.pdf" },
+			children: [],
+			folderSourceManaged: true,
+			folderSourceOwnerId: "owner",
+		};
+		const nodeB: ViewNode = {
+			id: "node-b",
+			type: "unit",
+			ref: { kind: "file", path: "b.pdf" },
+			children: [],
+			folderSourceManaged: true,
+			folderSourceOwnerId: "owner",
+		};
+		// `nodeA` is managed by "owner" but lives under an unrelated sibling node the user dragged it
+		// into, nowhere inside owner's own children — the scenario collectManagedMatches already walks
+		// the whole view root for, but refreshFolderSource's old before/after snapshot missed.
+		const elsewhere: ViewNode = { id: "elsewhere", type: "meta", label: "Elsewhere", children: [nodeA] };
+		const folderSource: FolderSourceConfig = { type: "folder", location: "outside", path: "", showFiles: true, showFolders: true, mode: "merge" };
+		const owner: ViewNode = { id: "owner", type: "meta", label: "Invoices", children: [nodeB], folderSource };
+		const persist = vi.fn();
+		const vm = new ViewsManager(
+			{} as App,
+			[{ id: "v1", name: "Default", inboxMode: "view" as const, root: [owner, elsewhere] }],
+			"v1",
+			persist
+		);
+
+		fs.renameSync(path.join(dir, "a.pdf"), path.join(dir, "c.pdf"));
+		vm.refreshFolderSource("v1", "owner", dir);
+
+		expect(nodeA.ref).toEqual({ kind: "file", path: "c.pdf" });
+		expect(persist).toHaveBeenCalledTimes(1);
+	});
+});
