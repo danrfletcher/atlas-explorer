@@ -451,6 +451,14 @@ input.atlas-yaml-key-invalid[type="text"]:not(:disabled) {
 	outline-offset: -1px;
 }
 
+/* PR-1.F1 R1 fix: a valid rule row's error paragraph is always in the DOM but empty — `:empty`
+ * drops the shared class's reserved margin so a valid row doesn't get an extra gap below it.
+ * Scoped to this modifier class only; the shared `.atlas-api-field-error` margin elsewhere
+ * (the refresh-interval and JS-mapping error lines) is untouched. */
+.atlas-yaml-key-error:empty {
+	margin: 0;
+}
+
 /* PR-4 (G3): persistent unsandboxed-code warning next to the JS mapping editor — visible without
  * scrolling, so it sits directly above the textarea rather than in a tooltip/collapsed section. */
 .atlas-api-js-warning {
