@@ -6,6 +6,7 @@ import { unitRefKey } from "../../src/types";
 import { seedRoot } from "../helpers";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
+import { findInterfaceNote } from "../../src/interface-notes";
 
 /** One helper builds the mock vault for every case here: each path's ancestor folders are seeded
  * first, so `TFolder`/`TFile` objects always have a real parent in the vault tree. */
@@ -148,6 +149,25 @@ describe("interface-note exclusion from the '+' file list (G12, E6)", () => {
 		const app = vaultWith(["Jobs/Acme", "Jobs/Acme2"], ["Jobs/Acme2/Acme2.md"]);
 		const result = candidateFilesForAdd(app.vault.getFiles(), [addedFolder("Jobs/Acme")], () => false).map((f) => f.path);
 		expect(result).toEqual(["Jobs/Acme2/Acme2.md"]);
+	});
+
+	it("PR-1.F1 R2: with interfaceNoteAcceptAltNames on and findInterfaceNote wired in, an added folder's README.md alt note is excluded like the conventional name would be", () => {
+		const app = vaultWith(["Jobs/Acme"], ["Jobs/Acme/README.md", "Jobs/Acme/brief.md"]);
+		const settings = { ...DEFAULT_SETTINGS, interfaceNoteAcceptAltNames: true };
+		const interfaceNotePathFor = (folderPath: string): string | null => {
+			const folder = app.vault.getAbstractFileByPath(folderPath);
+			return folder instanceof TFolder ? findInterfaceNote(app, folder, settings)?.path ?? null : null;
+		};
+		const result = candidateFilesForAdd(app.vault.getFiles(), [addedFolder("Jobs/Acme")], () => false, () => false, interfaceNotePathFor).map(
+			(f) => f.path
+		);
+		expect(result).toEqual(["Jobs/Acme/brief.md"]);
+	});
+
+	it("without the resolver wired in (the default), the alt note stays offered — the bug PR-1.F1 R2 fixes", () => {
+		const app = vaultWith(["Jobs/Acme"], ["Jobs/Acme/README.md", "Jobs/Acme/brief.md"]);
+		const result = candidateFilesForAdd(app.vault.getFiles(), [addedFolder("Jobs/Acme")], () => false).map((f) => f.path).sort();
+		expect(result).toEqual(["Jobs/Acme/README.md", "Jobs/Acme/brief.md"]);
 	});
 });
 

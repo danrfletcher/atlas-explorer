@@ -243,14 +243,19 @@ export class AddFileSuggestModal extends FuzzySuggestModal<TFile | TFolder> {
 /** PR-3 (G2, E4): every vault file minus any file already a unit somewhere (auto-promoted, manually
  * promoted, already added) or already placed/nested as a node in any view — so picking one from the
  * modal can never produce a duplicate inbox row. List-level exclusion only: no runtime dedupe is
- * exercised once a file is chosen. PR-1.F1 (G12): an added folder's interface note (`<Folder>/<Folder>.md`)
- * is excluded too, until that folder is dismissed for good (`isGloballyDismissed`); a promoted folder's
- * note is still offered. */
+ * exercised once a file is chosen. PR-1.F1 (G12): an added folder's interface note is excluded too,
+ * until that folder is dismissed for good (`isGloballyDismissed`); a promoted folder's note is still
+ * offered. PR-1.F1 R2: `interfaceNotePathFor` defaults to the bare `<Folder>/<Folder>.md` convention
+ * (every existing caller/test keeps compiling and behaving unchanged), but the real call site resolves
+ * through `findInterfaceNote` instead, so an `index.md`/`README.md` alt name (when
+ * `interfaceNoteAcceptAltNames` is on) is excluded the same way the conventional name is. */
 export function candidateFilesForAdd(
 	allFiles: TFile[],
 	units: Unit[],
 	isPlacedAnywhere: (ref: UnitRef) => boolean,
-	isGloballyDismissed: (ref: UnitRef) => boolean = () => false
+	isGloballyDismissed: (ref: UnitRef) => boolean = () => false,
+	interfaceNotePathFor: (folderPath: string) => string | null = (folderPath) =>
+		`${folderPath}/${folderPath.slice(folderPath.lastIndexOf("/") + 1)}.md`
 ): TFile[] {
 	// R2: only a *file-kind* ref counts as "the file already present as a unit" (G2) — a promoted-block
 	// unit's `.path` is its containing file's path even though it's kind "block" (per `unitToRef`), so
@@ -261,8 +266,8 @@ export function candidateFilesForAdd(
 	for (const unit of units) {
 		if (unit.type !== "added-folder") continue;
 		if (isGloballyDismissed({ kind: "folder", path: unit.path })) continue;
-		const folderName = unit.path.slice(unit.path.lastIndexOf("/") + 1);
-		fileRefKeys.add(unitRefKey({ kind: "file", path: `${unit.path}/${folderName}.md` }));
+		const notePath = interfaceNotePathFor(unit.path);
+		if (notePath) fileRefKeys.add(unitRefKey({ kind: "file", path: notePath }));
 	}
 	return allFiles.filter(
 		(file) => !fileRefKeys.has(unitRefKey({ kind: "file", path: file.path })) && !isPlacedAnywhere({ kind: "file", path: file.path })
@@ -2544,8 +2549,19 @@ export class AtlasExplorerView extends ItemView {
 		// PR-1.F1: one placed-set per open, shared by the file and folder candidate lists.
 		const placed = viewsManager.placedRefKeys();
 		const isPlacedAnywhere = (ref: UnitRef): boolean => placed.has(unitRefKey(ref));
+		const interfaceNotePathFor = (folderPath: string): string | null => {
+			const folder = app.vault.getAbstractFileByPath(folderPath);
+			if (!(folder instanceof TFolder)) return null;
+			return findInterfaceNote(app, folder, settings)?.path ?? null;
+		};
 		const candidates: (TFile | TFolder)[] = [
-			...candidateFilesForAdd(app.vault.getFiles(), units, isPlacedAnywhere, (ref) => unitIndex.isDismissed(ref, "global")),
+			...candidateFilesForAdd(
+				app.vault.getFiles(),
+				units,
+				isPlacedAnywhere,
+				(ref) => unitIndex.isDismissed(ref, "global"),
+				interfaceNotePathFor
+			),
 			...candidateFoldersForAdd(app.vault.getAllLoadedFiles(), units, placed, settings),
 		];
 		new AddFileSuggestModal(app, candidates, (item) => {
