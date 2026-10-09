@@ -50,6 +50,12 @@ export class UnitIndex {
 	private changeListeners = new Set<() => void>();
 	/** Paths whose units are kept out of `getUnits` (a count each, so overlapping holds are safe). */
 	private held = new Map<string, number>();
+	/** R2: memoises `normalizeNoAutoPromoteFolders` by the settings array's own identity, so the
+	 * per-unit inbox filter (`isLinkOnlyInNoAutoPromoteFolder`) normalises once per settings change
+	 * rather than once per unit per render. Every writer replaces the array rather than mutating it
+	 * in place (load, the settings-tab save, and the rename rewrite all assign a fresh array), so
+	 * reference equality is a safe cache key. */
+	private noAutoPromoteFoldersCache: { raw: string[]; poolFolder: string; normalized: string[] } | null = null;
 
 	constructor(
 		private app: App,
@@ -219,11 +225,22 @@ export class UnitIndex {
 	 * Read by the inbox lists only: promotion itself is unchanged, so placed items keep resolving. */
 	isLinkOnlyInNoAutoPromoteFolder(unit: Unit): boolean {
 		if (unit.type !== "promoted-file" && unit.type !== "promoted-folder" && unit.type !== "promoted-block") return false;
-		const folders = normalizeNoAutoPromoteFolders(this.settings.noAutoPromoteFolders, this.settings.poolFolder);
-		if (!isCoveredByNoAutoPromote(unit.path, folders)) return false;
+		if (!isCoveredByNoAutoPromote(unit.path, this.getNormalizedNoAutoPromoteFolders())) return false;
 		const ref = unitToRef(unit);
 		if (this.isAdded(ref)) return false;
 		return !this.manualPromotions.some((manual) => unitRefsEqual(manual, ref));
+	}
+
+	/** R2: the memoised read side of `noAutoPromoteFoldersCache` — recomputes only when the settings
+	 * array or pool folder has actually changed since the last call. */
+	private getNormalizedNoAutoPromoteFolders(): string[] {
+		const raw = this.settings.noAutoPromoteFolders;
+		const poolFolder = this.settings.poolFolder;
+		const cache = this.noAutoPromoteFoldersCache;
+		if (cache && cache.raw === raw && cache.poolFolder === poolFolder) return cache.normalized;
+		const normalized = normalizeNoAutoPromoteFolders(raw, poolFolder);
+		this.noAutoPromoteFoldersCache = { raw, poolFolder, normalized };
+		return normalized;
 	}
 
 	/** No corresponding "unmark added" — per F1, dismiss is the only removal mechanism for every
