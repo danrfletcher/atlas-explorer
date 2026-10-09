@@ -627,7 +627,6 @@ export class AtlasExplorerView extends ItemView {
 	/** PR-1.F1: bumped by every header click, so a title scroll still waiting for an expansion is
 	 * dropped once a newer click supersedes it (E4, chevron-then-title). */
 	private sectionClickSeq = 0;
-	private stickyFrameQueued = false;
 	/** Redraws the inbox's virtual window for the current render. Null between renders and after
 	 * close, so a stale scroll/resize callback from a previous render can never draw into the DOM. */
 	private inboxRedraw: (() => void) | null = null;
@@ -1519,22 +1518,17 @@ export class AtlasExplorerView extends ItemView {
 			observer.observe(this.stickyEls.inboxHeader);
 		}
 		this.inboxLayoutObserver = observer;
-		scrollBody.addEventListener("scroll", () => this.scheduleStickyUpdate());
-	}
-
-	private scheduleStickyUpdate(): void {
-		if (this.stickyFrameQueued) return;
-		this.stickyFrameQueued = true;
-		window.requestAnimationFrame(() => {
-			this.stickyFrameQueued = false;
-			this.updateStickyHeaders();
-		});
+		// PR-1.F1 R1: synchronous, not rAF-scheduled — `scroll` already fires at most once per frame
+		// (the compositor-driven scroll itself is what's already a frame ahead of this handler), so
+		// queuing the header move into a further rAF only adds a second frame of lag behind the content,
+		// visible as jitter during fast trackpad scrolls.
+		scrollBody.addEventListener("scroll", () => this.updateStickyHeaders());
 	}
 
 	/** PR-1.F1 (G3, G4, E2): moves the two section headers for the body's current scroll. Headers stay
 	 * in normal flow and are shifted with a transform, so section layout and the inbox window never
-	 * change. Also keeps `scroll-padding-top` at the stacked header height, so a programmatic scroll
-	 * never hides a row behind them. */
+	 * change. Also keeps `scroll-padding-top`/`scroll-padding-bottom` clear of whichever headers are
+	 * currently stuck over the content, so a programmatic scroll never hides a row behind them. */
 	private updateStickyHeaders(): void {
 		const s = this.stickyEls;
 		if (!s || !s.body.isConnected) return;
