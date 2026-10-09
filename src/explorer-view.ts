@@ -1107,10 +1107,19 @@ export class AtlasExplorerView extends ItemView {
 		// path has the same "lives outside the synced tree" problem `duplicateNode` can't solve on its
 		// own — copied across the same way, scoped to Outside-Vault sourced nodes in the subtree.
 		const outsidePairs = collectOutsideFolderSourceNodeIdPairs(node, clone);
+		let copiedOutsidePath = false;
 		for (const pair of outsidePairs) {
 			const path = this.plugin.folderSourcePathStore.get(pair.originalId);
-			if (path) this.plugin.folderSourcePathStore.set(pair.cloneId, path);
+			if (path) {
+				this.plugin.folderSourcePathStore.set(pair.cloneId, path);
+				copiedOutsidePath = true;
+			}
 		}
+		// PR-2 R4 fix: `duplicateNode` above already saved and notified before this loop ever ran, so
+		// the watcher-sync listener it triggered read the clone's outside path as unset and opened no
+		// watcher for it. Re-notifying now (no second save — the path store isn't part of `data.json`)
+		// re-runs that same sync with the path now in place.
+		if (copiedOutsidePath) this.plugin.viewsManager.notifyChangeOnly();
 	}
 
 	/** G9: opens an API item's already-attached note/block/module. Only ever called once `item.noteRef`
