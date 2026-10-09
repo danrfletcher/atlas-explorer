@@ -131,6 +131,35 @@ describe("inbox rows keep their promoted/added pills (G2, GP1, GP3)", () => {
 		const row = renderInboxRowFor(addedInfo, { kind: "file", path: "Areas/Notes.md" });
 		expect(badgesOf(row)).toEqual(["added"]);
 	});
+
+	it("GP3: an added file revealed via Show Dismissed also carries the 'hidden' pill alongside 'added'", () => {
+		const container = document.createElement("div");
+		const fake = { selectedInboxRefKeys: new Set<string>(), setPlacementTooltip: vi.fn(noop) };
+		const row = (
+			AtlasExplorerView.prototype as unknown as {
+				renderInboxRow: (this: typeof fake, container: HTMLElement, ref: UnitRef, info: PillRowInfo, view: View, hidden?: boolean) => HTMLElement;
+			}
+		).renderInboxRow.call(fake, container, { kind: "file", path: "Areas/Notes.md" }, addedInfo, createEmptyView("v1", "Default"), true);
+		expect(badgesOf(row)).toEqual(["added", "hidden"]);
+	});
+});
+
+describe("the same unit never shows a pill in the bucket but keeps it in the inbox (G1, G2)", () => {
+	it("a promoted note rendered both ways in one test: no pill as a bucket row, 'promoted' pill as an inbox row", async () => {
+		const ref: UnitRef = { kind: "file", path: "Hartley Haulage.md" };
+		const bucketRow = await renderBucketRow(promotedInfo, ref);
+		const inboxRow = renderInboxRowFor(promotedInfo, ref);
+		expect(badgesOf(bucketRow)).toEqual([]);
+		expect(badgesOf(inboxRow)).toEqual(["promoted"]);
+	});
+
+	it("an added file rendered both ways in one test: no pill as a bucket row, 'added' pill as an inbox row", async () => {
+		const ref: UnitRef = { kind: "file", path: "Areas/Notes.md" };
+		const bucketRow = await renderBucketRow(addedInfo, ref);
+		const inboxRow = renderInboxRowFor(addedInfo, ref);
+		expect(badgesOf(bucketRow)).toEqual([]);
+		expect(badgesOf(inboxRow)).toEqual(["added"]);
+	});
 });
 
 describe("RowInfo is still resolved for bucket rows (G1)", () => {
