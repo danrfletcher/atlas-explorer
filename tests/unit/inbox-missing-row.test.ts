@@ -224,3 +224,74 @@ describe("G10 inbox missing row — Remove", () => {
 		expect(index.isAdded(file("gone.md"))).toBe(true);
 	});
 });
+
+describe("PR-1.F2 R2 — a missing added row resolves again once its file reappears", () => {
+	const resolveRef = proto.resolveRef as (ref: UnitRef) => Promise<{ missing: boolean; added: boolean; text: string }>;
+
+	it("missing while the file is gone, then a normal added row once it's back", async () => {
+		const app = new App();
+		const ref = file("Jobs/Acme/brief.md");
+		const index = makeIndex([{ ref, tag: "added" }]);
+		const unit = index.getUnits().find((u) => u.type === "added-file" && u.path === ref.path)!;
+		const fakeMissing = {
+			plugin: { app, settings: { ...DEFAULT_SETTINGS }, freeBlockTextCache: undefined },
+			unitsByRefKey: new Map([[unitRefKey(ref), unit]]),
+		};
+
+		const whileMissing = await resolveRef.call(fakeMissing, ref);
+		expect(whileMissing.missing).toBe(true);
+
+		app.vault.seedFolder("Jobs");
+		app.vault.seedFolder("Jobs/Acme");
+		app.vault.seedFile(ref.path);
+		const afterReturn = await resolveRef.call(fakeMissing, ref);
+
+		expect(afterReturn.missing).toBe(false);
+		expect(afterReturn.added).toBe(true);
+		expect(afterReturn.text).toBe("brief");
+	});
+});
+
+describe("PR-1.F2 R1 — a missing added row's ref is never carried into a drag payload", () => {
+	const buildInboxDragPayload = proto.buildInboxDragPayload as (ref: UnitRef) => { kind: "inbox"; refs: UnitRef[] };
+
+	function makeDragFake() {
+		return {
+			selectedInboxRefKeys: new Set<string>(),
+			selectedBucketNodeIds: new Set<string>(),
+			selectionAnchor: null as string | null,
+			selectionAnchorScope: null as string | null,
+			inboxRefByKey: new Map<string, UnitRef>(),
+			missingAddedInboxKeys: new Set<string>(),
+		};
+	}
+
+	it("dragging a live selected row drops the also-selected missing row's ref from the payload", () => {
+		const live = file("live.md");
+		const missing = folder("Jobs/Acme");
+		const fake = makeDragFake();
+		fake.selectedInboxRefKeys.add(unitRefKey(live));
+		fake.selectedInboxRefKeys.add(unitRefKey(missing));
+		fake.inboxRefByKey.set(unitRefKey(live), live);
+		fake.inboxRefByKey.set(unitRefKey(missing), missing);
+		fake.missingAddedInboxKeys.add(unitRefKey(missing));
+
+		const payload = buildInboxDragPayload.call(fake, live);
+
+		expect(payload.refs).toEqual([live]);
+	});
+
+	it("dragging the sole selected missing-free row is unaffected by an unrelated missing key elsewhere", () => {
+		const live = file("live.md");
+		const missing = folder("Jobs/Acme");
+		const fake = makeDragFake();
+		fake.inboxRefByKey.set(unitRefKey(live), live);
+		fake.inboxRefByKey.set(unitRefKey(missing), missing);
+		fake.missingAddedInboxKeys.add(unitRefKey(missing));
+
+		const payload = buildInboxDragPayload.call(fake, live);
+
+		expect(payload.refs).toEqual([live]);
+		expect(fake.selectedInboxRefKeys).toEqual(new Set([unitRefKey(live)]));
+	});
+});

@@ -156,6 +156,19 @@ describe("GP3 — an added folder shows as a folder-icon row tagged 'added', nev
 		expect(Array.from(row.querySelectorAll(".atlas-badge")).map((b) => b.textContent)).toEqual(["added"]);
 		expect(row.parentElement!.querySelectorAll(".atlas-row")).toHaveLength(1);
 	});
+
+	it("PR-1.S1 R2: placed in the bucket, renders as a module row with no child rows (F3)", async () => {
+		const ctx = makeCtx(["Jobs/Acme/brief.md", "Jobs/Acme/notes.md"], ["Jobs", "Jobs/Acme"]);
+		ctx.index.markAdded(folder("Jobs/Acme"));
+		ctx.views.placeUnit(ctx.view.id, folder("Jobs/Acme"), null);
+		const placed = ctx.views.getViews()[0].root[0];
+
+		const row = await renderBucketNode(ctx, placed);
+
+		expect(row.querySelector(".atlas-row-text")?.textContent).toBe("Acme");
+		expect(row.querySelector(".atlas-icon.atlas-module-icon")).not.toBeNull();
+		expect(row.parentElement!.querySelectorAll(".atlas-row")).toHaveLength(1);
+	});
 });
 
 describe("G5 — clicking the row opens the interface note if it has one, otherwise nothing happens", () => {
@@ -196,6 +209,32 @@ describe("G6 — clicking the folder icon opens Module Contents for the folder",
 		row.querySelector<HTMLElement>(".atlas-module-icon")!.click();
 
 		expect(ctx.explorer.openModuleContentsModal).toHaveBeenCalledWith("Jobs/Acme");
+	});
+
+	it("PR-1.S1 R1 (GP5): the real modal lists the added folder's files", async () => {
+		const ctx = makeCtx(["Jobs/Acme/brief.md", "Jobs/Acme/notes.md"], ["Jobs", "Jobs/Acme"]);
+		ctx.index.markAdded(folder("Jobs/Acme"));
+		(ctx.explorer.openModuleContentsModal as Method) = proto.openModuleContentsModal.bind(ctx.explorer);
+
+		const row = await renderInbox(ctx, folder("Jobs/Acme"));
+		row.querySelector<HTMLElement>(".atlas-module-icon")!.click();
+
+		const rowNames = Array.from(document.querySelectorAll<HTMLElement>(".atlas-module-modal-tree .atlas-row-text")).map(
+			(el) => el.textContent
+		);
+		expect(rowNames).toEqual(["brief.md", "notes.md"]);
+	});
+
+	it("PR-1.S1 R1 (E1): an empty added folder opens the modal empty, with no error", async () => {
+		const ctx = makeCtx(["Jobs/Acme/brief.md"], ["Jobs", "Jobs/Acme", "Jobs/Empty"]);
+		ctx.index.markAdded(folder("Jobs/Empty"));
+		(ctx.explorer.openModuleContentsModal as Method) = proto.openModuleContentsModal.bind(ctx.explorer);
+
+		const row = await renderInbox(ctx, folder("Jobs/Empty"));
+		expect(() => row.querySelector<HTMLElement>(".atlas-module-icon")!.click()).not.toThrow();
+
+		expect(document.querySelectorAll(".atlas-module-modal-tree .atlas-row")).toHaveLength(0);
+		expect(Notice.instances).toHaveLength(0);
 	});
 });
 

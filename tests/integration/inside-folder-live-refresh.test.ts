@@ -2,6 +2,7 @@ import { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AtlasPlugin from "../../src/main";
 import { FolderLiveRefresh } from "../../src/folder-live-refresh";
+import { ExternalMoveDetector } from "../../src/external-move";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import { ViewsManager } from "../../src/views";
 import { FolderSourceConfig, View, ViewNode } from "../../src/types";
@@ -98,6 +99,7 @@ function setup(root: ViewNode[], entries: TAbstractFile[] = [], leafCount = 0): 
 		graduation,
 		onModuleFolderRename: () => false,
 		persistDebounced: Object.assign(vi.fn(), { run: vi.fn() }),
+		externalMoveDetector: new ExternalMoveDetector(),
 	});
 	plugin.folderLiveRefresh = new FolderLiveRefresh((nodeId) =>
 		(plugin as unknown as { refreshInsideFolderSource(id: string): void }).refreshInsideFolderSource(nodeId)

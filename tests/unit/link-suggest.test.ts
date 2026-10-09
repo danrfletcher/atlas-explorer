@@ -92,4 +92,23 @@ describe("[[ suggestions include added folders (G13)", () => {
 
 		expect(app.vault.calls).not.toContain("create");
 	});
+
+	it("PR-1.F1 T1: picking a folder whose interface note is a case-variant sibling (deep.md for Deep) does not throw and links to the existing file", async () => {
+		const app = new App();
+		seedRoot(app, ["Jobs/Acme/Deep/deep.md"], ["Jobs", "Jobs/Acme", "Jobs/Acme/Deep"]);
+		const index = new UnitIndex(app, { ...DEFAULT_SETTINGS }, [], {}, [], []);
+		index.rebuild();
+		index.markAdded({ kind: "folder", path: "Jobs/Acme/Deep" });
+		const suggest = suggesterFor(app, index);
+		const { replaceRange } = openContext(suggest, "Notes/Today.md");
+
+		const items = (await suggest.getSuggestions({ query: "deep" } as EditorSuggestContext)) as unknown as Item[];
+		const folderItem = items.find((item) => item.kind === "folder-unit" && item.text === "Deep");
+		expect(folderItem).toBeDefined();
+
+		await expect(suggest.selectSuggestion(folderItem as never, {} as KeyboardEvent)).resolves.not.toThrow();
+
+		expect(app.vault.calls).not.toContain("create");
+		expect(replaceRange).toHaveBeenCalledWith("[[Jobs/Acme/Deep/deep.md]]", expect.anything(), expect.anything());
+	});
 });
