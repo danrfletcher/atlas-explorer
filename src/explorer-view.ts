@@ -1549,7 +1549,14 @@ export class AtlasExplorerView extends ItemView {
 		});
 		s.bucketHeader.style.transform = layout.bucketY === bucketTop ? "" : `translateY(${layout.bucketY - bucketTop}px)`;
 		s.inboxHeader.style.transform = layout.inboxY === inboxTop ? "" : `translateY(${layout.inboxY - inboxTop}px)`;
-		s.body.style.scrollPaddingTop = layout.stuck ? `${bucketHeaderHeight + inboxHeaderHeight}px` : "0px";
+		// PR-1.F1 R2: the bucket header is the only one stuck over the top of the content in the
+		// "pinned" and (unstuck-inbox) "flow" sub-states — the stacked height only applies while the
+		// inbox header has *also* moved to sit directly under it. A pinned inbox header instead covers
+		// content at the bottom edge, so that's a bottom padding, not a (too-large) top one.
+		const topPadding = !layout.stuck ? 0 : layout.inboxPosition === "stacked" ? bucketHeaderHeight + inboxHeaderHeight : bucketHeaderHeight;
+		const bottomPadding = layout.stuck && layout.inboxPosition === "pinned" ? inboxHeaderHeight : 0;
+		s.body.style.scrollPaddingTop = `${topPadding}px`;
+		s.body.style.scrollPaddingBottom = `${bottomPadding}px`;
 	}
 
 	/** PR-1.F1 (G5): where a section's header belongs once stuck: the bucket at the top, the inbox
