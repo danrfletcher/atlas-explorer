@@ -60,6 +60,7 @@ export interface FakeExplorer {
 	renderRowIcon: (...args: unknown[]) => unknown;
 	renderTruncationGroupHeader: ReturnType<typeof vi.fn>;
 	renderNode: ReturnType<typeof vi.fn>;
+	renderConnectionDots: (...args: unknown[]) => unknown;
 	renderApiItemRow: ((...args: unknown[]) => unknown) | ReturnType<typeof vi.fn>;
 	isOutsideManagedAndUnresolved: ReturnType<typeof vi.fn>;
 	visibleFolderSourceRows: (...args: unknown[]) => unknown;
@@ -85,6 +86,7 @@ export function makeFakeExplorer(sm: StatusesManager, overrides: Partial<FakeExp
 		renderNode: vi.fn(async (node: ViewNode, container: HTMLElement) => {
 			container.createDiv({ cls: "marker-node", attr: { "data-id": node.id } });
 		}),
+		renderConnectionDots: proto.renderConnectionDots,
 		renderApiItemRow: vi.fn((item: { id: string }, container: HTMLElement) => {
 			container.createDiv({ cls: "marker-api", attr: { "data-id": item.id } });
 		}),

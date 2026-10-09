@@ -39,6 +39,7 @@ function fakeBucketThis(info: PillRowInfo, outsideManaged = false) {
 		handleRowKeydown: vi.fn(noop),
 		showUnitMenu: vi.fn(noop),
 		renderFoldableChildren: vi.fn(async () => {}),
+		renderConnectionDots: (AtlasExplorerView.prototype as unknown as { renderConnectionDots: (row: HTMLElement, node: ViewNode) => void }).renderConnectionDots,
 	};
 }
 
