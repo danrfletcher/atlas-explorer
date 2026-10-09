@@ -706,6 +706,11 @@ export class AtlasExplorerView extends ItemView {
 	 * so a DOM query would silently miss whatever's currently scrolled out of view. */
 	private inboxSelectOrder: string[] = [];
 	private inboxRefByKey = new Map<string, UnitRef>();
+	/** PR-1.F2 R1: keys of the inbox's currently-missing added rows (G10), from the same render pass
+	 * as `inboxRefByKey`. A missing row stays clickable/shift-selectable (so Remove still works from
+	 * a range selection), but its ref is never let into a drag payload — dropping a missing ref onto
+	 * a module icon would otherwise place a ref with no real file behind it into the bucket. */
+	private missingAddedInboxKeys = new Set<string>();
 	private dragPayload: DragPayload | null = null;
 	/** Review follow-up (retroactive PR 9 finding): cancels whichever module row's dwell timer is
 	 * currently pending, if any — invoked from the window-level `dragend` backstop below. At most
@@ -2140,7 +2145,10 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR 20: same idea as `buildNodeDragPayload`, for an inbox row — see its own doc comment for why
-	 * this deliberately never calls `render()` from inside a `dragstart` handler. */
+	 * this deliberately never calls `render()` from inside a `dragstart` handler. PR-1.F2 R1: a
+	 * missing added row's key never makes it into the payload, even when it's part of the current
+	 * multi-selection — only `missingAddedInboxKeys` is consulted, not draggability, since this ref
+	 * never started the drag itself. */
 	private buildInboxDragPayload(ref: UnitRef): DragPayload {
 		const key = unitRefKey(ref);
 		if (!this.selectedInboxRefKeys.has(key) || this.selectedInboxRefKeys.size <= 1) {
@@ -2150,7 +2158,10 @@ export class AtlasExplorerView extends ItemView {
 			this.selectionAnchor = key;
 			this.selectionAnchorScope = "inbox";
 		}
-		const refs = [...this.selectedInboxRefKeys].map((k) => this.inboxRefByKey.get(k)).filter((r): r is UnitRef => !!r);
+		const refs = [...this.selectedInboxRefKeys]
+			.filter((k) => !this.missingAddedInboxKeys.has(k))
+			.map((k) => this.inboxRefByKey.get(k))
+			.filter((r): r is UnitRef => !!r);
 		return { kind: "inbox", refs: refs.length > 0 ? refs : [ref] };
 	}
 
@@ -2528,6 +2539,9 @@ export class AtlasExplorerView extends ItemView {
 		// whatever's presently painted.
 		this.inboxSelectOrder = sorted.map((r) => unitRefKey(r.ref));
 		this.inboxRefByKey = new Map(sorted.map((r) => [unitRefKey(r.ref), r.ref]));
+		this.missingAddedInboxKeys = new Set(
+			sorted.filter((r) => r.info.missing && this.plugin.unitIndex.isAdded(r.ref)).map((r) => unitRefKey(r.ref))
+		);
 
 		// F11: the inbox can be thousands of rows (5,000 files + 2,000 free blocks scale target).
 		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
