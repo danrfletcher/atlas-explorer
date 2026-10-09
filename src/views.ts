@@ -1282,7 +1282,13 @@ export class ViewsManager {
 		const found = this.findNode(view.root, nodeId);
 		if (!found || !canHoldSource(found.node) || !found.node.folderSource) return;
 		const ownerId = found.node.id;
-		const before = JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]);
+		// PR-1 R2 fix: `reconcileOutsideChildChanges` below can rename or demote a managed row the user
+		// re-nested anywhere else in the view (`collectManagedMatches` walks the whole `view.root`, not
+		// just this owner's own children) — snapshotting only `found.node`'s own subtree missed those
+		// writes, so the save-vs-notify decision below could choose notifyChange() (render only) for a
+		// refresh that actually mutated a differently-nested node. Snapshotting the whole view root
+		// covers every node the reconcile can touch.
+		const before = JSON.stringify(view.root);
 		// PR-2 (R2-Q2): an Outside-Vault source's deletes and renames are reconciled before the add pass,
 		// so a renamed row keeps its node and a deleted one is demoted per mode. An unresolved path is
 		// left alone, as it always was.
@@ -1316,7 +1322,7 @@ export class ViewsManager {
 		// folder event runs through here, so an unchanged source must not cost a `data.json` write.
 		// PR-1 (R1): but it still re-renders, because an unchanged Outside-Vault source can change what
 		// the explorer shows (unplugged or reconnected drive) without any stored data changing.
-		if (unflagged || JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]) !== before) this.save();
+		if (unflagged || JSON.stringify(view.root) !== before) this.save();
 		else this.notifyChange();
 	}
 
