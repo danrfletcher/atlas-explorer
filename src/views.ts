@@ -650,8 +650,11 @@ export class ViewsManager {
 		return !!view && this.findUnitNode(view.root, ref) !== null;
 	}
 
+	/** PR-1.F1 R3: built on `placedRefKeys`'s walk rather than its own `findUnitNode` pass, so the
+	 * "+" picker's placed-set and this check can never disagree about what counts as placed (the
+	 * Outside-owned skip rule lives in one place). */
 	isPlacedAnywhere(ref: UnitRef): boolean {
-		return this.views.some((v) => this.findUnitNode(v.root, ref) !== null);
+		return this.placedRefKeys().has(unitRefKey(ref));
 	}
 
 	/** PR-1.F1: every unit ref key placed in any view, collected in one walk. The "+" picker tests
