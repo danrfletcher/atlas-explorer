@@ -370,6 +370,28 @@ describe("ref-rewrite-on-rename — G5", () => {
 	});
 });
 
+describe("leftSource — PR-1 R3: a managed row whose owner is missing keeps the plain rewrite", () => {
+	it("rewrites the ref in place instead of detaching the row when folderSourceOwnerId points at no node", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const orphan: ViewNode = {
+			id: "orphan",
+			type: "unit",
+			ref: { kind: "file", path: "Projects/a.md" },
+			children: [],
+			folderSourceManaged: true,
+			folderSourceOwnerId: "missing-owner",
+		};
+		view.root.push(orphan);
+
+		vm.onVaultRename("Projects/a.md", "Projects/renamed.md");
+
+		const node = vm.getNode(view.id, "orphan");
+		expect(node).toBeDefined();
+		expect(node!.ref).toEqual({ kind: "file", path: "Projects/renamed.md" });
+	});
+});
+
 describe("removedRefs-rewrite-on-rename — R8", () => {
 	it("onVaultRename rewrites a removedRefs key when the source's own target folder is renamed/moved", () => {
 		const vm = makeViewsManager();

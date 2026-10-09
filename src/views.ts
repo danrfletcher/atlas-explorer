@@ -1514,7 +1514,11 @@ export class ViewsManager {
 		// the source's mode, exactly as a delete does. Checked before the rewrite below, so the owner
 		// folder's path is first rewritten here (a renamed source folder still counts as "still inside").
 		const leftSource = (owner: ViewNode | undefined): boolean => {
-			if (!owner?.folderSource) return true;
+			// R3 fix: an owner that cannot be found at all (its id is stale/missing) is not the same as an
+			// owner that exists but no longer carries a folderSource — only rewrite the ref, same as before
+			// this detach rule existed, rather than silently splicing the row out of the tree.
+			if (!owner) return false;
+			if (!owner.folderSource) return true;
 			const sourcePath = owner.folderSource.path;
 			// R2: a renamed parent folder's child can arrive before the folder's own rename event, so the
 			// source path is still the old one here. A source folder that no longer exists at its old path
