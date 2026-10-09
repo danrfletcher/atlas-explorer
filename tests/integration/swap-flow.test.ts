@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Notice } from "obsidian";
+import * as obsidianMock from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { ViewsManager } from "../../src/views";
 import { DEFAULT_SETTINGS } from "../../src/settings";
@@ -79,6 +80,34 @@ function vaultWasUntouched(): void {
 
 async function swapPicked(view: View, node: ViewNode, candidate: SwapCandidate): Promise<void> {
 	await explorerProto.swapPicked.call(fake, view, node, candidate);
+}
+
+/** PR-2 R5: renders the real inbox section (through `renderInboxSection`/`renderInboxRow`) against the
+ * real `ViewsManager`/`UnitIndex`, so "the swapped-away item returned to the Inbox" is checked by
+ * actually rendering the inbox, not just `isPlacedAnywhere`. `renderVirtualizedInboxRows` is the one
+ * stub, same role F11's virtualization plays in every other inbox test — it hands each resolved row to
+ * the real `renderInboxRow` instead of skipping straight to a DOM assertion. */
+async function renderInbox(view: View): Promise<HTMLElement> {
+	// The fixture's free block is itself an inbox row; resolving its RowInfo reads this file.
+	s.app.vault.contents.set("_pool/20260101000000-aaaa.md", "Ideas");
+	const container = document.createElement("div");
+	Object.assign(fake, {
+		filterText: "",
+		inboxCollapsed: false,
+		selectedInboxRefKeys: new Set<string>(),
+		wireModuleRow: vi.fn(),
+		setPlacementTooltip: vi.fn(),
+		// `resolveRef` (real, via the prototype) looks units up through this map, which `render()` would
+		// normally rebuild — `fake` is a plain object, not a constructed instance, so no field
+		// initializer ever ran to give it one.
+		unitsByRefKey: new Map(s.index.getUnits().map((u) => [unitRefKey(unitToRef(u)), u])),
+		renderVirtualizedInboxRows: vi.fn((listEl: HTMLElement, sorted: { ref: UnitRef; info: unknown; hidden: boolean }[]) => {
+			for (const { ref, info, hidden } of sorted) explorerProto.renderInboxRow.call(fake, listEl, ref, info, view, hidden);
+		}),
+	});
+	const inboxUnits = s.views.getInboxUnits(s.index.getUnits(), view.id, view.inboxMode, s.index);
+	await explorerProto.renderInboxSection.call(fake, container, view, inboxUnits, [], 0);
+	return container;
 }
 
 const candidate = (kind: SwapCandidate["kind"], ref: UnitRef, name: string, known = true): SwapCandidate => ({
@@ -191,18 +220,44 @@ describe("G7: an unknown file is promoted, not refused", () => {
 });
 
 describe("G12: a swapped-away item returns to the Inbox", () => {
-	it("after the swap, the old file is no longer placed and the new one is", async () => {
+	it("after the swap, the old file is no longer placed and the new one is, and the rendered inbox shows the old file", async () => {
 		const { view } = boot([unit("spot", BOAT_FILE)]);
+		// Boat.md is only ever a bookkeeping ref elsewhere in this file; a real inbox render needs a
+		// real unit behind it, so it's seeded on disk and the index picks it up as a root-file unit.
+		s.app.vault.seedFile("Boat.md");
+		s.index.rebuild();
 		expect(s.views.isPlacedAnywhere(BOAT_FILE)).toBe(true);
+		expect((await renderInbox(view)).querySelector('[data-ref-key="file:Boat.md"]')).toBeNull();
+
 		await swapPicked(view, view.root[0], candidate("file", file("Existing.md"), "Existing.md"));
+
 		expect(s.views.isPlacedAnywhere(BOAT_FILE)).toBe(false);
 		expect(s.views.isPlacedAnywhere(file("Existing.md"))).toBe(true);
+		expect((await renderInbox(view)).querySelector('[data-ref-key="file:Boat.md"]')).not.toBeNull();
+	});
+});
+
+describe("E3: picking a nested non-module folder hand-promotes it, same as an unknown file (G7)", () => {
+	it("a folder nested inside another folder — unknown to the index because only root folders are modules — is promoted then placed", async () => {
+		const { view } = boot([unit("spot", file("Existing.md"))]);
+		s.app.vault.seedFolder("Archive/Deeper");
+		const ref = folder("Archive/Deeper");
+		expect(s.index.getUnits().some((u) => unitRefKey(unitToRef(u)) === unitRefKey(ref))).toBe(false);
+
+		await swapPicked(view, view.root[0], candidate("folder", ref, "Deeper", false));
+
+		expect(s.views.getView("default")!.root[0].ref).toEqual(ref);
+		expect(s.index.getUnits().some((u) => unitRefKey(unitToRef(u)) === unitRefKey(ref))).toBe(true);
+		expect(notices()).toEqual([]);
+		vaultWasUntouched();
 	});
 });
 
 describe("E5/G4: 'Swap for Atlas folder' through the name box", () => {
-	it("submitting a name turns the unit into an Atlas folder, with that name", () => {
+	it("submitting a name turns the unit into an Atlas folder, with that name, and Boat.md returns to the rendered inbox", async () => {
 		const { view } = boot([unit("spot", BOAT_FILE)]);
+		s.app.vault.seedFile("Boat.md");
+		s.index.rebuild();
 		fake.openSwapForFolder(view, view.root[0], "Boat.md");
 		const prompt = captured.prompts[0];
 		expect(prompt.title).toBe("Swap for Atlas folder");
@@ -211,6 +266,7 @@ describe("E5/G4: 'Swap for Atlas folder' through the name box", () => {
 		expect(s.views.getView("default")!.root[0]).toMatchObject({ id: "spot", type: "meta", label: "Boat" });
 		expect(flushSave).toHaveBeenCalledTimes(1);
 		vaultWasUntouched();
+		expect((await renderInbox(view)).querySelector('[data-ref-key="file:Boat.md"]')).not.toBeNull();
 	});
 
 	it("cancelling (no submit) changes nothing", () => {
@@ -272,6 +328,15 @@ describe("GP1 through the real picker: type, pick, close", () => {
 
 		const matches = picker.getSuggestions("Customer Disc");
 		expect(matches.map((m) => m.item.path)).toEqual(["Customer Discovery.md"]);
+
+		// PR-2 R5 (G6): the picker's title is its placeholder (a prompt-style FuzzySuggestModal never
+		// renders a title), and each result's icon comes from the candidate's own kind — checked here
+		// against the real, integration-built candidate list rather than a hand-built one.
+		const setIconSpy = vi.spyOn(obsidianMock, "setIcon");
+		const el = document.createElement("div");
+		picker.renderSuggestion(matches[0], el);
+		expect(setIconSpy).toHaveBeenLastCalledWith(expect.any(HTMLElement), "file");
+		setIconSpy.mockRestore();
 
 		picker.onChooseSuggestion(matches[0], new MouseEvent("click"));
 		await vi.waitFor(() => expect(flushSave).toHaveBeenCalledTimes(1));

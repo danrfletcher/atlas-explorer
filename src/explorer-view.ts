@@ -489,10 +489,23 @@ function addSwapItems(menu: Menu, host: SwapMenuHost, view: View, node: ViewNode
 /** PR-1 (G11e): the Statuses, Data source…, Refresh now and Remove data source items, shared by the
  * Atlas-folder menu and the unit menu so a sourced unit offers exactly what a sourced folder does.
  * Statuses shows when the node has children or source rows; Refresh now and Remove data source
- * show only when that kind of source exists. Adds no trailing separator — the caller owns it. */
-function addSourceAndStatusItems(menu: Menu, plugin: AtlasPlugin, host: SourceMenuHost, view: View, node: ViewNode): void {
-	if (node.children.length > 0 || nodeHasApiRows(node)) {
+ * show only when that kind of source exists. Adds no trailing separator — the caller owns it.
+ * PR-1 R2: always separates the preceding group from Data source…, even when Statuses doesn't show —
+ * unless the caller already placed its own separator immediately before this call (`separatorAlreadyAdded`),
+ * in which case skipping avoids a doubled-up separator. */
+function addSourceAndStatusItems(
+	menu: Menu,
+	plugin: AtlasPlugin,
+	host: SourceMenuHost,
+	view: View,
+	node: ViewNode,
+	separatorAlreadyAdded = false
+): void {
+	const hasStatuses = node.children.length > 0 || nodeHasApiRows(node);
+	if (hasStatuses) {
 		menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => host.openStatusesModal(view, node.id)));
+	}
+	if (hasStatuses || !separatorAlreadyAdded) {
 		menu.addSeparator();
 	}
 	menu.addItem((item) =>
@@ -2314,6 +2327,31 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR-1 R4: the API/CSV/markdown-table and Outside-path connection dots, shared by a meta folder's
+	 * row and a unit's row — a unit can hold the exact same kinds of data source (after Create or
+	 * Swap), and needs the same ok/grey/red/amber signal, not just a meta folder's `renderNode` branch. */
+	private renderConnectionDots(row: HTMLElement, node: ViewNode): void {
+		if (node.apiSource || node.csvSource || node.markdownTableSource) {
+			// G11/PR-7/PR-8: connection dot — green ok / grey never-refreshed / red last-refresh-failed
+			// / amber (PR-3) waiting on an unanswered automatic delete confirmation. CSV and Markdown
+			// Table both share this exact dot: their controllers write the same `apiCache`/
+			// `apiAwaitingConfirmation` fields an API source does.
+			const dot = row.createSpan({
+				cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
+			});
+			setTooltip(dot, dotTooltip(node.apiCache, Date.now(), node.apiAwaitingConfirmation));
+		}
+		if (node.folderSource?.location === "outside") {
+			// PR-5 (G6/G11): recomputed fresh on every render (same "no cached connection state
+			// anywhere" design as the modal's own dot) — load and focus-regain both already trigger a
+			// render via `queueRender`, so this alone satisfies the recheck-on-load/focus-regain
+			// requirement with no separate timer/poll (F10).
+			const resolved = resolveOutsidePath(this.plugin.folderSourcePathStore.get(node.id));
+			const dot = row.createSpan({ cls: `atlas-api-connection-dot atlas-api-dot-${resolved ? "green" : "red"}` });
+			setTooltip(dot, resolved ? "Path resolves on this device" : "Path does not resolve on this device");
+		}
+	}
+
 	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
 		if (node.type === "meta") {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-meta" });
@@ -2325,25 +2363,7 @@ export class AtlasExplorerView extends ItemView {
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
-			if (node.apiSource || node.csvSource || node.markdownTableSource) {
-				// G11/PR-7/PR-8: connection dot — green ok / grey never-refreshed / red last-refresh-failed
-				// / amber (PR-3) waiting on an unanswered automatic delete confirmation. CSV and Markdown
-				// Table both share this exact dot: their controllers write the same `apiCache`/
-				// `apiAwaitingConfirmation` fields an API source does.
-				const dot = row.createSpan({
-					cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
-				});
-				setTooltip(dot, dotTooltip(node.apiCache, Date.now(), node.apiAwaitingConfirmation));
-			}
-			if (node.folderSource?.location === "outside") {
-				// PR-5 (G6/G11): recomputed fresh on every render (same "no cached connection state
-				// anywhere" design as the modal's own dot) — load and focus-regain both already trigger a
-				// render via `queueRender`, so this alone satisfies the recheck-on-load/focus-regain
-				// requirement with no separate timer/poll (F10).
-				const resolved = resolveOutsidePath(this.plugin.folderSourcePathStore.get(node.id));
-				const dot = row.createSpan({ cls: `atlas-api-connection-dot atlas-api-dot-${resolved ? "green" : "red"}` });
-				setTooltip(dot, resolved ? "Path resolves on this device" : "Path does not resolve on this device");
-			}
+			this.renderConnectionDots(row, node);
 
 			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
 			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
@@ -2395,6 +2415,9 @@ export class AtlasExplorerView extends ItemView {
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		this.renderRowIcon(iconEl, view, node, ancestors, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
+		// PR-1 R4: a unit (not just a meta folder) can hold a data source after Create or Swap, and
+		// needs the same ok/failed/awaiting-confirmation signal.
+		this.renderConnectionDots(row, node);
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
 		// PR-1.F2 (G5/G7): "filtered out" takes the place of "last seen". Remove works the same way as on a
@@ -2922,7 +2945,8 @@ export class AtlasExplorerView extends ItemView {
 		// itself — an item with no children has nothing for the option to apply to, so it's hidden
 		// entirely rather than offered and doing nothing when toggled.
 		// PR-1 (G11e): same Statuses / Data source… / Refresh now / Remove data source items as an Atlas folder.
-		addSourceAndStatusItems(menu, this.plugin, this, view, node);
+		// The separator above is already in place, so tell the helper not to double it up.
+		addSourceAndStatusItems(menu, this.plugin, this, view, node, true);
 		menu.addSeparator();
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
@@ -2979,18 +3003,24 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR-2 (G6): the "Swap with…" picker over every vault file and folder plus every known block, minus
-	 * excluded and dot-folders and the item being replaced. Block labels need their text resolved first,
-	 * so this is async; the picker itself is opened once the list is ready. */
+	 * excluded and dot-folders and the item being replaced. PR-2 R4: free-block labels are read from
+	 * `freeBlockTextCache` only — it's kept current by vault events from plugin load, so this needs no
+	 * disk read even on a vault with thousands of free blocks. Promoted blocks have no equivalent cache
+	 * (per `resolveUnit`'s own doc comment, a smaller, bounded-impact gap — they're typically far fewer
+	 * in a real vault), so those still resolve async before the picker opens. */
 	async openSwapPicker(view: View, node: ViewNode): Promise<void> {
 		const { plugin } = this;
 		const units = plugin.unitIndex.getUnits();
-		const blockUnits = units.filter((unit) => unit.type === "free-block" || unit.type === "promoted-block");
-		const blocks = await Promise.all(
-			blockUnits.map(async (unit) => {
+		const freeBlockUnits = units.filter((unit) => unit.type === "free-block");
+		const promotedBlockUnits = units.filter((unit) => unit.type === "promoted-block");
+		const freeBlocks = freeBlockUnits.map((unit) => ({ ref: unitToRef(unit), text: plugin.freeBlockTextCache?.get(unit.path) ?? "" }));
+		const promotedBlocks = await Promise.all(
+			promotedBlockUnits.map(async (unit) => {
 				const resolved = await resolveUnit(plugin.app, plugin.settings, unit, plugin.freeBlockTextCache);
 				return { ref: unitToRef(unit), text: resolved?.text ?? "" };
 			})
 		);
+		const blocks = [...freeBlocks, ...promotedBlocks];
 		const vault = plugin.app.vault;
 		const candidates = buildSwapCandidates({
 			files: vault.getFiles().map((file) => ({ path: file.path, name: file.name })),
@@ -3021,8 +3051,13 @@ export class AtlasExplorerView extends ItemView {
 			new Notice(`Couldn't find ${candidate.name}, nothing changed.`);
 			return;
 		}
-		if (!known) plugin.unitIndex.addManualPromotion(candidate.ref);
+		// PR-2 R3: promote only once the swap has actually succeeded — swapNodeWithUnit's own checks
+		// (node still exists, isn't folderSourceManaged, isn't already this ref) don't depend on the
+		// candidate being a known unit, so calling it first costs nothing and never leaves a permanent
+		// manual promotion behind for a swap that didn't happen (e.g. the spot was removed, or its view
+		// deleted, while the picker or block-text resolution was pending).
 		if (!plugin.viewsManager.swapNodeWithUnit(view.id, node.id, candidate.ref)) return;
+		if (!known) plugin.unitIndex.addManualPromotion(candidate.ref);
 		await plugin.flushSave();
 		this.queueRender();
 	}
@@ -3451,10 +3486,11 @@ export class AtlasExplorerView extends ItemView {
 		if (evt.key === "Enter" && node.type === "unit" && node.ref && !this.isOutsideManagedUnit(view, node)) {
 			evt.preventDefault();
 			void this.openRef(node.ref);
-		} else if (evt.key === " " && (node.type === "meta" || node.children.length > 0)) {
+		} else if (evt.key === " " && (node.type === "meta" || node.children.length > 0 || nodeHasApiRows(node))) {
 			// PR 12: keyboard parity for the new unit-node chevrons — same fold/unfold toggle meta
 			// folders already had, now also reachable without a mouse for a unit that's gained
-			// meta-nested children.
+			// meta-nested children. PR-1 R5: a unit with source rows but no children is foldable too,
+			// same as PR-1 (G11c)'s renderFoldableChildren gate.
 			evt.preventDefault();
 			this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, !node.collapsed);
 		} else if (evt.key === "Delete") {

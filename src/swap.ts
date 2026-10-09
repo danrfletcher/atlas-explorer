@@ -72,7 +72,12 @@ export function buildSwapCandidates(input: SwapCandidateInput): SwapCandidate[] 
 	for (const block of input.blocks) {
 		if (hidden(block.ref.path)) continue;
 		const text = block.text.slice(0, SWAP_BLOCK_TEXT_LIMIT) || "(empty block)";
-		add({ kind: "block", ref: block.ref, name: `${basename(block.ref.path)} › ${text}`, path: block.ref.path, known: true });
+		// PR-2 T10: a free block's ref is its pool file path (`unitToRef` gives it `kind: "file"`, not
+		// "block" — only a promoted block gets that), and the pool filename is an auto-generated id that
+		// is never shown to users (same rule as every other free-block display). A promoted block's path
+		// is a real, recognizable file, so its "File › text" format stays.
+		const name = block.ref.kind === "file" ? text : `${basename(block.ref.path)} › ${text}`;
+		add({ kind: "block", ref: block.ref, name, path: block.ref.path, known: true });
 	}
 	for (const file of input.files) {
 		if (hidden(file.path)) continue;

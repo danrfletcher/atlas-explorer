@@ -40,6 +40,7 @@ const proto = AtlasExplorerView.prototype as unknown as Record<string, Method>;
  * don't exercise (drag-drop zones, menus, selection, keyboard). */
 const REAL = [
 	"renderNode",
+	"renderConnectionDots",
 	"renderInboxRow",
 	"resolveRef",
 	"resolveOutsideManagedRowInfo",
