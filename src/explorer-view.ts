@@ -179,7 +179,9 @@ interface RowInfo {
 	secondary?: string;
 	icon: string;
 	promoted: boolean;
-	/** PR-3 (G3): renders an "added" badge in place of "promoted" — the two are mutually exclusive. */
+	/** PR-3 (G3): renders an "added" badge in place of "promoted" — the two are mutually exclusive.
+	 * PR-1 (polish): both badges are inbox-only (renderInboxRow); renderNode (bucket rows) never
+	 * renders either, even when this flag is true. */
 	added: boolean;
 	missing: boolean;
 }
