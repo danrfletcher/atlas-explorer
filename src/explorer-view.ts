@@ -1426,40 +1426,58 @@ export class AtlasExplorerView extends ItemView {
 
 		const scrollBody = container.createDiv({ cls: "atlas-explorer-scroll" });
 		const bucketEl = scrollBody.createDiv({ cls: "atlas-section atlas-bucket" });
-		await this.renderBucketSection(bucketEl, view);
-		if (!isCurrent()) return;
+		try {
+			await this.renderBucketSection(bucketEl, view);
+			if (!isCurrent()) return;
+			// PR-1.S1 R2: restored here too, straight after the bucket is built, not only inside
+			// `renderVirtualizedInboxRows` below — if the inbox's `resolveRef` calls it awaits ever wait
+			// on real I/O, a frame could otherwise paint at scrollTop 0 before the inbox section jumps
+			// back (the window doesn't have its full scroll height yet at this point, so this can still
+			// get clamped short; `renderVirtualizedInboxRows` sets it again once the inbox spacer gives
+			// the body its true height).
+			scrollBody.scrollTop = restoreScrollTop;
 
-		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
-		// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
-		// the merged/sorted list at all, matching G8's "renders inline in the existing list" via an
-		// extra input set rather than a post-filter that would still momentarily touch every dismissed row.
-		const dismissedUnits = this.showDismissed
-			? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
-			: [];
-		const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
-		await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
-		if (!isCurrent()) return;
-		// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
-		// so later renders can read it from the DOM again.
-		this.pendingScrollTop = null;
-		// Both sections always render their header; a render without them has nothing to stack.
-		const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
-		const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
-		this.stickyEls = bucketHeader && inboxHeader ? { body: scrollBody, bucketEl, bucketHeader, inboxEl, inboxHeader } : null;
-		this.observeInboxLayout(container, scrollBody, bucketEl);
-		this.updateStickyHeaders();
+			const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
+			// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
+			// the merged/sorted list at all, matching G8's "renders inline in the existing list" via an
+			// extra input set rather than a post-filter that would still momentarily touch every dismissed row.
+			const dismissedUnits = this.showDismissed
+				? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
+				: [];
+			const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
+			await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
+			if (!isCurrent()) return;
+			// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
+			// so later renders can read it from the DOM again.
+			this.pendingScrollTop = null;
+			// Both sections always render their header; a render without them has nothing to stack.
+			const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+			const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+			this.stickyEls = bucketHeader && inboxHeader ? { body: scrollBody, bucketEl, bucketHeader, inboxEl, inboxHeader } : null;
+			this.observeInboxLayout(container, scrollBody, bucketEl);
+			this.updateStickyHeaders();
 
-		if (activeRowKey) {
-			const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
-			// `preventScroll` — this row's own visible position (and the scroll position that shows
-			// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
-			// would otherwise fight that by scrolling to whatever the browser's own default
-			// focus-into-view behavior decides, undoing the fix just above it.
-			restored?.focus({ preventScroll: true });
+			if (activeRowKey) {
+				const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
+				// `preventScroll` — this row's own visible position (and the scroll position that shows
+				// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
+				// would otherwise fight that by scrolling to whatever the browser's own default
+				// focus-into-view behavior decides, undoing the fix just above it.
+				restored?.focus({ preventScroll: true });
+			}
+
+			this.updateActiveHighlight();
+			this.syncRefreshTimers(view);
+		} finally {
+			// PR-1.S1 R6: if `renderBucketSection`/`renderInboxSection` throws (a rejected `resolveRef`,
+			// say) between setting `pendingScrollTop` above and clearing it above, it would otherwise
+			// stay set forever — every later render restoring that one stale value instead of the
+			// user's live scroll position. Guarded on `isCurrent()`: a superseded render's `finally` must
+			// not clear the field out from under whichever later render is still relying on it as its
+			// own restore target (see the comment where `pendingScrollTop` is read, at the top of this
+			// method).
+			if (isCurrent()) this.pendingScrollTop = null;
 		}
-
-		this.updateActiveHighlight();
-		this.syncRefreshTimers(view);
 	}
 
 	/** PR-1.S1: a ResizeObserver on the fixed part of the panel, the scroll body and the bucket. Those
