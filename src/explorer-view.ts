@@ -780,6 +780,14 @@ export class AtlasExplorerView extends ItemView {
 		// timer) whenever a drag ends, regardless of how.
 		this.registerDomEvent(window, "dragend", () => {
 			this.dragPayload = null;
+			// PR-1.S1 R5: if the drag ends while the row is scrolled out of the window, it's sitting
+			// hidden (`display:none`) in the spacer purely so the browser's drag source survived it
+			// scrolling off-screen (F11/E8) — nothing needs it kept around once the drag itself is over,
+			// so drop it now instead of leaving a hidden leftover for `drawWindow`'s next unrelated window
+			// change to clean up. A row still visible in the current window is left alone: it's exactly
+			// the row the next real render would draw again anyway, so removing it here would just be an
+			// unnecessary flash before that render replaces it.
+			if (this.inboxDragRowEl?.style.display === "none") this.inboxDragRowEl.remove();
 			this.inboxDragRowEl = null;
 			this.cancelActiveDwell?.();
 			// PR 20 follow-up (reviewer-caught, A27): a successful drop already repaints via
