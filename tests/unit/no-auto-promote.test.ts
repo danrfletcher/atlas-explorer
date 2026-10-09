@@ -130,6 +130,34 @@ function buildFixture(
 	return { app, settings, index, views, viewId };
 }
 
+/** R1: a vault with a root note linking a block inside a listed folder (`#^blk1`, no containing-file
+ * promotion) and linking a nested folder's interface note inside that same listed folder (promotes
+ * the folder, not `Attachments` itself — see `interfaceNoteFolderFor`). Covers the two unit kinds
+ * G3's own test (file-only) never exercised. */
+function buildBlockAndFolderFixture(noAutoPromoteFolders: string[]) {
+	const app = new App();
+	const files = ["Root.md", "Attachments/Notes.md", "Attachments/Sub/Sub.md"];
+	const folders = ["Attachments", "Attachments/Sub"];
+	seedRoot(app, files, folders);
+	const caches: Record<string, CachedMetadata> = {
+		"Root.md": {
+			links: [
+				{ link: "Attachments/Notes#^blk1", original: "[[Attachments/Notes#^blk1]]" },
+				{ link: "Attachments/Sub/Sub", original: "[[Attachments/Sub/Sub]]" },
+			],
+		} as never,
+	};
+	app.metadataCache.getFileCache = ((f: TFile) => caches[f.path] ?? null) as App["metadataCache"]["getFileCache"];
+	app.metadataCache.getFirstLinkpathDest = ((linkpath: string) =>
+		(app.vault.getAbstractFileByPath(`${linkpath}.md`) ?? app.vault.getAbstractFileByPath(linkpath)) as TFile | null) as App["metadataCache"]["getFirstLinkpathDest"];
+	const settings: AtlasSettings = { ...DEFAULT_SETTINGS, noAutoPromoteFolders };
+	const index = new UnitIndex(app, settings, [], {}, [], []);
+	index.rebuild();
+	const views = new ViewsManager(app, [], "", () => {});
+	const viewId = views.getActiveViewId();
+	return { app, settings, index, views, viewId };
+}
+
 /** The inbox as sorted unit keys, the same keys the explorer's rows are built from. */
 function inboxKeys(units: Unit[]): string[] {
 	return units.map((u) => unitRefKey(unitToRef(u))).sort();
@@ -171,6 +199,19 @@ describe.each(["view", "global"] as const)("inbox lists with noAutoPromoteFolder
 		// Sanity: without the setting every covered link-only unit really is in the inbox.
 		for (const key of LINK_ONLY_COVERED) expect(baseline, key).toContain(key);
 		expect(inbox(withList, mode)).toEqual(baseline.filter((key) => !LINK_ONLY_COVERED.includes(key)));
+	});
+
+	it("G3: drops a link-only promoted-block and a link-only promoted-folder under a listed folder", () => {
+		const without = buildBlockAndFolderFixture([]);
+		const baseline = inbox(without, mode);
+		expect(baseline).toContain("block:Attachments/Notes.md#^blk1");
+		expect(baseline).toContain("folder:Attachments/Sub");
+
+		const withList = buildBlockAndFolderFixture(["Attachments"]);
+		const covered = inbox(withList, mode);
+		expect(covered).not.toContain("block:Attachments/Notes.md#^blk1");
+		expect(covered).not.toContain("folder:Attachments/Sub");
+		expect(covered).toEqual(baseline.filter((key) => key !== "block:Attachments/Notes.md#^blk1" && key !== "folder:Attachments/Sub"));
 	});
 
 	it("G3/E6: a listed nested folder covers only its own sub-tree", () => {
@@ -349,6 +390,22 @@ describe("E4: renames and moves rewrite noAutoPromoteFolders before the index re
 		(plugin as unknown as { handleHiddenMove(o: string, n: string): void }).handleHiddenMove("Attachments", "Media");
 		expect(fx.settings.noAutoPromoteFolders).toEqual(["Media"]);
 		expect(order).toEqual(["save", "views"]);
+	});
+
+	// R3: onVaultRenameEvent and handleHiddenMove rewrite the setting and persist plugin data (saveData,
+	// mocked above) but must never touch the vault itself — rename handling is a pure data-model update.
+	it("R3: onVaultRenameEvent makes no vault write or rename call", () => {
+		const { plugin, fx } = renamePlugin({ noAutoPromoteFolders: ["Attachments"] });
+		const before = fx.app.vault.calls.length;
+		(plugin as unknown as { onVaultRenameEvent(f: TFolder, old: string): void }).onVaultRenameEvent(folderAt("Media"), "Attachments");
+		expect(fx.app.vault.calls.length).toBe(before);
+	});
+
+	it("R3: handleHiddenMove makes no vault write or rename call", () => {
+		const { plugin, fx } = renamePlugin({ noAutoPromoteFolders: ["Attachments"] });
+		const before = fx.app.vault.calls.length;
+		(plugin as unknown as { handleHiddenMove(o: string, n: string): void }).handleHiddenMove("Attachments", "Media");
+		expect(fx.app.vault.calls.length).toBe(before);
 	});
 });
 
