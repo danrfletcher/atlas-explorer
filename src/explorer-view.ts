@@ -709,6 +709,10 @@ export class AtlasExplorerView extends ItemView {
 	 * own `cancelDwell` while its timer is live and clears it again once the timer fires or cancels
 	 * normally via `dragleave`/`drop`. */
 	private cancelActiveDwell: (() => void) | null = null;
+	/** PR-1.S1 R3: which row `cancelActiveDwell` belongs to, if any — lets `drawWindow` tell a dwell on
+	 * a bucket module icon (which stays in the DOM through an inbox redraw) apart from one on an inbox
+	 * row it's about to tear down. Set/cleared alongside `cancelActiveDwell` in `wireModuleRow`. */
+	private activeDwellRow: HTMLElement | null = null;
 	/** G5a: fires refresh-on-view-load exactly once per open/return of this leaf, not on every
 	 * unrelated re-render. */
 	private viewLoadTrigger = new ViewLoadTrigger();
@@ -2674,12 +2678,18 @@ export class AtlasExplorerView extends ItemView {
 			drawnStart = start;
 			drawnEnd = end;
 
-			// A row's module-icon dwell timer dies with its element, and `dragleave` never fires for a
-			// removed node, so cancel any pending dwell before the rows it belongs to are swapped out.
-			this.cancelActiveDwell?.();
 			// The row being dragged is kept in the DOM even when it scrolls out of the window (hidden),
 			// so the browser's drag source survives. Everything else is rebuilt for the new window.
 			const dragged = this.inboxDragRowEl;
+			// A row's module-icon dwell timer dies with its element, and `dragleave` never fires for a
+			// removed node, so cancel any pending dwell before the rows it belongs to are swapped out.
+			// PR-1.S1 R3: only when the dwell actually belongs to a row in this spacer (and isn't the
+			// kept-alive dragged row) — a dwell on a bucket module icon stays valid, since the bucket
+			// isn't touched here, and cancelling it anyway during an inbox-row drag with edge
+			// auto-scroll could drop a dwell the user is legitimately still hovering.
+			if (this.activeDwellRow && this.activeDwellRow !== dragged && spacer.contains(this.activeDwellRow)) {
+				this.cancelActiveDwell?.();
+			}
 			for (const child of Array.from(spacer.children)) {
 				if (child !== dragged) child.remove();
 			}
@@ -3348,14 +3358,19 @@ export class AtlasExplorerView extends ItemView {
 			if (dwellTimer === undefined) return;
 			window.clearTimeout(dwellTimer);
 			dwellTimer = undefined;
-			if (this.cancelActiveDwell === cancelDwell) this.cancelActiveDwell = null;
+			if (this.cancelActiveDwell === cancelDwell) {
+				this.cancelActiveDwell = null;
+				this.activeDwellRow = null;
+			}
 		};
 		const startDwell = () => {
 			if (!this.dragPayload || dwellTimer !== undefined) return;
 			this.cancelActiveDwell = cancelDwell;
+			this.activeDwellRow = row;
 			dwellTimer = window.setTimeout(() => {
 				dwellTimer = undefined;
 				this.cancelActiveDwell = null;
+				this.activeDwellRow = null;
 				this.openModuleContentsModalForDrag(folderPath);
 			}, MODULE_HOVER_DWELL_MS);
 		};
