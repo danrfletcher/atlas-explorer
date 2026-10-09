@@ -17,6 +17,13 @@ function isUsableAddedItem(item: AddedItem): boolean {
 	return !!ref && (ref.kind === "file" || ref.kind === "folder" || ref.kind === "block") && typeof ref.path === "string";
 }
 
+/** PR-1.S1 R3: true for a vault-root path (no `/`). Only vault-root folders are base units (README
+ * "Only vault-root folders are base units"), so a folder rewritten onto one of these paths is no
+ * longer an addable item — it already surfaces as a `folder-unit` with its own placement. */
+function isRootFolderPath(path: string): boolean {
+	return !path.includes("/");
+}
+
 /**
  * In-memory index of every unit in the vault (F2). Rebuilt fully on load, then kept current by
  * two separate incremental paths: vault structure events (create/delete/rename — cheap, O(1) per
@@ -236,7 +243,7 @@ export class UnitIndex {
 
 	/** PR-1.F2 (G10): drops the `addedItems` entry for `ref` (file or folder kind) and nothing else —
 	 * other entries and every dismissal are left as they are, and an unknown ref is a no-op. Only the
-	 * inbox's "(missing)" Remove calls this. Adds to the in-memory list only: the caller persists. */
+	 * inbox's "(missing)" Remove calls this. Changes the in-memory list only: the caller persists. */
 	removeAdded(ref: UnitRef): void {
 		this.addedItems = this.addedItems.filter((item) => !(isUsableAddedItem(item) && unitRefsEqual(item.ref, ref)));
 	}
@@ -501,7 +508,7 @@ export class UnitIndex {
 				continue;
 			}
 			addedChanged = true;
-			if (item.ref.kind === "folder" && !rewritten.path.includes("/")) continue;
+			if (item.ref.kind === "folder" && isRootFolderPath(rewritten.path)) continue;
 			rewrittenAdded.push({ ...item, ref: rewritten });
 		}
 		if (addedChanged) {
