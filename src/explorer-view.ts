@@ -1833,7 +1833,7 @@ export class AtlasExplorerView extends ItemView {
 					if (this.matchesFilter(info.text)) bypass = true;
 				}
 				if (!bypass && this.apiItemsMatchFilter(node)) bypass = true;
-				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children))) bypass = true;
+				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children, view))) bypass = true;
 			}
 			resolved.push({ node, status, governor, bypass, ancestors: rowAncestors });
 		}
@@ -2150,9 +2150,15 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR 9 (issue 6): does this subtree contain a unit whose resolved text matches the active
-	 * filter? Used to force-reveal a folder that would otherwise hide a match behind a stale fold. */
-	private async subtreeHasMatch(nodes: ViewNode[]): Promise<boolean> {
+	 * filter? Used to force-reveal a folder that would otherwise hide a match behind a stale fold.
+	 *
+	 * PR-1.F2 R1 fix: a row hidden by its Folder source's YAML rules (`managedRowFilterState` ===
+	 * "hidden") never renders at all (G12), so a match found only inside it must not count here either
+	 * — otherwise a filter match the user can never see would still force-expand or un-truncate its
+	 * ancestors for nothing. */
+	private async subtreeHasMatch(nodes: ViewNode[], view: View): Promise<boolean> {
 		for (const n of nodes) {
+			if (this.plugin.viewsManager.managedRowFilterState(view.id, n) === "hidden") continue;
 			if (n.type === "unit" && n.ref) {
 				const info = await this.resolveRef(n.ref);
 				if (this.matchesFilter(info.text)) return true;
@@ -2160,7 +2166,7 @@ export class AtlasExplorerView extends ItemView {
 			// R18: a Folder's API rows are its rows too, just not `ViewNode` children (G10) — a filter
 			// match among them must force-reveal the Folder the same as a matching real descendant would.
 			if (this.apiItemsMatchFilter(n)) return true;
-			if (n.children.length > 0 && (await this.subtreeHasMatch(n.children))) return true;
+			if (n.children.length > 0 && (await this.subtreeHasMatch(n.children, view))) return true;
 		}
 		return false;
 	}
@@ -2195,7 +2201,7 @@ export class AtlasExplorerView extends ItemView {
 		if (filterActive) {
 			if (!this.preFilterCollapsedState) this.preFilterCollapsedState = new Map();
 			if (!this.preFilterCollapsedState.has(node.id)) this.preFilterCollapsedState.set(node.id, node.collapsed);
-			if ((await this.subtreeHasMatch(node.children)) || this.apiItemsMatchFilter(node)) effectiveCollapsed = false;
+			if ((await this.subtreeHasMatch(node.children, view)) || this.apiItemsMatchFilter(node)) effectiveCollapsed = false;
 		}
 		setIcon(chevron, effectiveCollapsed ? "chevron-right" : "chevron-down");
 
