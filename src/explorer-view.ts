@@ -3093,11 +3093,13 @@ export class AtlasExplorerView extends ItemView {
 		menu.addSeparator();
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
 		// PR-4 (G4-G6): the only removal mechanism for any inbox row, auto-promoted or manually-added
-		// (PR-3) alike — there is no separate "remove"/"un-add" item anywhere in this menu (F1). Outside
-		// Global view this only ever touches the current view's own dismiss set; invoked while the
-		// explorer is showing Global view it writes the single global-scope entry instead (G5), which
-		// `getInboxUnits`' dismissed-OR-check (view-scope reads global-or-own-view, global-scope reads
-		// only the global set) then applies at render time for every view, including ones never opened.
+		// (PR-3) alike — dismiss is the underlying write regardless of provenance (F1); the label below
+		// now reads "Remove" for added rows instead of "Dismiss" (Polish R1, PR-4 finding), but that is
+		// a label override only, not a second mechanism. Outside Global view this only ever touches the
+		// current view's own dismiss set; invoked while the explorer is showing Global view it writes
+		// the single global-scope entry instead (G5), which `getInboxUnits`' dismissed-OR-check
+		// (view-scope reads global-or-own-view, global-scope reads only the global set) then applies at
+		// render time for every view, including ones never opened.
 		// Polish R1 (PR-5 finding): a row already dismissed-and-revealed (via "Show Dismissed") gets
 		// an "Unhide" item that flips the same dismiss flag back off, instead of a second "Dismiss"
 		// that would just no-op. "hidden" is derived the same way `ViewsManager.getDismissedInboxUnits`
