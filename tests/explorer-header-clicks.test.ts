@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeSectionHarness, SectionHarness } from "./explorer-header-fixtures";
+import { makeSectionHarness, SectionHarness, VIEWPORT_H } from "./explorer-header-fixtures";
 
 // PR-1.F1: header click behaviour on the rendered panel. Geometry as in explorer-sticky-headers.test.ts:
 // bucket 60 rows (inbox at 1708), inbox 25 rows, 300px viewport, max scroll 2136.
@@ -8,6 +8,10 @@ const WAIT = 160;
 const INBOX_TOP = 28 + 60 * 28;
 const INBOX_TARGET = INBOX_TOP - 28; // inbox header directly under the stacked bucket header
 const MAX_SCROLL = 2136;
+// Once the inbox's own rows collapse away, the scrollable range shrinks to just the bucket plus
+// the (now childless) inbox header, so the settle clamps to this smaller maximum instead of
+// reaching INBOX_TARGET.
+const INBOX_COLLAPSED_MAX_SCROLL = INBOX_TOP + 28 - VIEWPORT_H;
 
 let h: SectionHarness;
 
@@ -46,12 +50,12 @@ describe("chevron (G6, G7)", () => {
 		expect(h.scrollCalls).toEqual([]);
 	});
 
-	it("collapsing the bucket while deep settles smoothly with the bucket at the top and the inbox right under it (G7, E5)", () => {
+	it("collapsing the bucket while deep settles instantly with the bucket at the top and the inbox right under it (G7, E5)", () => {
 		h.scrollTo(1500);
 		h.scrollCalls.length = 0;
 		h.bucketChevron().click();
 		// Collapsed content is 28 + 700 rows tall, so the settle target is the top of the body.
-		expect(h.scrollCalls).toEqual([{ top: 0, behavior: "smooth" }]);
+		expect(h.scrollCalls).toEqual([{ top: 0, behavior: "auto" }]);
 		expect(h.body().scrollTop).toBe(0);
 		expect(h.inboxHeader().style.transform).toBe("");
 	});
@@ -62,6 +66,22 @@ describe("chevron (G6, G7)", () => {
 		h.bucketChevron().click();
 		expect(h.body().scrollTop).toBeLessThanOrEqual(0 + 1);
 		expect(h.scrollCalls.every((c) => c.top <= 0)).toBe(true);
+	});
+
+	// PR-1.F1 R3: the settle scroll used to be `behavior: "smooth"` outside reduced motion, racing the
+	// section's own CSS collapse transition (which shrinks the scrollable content underneath it over the
+	// same ~160ms). The browser's forced scrollTop clamp as the content shrank could win that race and
+	// land below the target instead of at it. Settling instantly removes the race entirely.
+	it("the inbox chevron collapse settles instantly, not smoothly, so the CSS collapse transition can't clamp it mid-flight (R3)", () => {
+		h.scrollTo(1800);
+		h.scrollCalls.length = 0;
+		h.inboxChevron().click();
+		// Deep in the inbox, collapsing it shrinks the scrollable range below INBOX_TARGET, so the
+		// settle clamps to the smaller collapsed maximum — this is the "ends at the bottom edge, not
+		// stacked" case R3 describes. The fix is that the one scroll call lands straight there with
+		// behavior "auto", instead of racing a "smooth" scroll against the collapse's own shrink.
+		expect(h.scrollCalls).toEqual([{ top: INBOX_COLLAPSED_MAX_SCROLL, behavior: "auto" }]);
+		expect(h.body().scrollTop).toBe(INBOX_COLLAPSED_MAX_SCROLL);
 	});
 });
 

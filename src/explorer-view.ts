@@ -1594,7 +1594,15 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-1.F1 (G6, G7): only the chevron collapses or expands its section. Collapsing while the panel
 	 * is scrolled past the section's stuck position settles it there, so no landing mid-inbox. Expanding
-	 * doesn't scroll. */
+	 * doesn't scroll.
+	 *
+	 * PR-1.F1 R3: the settle is always instant, never smooth. The section's own CSS collapse transition
+	 * (grid-template-rows, COLLAPSE_TRANSITION_MS) is shrinking the scrollable content under the browser's
+	 * feet at the same time a `behavior: "smooth"` scroll would be easing toward the target. The browser
+	 * clamps scrollTop to the shrinking max every frame of that transition regardless of what our smooth
+	 * scroll wants, so the two fight and the panel can settle below the target (inbox header pinned at the
+	 * bottom edge) instead of at it (stacked under the bucket header), with the clamp making the smooth
+	 * scroll look like a snap anyway. Jumping straight there has no such race. */
 	private onSectionChevronClick(key: SectionKey, parts: SectionParts): void {
 		this.sectionClickSeq++;
 		const collapsed = !this.isSectionCollapsed(key);
@@ -1602,7 +1610,7 @@ export class AtlasExplorerView extends ItemView {
 		if (!collapsed) return;
 		// `min`: a section collapsed while the panel is above its stuck position stays where it is.
 		const current = this.stickyEls?.body.scrollTop ?? 0;
-		this.scrollSectionsTo(Math.min(current, this.sectionStuckTarget(key)), prefersReducedMotion());
+		this.scrollSectionsTo(Math.min(current, this.sectionStuckTarget(key)), true);
 	}
 
 	/** PR-1.F1 (G5, E4, GP4-GP7): a title click scrolls its section to the stuck position. A collapsed
