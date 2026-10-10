@@ -226,9 +226,11 @@ export class UnitIndex {
 		return !this.manualPromotions.some((manual) => unitRefsEqual(manual, ref));
 	}
 
-	/** No corresponding "unmark added" — per F1, dismiss is the only removal mechanism for every
-	 * inbox item regardless of how it got there, including one added via "+". Accepts a folder ref
-	 * (PR-1.S1, G2) as well as a file ref. Adds to the in-memory list only: the caller persists. */
+	/** No corresponding "unmark added" — per F1, dismiss is still the only removal write for every
+	 * inbox item regardless of how it got there, including one added via "+"; the inbox menu's
+	 * "Remove" label for added rows (Polish R1, PR-4 finding) overrides only the label, not this.
+	 * Accepts a folder ref (PR-1.S1, G2) as well as a file ref. Adds to the in-memory list only: the
+	 * caller persists. */
 	markAdded(ref: UnitRef): void {
 		if (this.isAdded(ref)) return;
 		this.addedItems.push({ ref, tag: "added" });
