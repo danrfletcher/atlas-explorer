@@ -99,27 +99,41 @@ describe("rendered headers follow the same rules (G3, E2)", () => {
 		h.scrollTo(1000);
 		expect(h.bucketHeader().style.transform).toBe("translateY(1000px)");
 		expect(h.inboxHeader().style.transform).toBe(`translateY(${1000 + VIEWPORT - HEADER - INBOX_TOP}px)`);
-		expect(h.body().style.scrollPaddingTop).toBe(`${HEADER + HEADER}px`);
+		// PR-1.F1 R2: scrollTop 1000 is the "pinned" state (see the table above) — only the bucket
+		// header is stuck over the top of the content, so the top padding is its height alone; the
+		// pinned inbox header instead covers content at the bottom edge, so that's a bottom padding.
+		expect(h.body().style.scrollPaddingTop).toBe(`${HEADER}px`);
+		expect(h.body().style.scrollPaddingBottom).toBe(`${HEADER}px`);
 
 		h.setViewportHeight(ROW + HEADER + HEADER - 1);
 		h.fireResize();
 		expect(h.bucketHeader().style.transform).toBe("");
 		expect(h.inboxHeader().style.transform).toBe("");
 		expect(h.body().style.scrollPaddingTop).toBe("0px");
+		expect(h.body().style.scrollPaddingBottom).toBe("0px");
 
 		h.setViewportHeight(ROW + HEADER + HEADER);
 		h.fireResize();
 		expect(h.bucketHeader().style.transform).toBe("translateY(1000px)");
 	});
 
+	it("stacks both header heights into the top padding only once the inbox header is itself stacked under the bucket header", async () => {
+		h = makeSectionHarness();
+		await h.render();
+		// 1681 is "inbox passes under the bucket header: stacked" in the table above.
+		h.scrollTo(1681);
+		expect(h.body().style.scrollPaddingTop).toBe(`${HEADER + HEADER}px`);
+		expect(h.body().style.scrollPaddingBottom).toBe("0px");
+	});
+
 	it("updates scroll-padding-top when a header's height changes, without a reload", async () => {
 		h = makeSectionHarness();
 		await h.render();
 		h.scrollTo(1000);
-		expect(h.body().style.scrollPaddingTop).toBe("56px");
+		expect(h.body().style.scrollPaddingTop).toBe("28px");
 
 		h.setHeaderHeight(40);
 		h.fireResize();
-		expect(h.body().style.scrollPaddingTop).toBe("80px");
+		expect(h.body().style.scrollPaddingTop).toBe("40px");
 	});
 });

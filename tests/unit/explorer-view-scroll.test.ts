@@ -122,6 +122,62 @@ describe("PR-1.S1 — G9/E3: restore before the first inbox draw", () => {
 		expect(h.inboxRowKeys()).toContain(keyAt(units, 900));
 		expect(h.inboxRowKeys()).not.toContain(keyAt(units, 1400 / ROW));
 	});
+
+	it("restores scrollTop right after the bucket renders, not only once the inbox section runs (R2)", async () => {
+		const units = fileUnits(2000);
+		// A tall stubbed bucket (bigger than the target scrollTop) so the restore right after the
+		// bucket renders isn't itself clamped to 0 for lack of a scrollHeight yet — the inbox spacer
+		// that would normally supply the rest of it doesn't exist until the inbox section runs.
+		const h = setup(units, { viewportHeight: 280, bucketHeight: 2000 });
+		await render(h.explorer);
+		scrollTo(h, 1400);
+		await render(h.explorer);
+
+		const explorer = h.explorer as unknown as {
+			renderInboxSection: (...args: unknown[]) => Promise<void>;
+		};
+		const realRenderInboxSection = explorer.renderInboxSection.bind(explorer);
+		let scrollTopAtInboxStart = -1;
+		explorer.renderInboxSection = (...args: unknown[]) => {
+			scrollTopAtInboxStart = h.scrollBody().scrollTop;
+			return realRenderInboxSection(...args);
+		};
+
+		await render(h.explorer);
+		// The bucket section has already resolved by this point, so the restore must have already
+		// happened — the inbox section's own resolveRef calls should never see the fresh body at 0.
+		expect(scrollTopAtInboxStart).toBe(1400);
+	});
+
+	it("clears pendingScrollTop even when a render throws, so a later render restores the live scroll position (R6)", async () => {
+		const units = fileUnits(2000);
+		// A tall stubbed bucket so a manual scroll right after the failed render (before the inbox
+		// section — and its spacer — ever runs again) isn't itself clamped to 0.
+		const h = setup(units, { viewportHeight: 280, bucketHeight: 3000 });
+		await render(h.explorer);
+		scrollTo(h, 1000);
+		await render(h.explorer);
+		expect(h.scrollBody().scrollTop).toBe(1000);
+
+		const explorer = h.explorer as unknown as {
+			renderBucketSection: (...args: unknown[]) => Promise<void>;
+		};
+		const realRenderBucketSection = explorer.renderBucketSection.bind(explorer);
+		explorer.renderBucketSection = async (...args: unknown[]) => {
+			await realRenderBucketSection(...args);
+			throw new Error("boom");
+		};
+
+		await expect(render(h.explorer)).rejects.toThrow("boom");
+
+		// No render is in flight now; the user scrolls to a new position on their own.
+		scrollTo(h, 2000);
+
+		explorer.renderBucketSection = realRenderBucketSection;
+		await render(h.explorer);
+		// A stale pendingScrollTop left over from the throw would override this with the old 1000.
+		expect(h.scrollBody().scrollTop).toBe(2000);
+	});
 });
 
 describe("PR-1.S1 — G2/E9: the inbox redraws on scroll and on offset change", () => {
@@ -269,6 +325,7 @@ describe("PR-1.S1 — G11/E8: a dragged inbox row survives virtual redraws", () 
 			registerDomEvent: (el: Element | Window, type: string, cb: () => void) => void;
 			dragPayload: unknown;
 			cancelActiveDwell: (() => void) | null;
+			activeDwellRow: HTMLElement | null;
 			queueRender: () => void;
 			onOpen: () => Promise<void>;
 		};
@@ -286,6 +343,10 @@ describe("PR-1.S1 — G11/E8: a dragged inbox row survives virtual redraws", () 
 
 		const dwell = vi.fn();
 		explorer.cancelActiveDwell = dwell;
+		// PR-1.S1 R3: the dwell under test here belongs to another inbox row (one that's about to be
+		// swapped out by the redraw below), not the dragged row itself — see the dedicated test further
+		// down for a dwell on a bucket row, which a redraw like this one must leave alone.
+		explorer.activeDwellRow = h.panel().querySelector<HTMLElement>(`.atlas-inbox [data-ref-key="${keyAt(units, 0)}"]`)!;
 		const setCssStyles = vi.spyOn(row, "setCssStyles");
 		scrollTo(h, ROW * 1000); // auto-scroll far away from the dragged row
 		expect(dwell).toHaveBeenCalled();
@@ -340,5 +401,92 @@ describe("PR-1.S1 — G11/E8: a dragged inbox row survives virtual redraws", () 
 		expect(row.closest(".atlas-explorer-scroll")).toBe(body);
 		expect(explorer.dragPayload).not.toBeNull();
 		expect(h.inboxRowKeys()).toContain(keyAt(units, 400));
+	});
+
+	it("leaves a dwell on a bucket row alone when the inbox window redraws (R3)", async () => {
+		const units = fileUnits(2000);
+		const h = setup(units);
+		const registered: (() => void)[] = [];
+		const explorer = h.explorer as unknown as {
+			registerEvent: (ref: unknown) => void;
+			registerDomEvent: (el: Element | Window, type: string, cb: () => void) => void;
+			cancelActiveDwell: (() => void) | null;
+			activeDwellRow: HTMLElement | null;
+			onOpen: () => Promise<void>;
+		};
+		explorer.registerEvent = vi.fn();
+		explorer.registerDomEvent = (el, type, cb) => {
+			el.addEventListener(type, cb);
+			registered.push(() => el.removeEventListener(type, cb));
+		};
+		cleanups.push(() => registered.forEach((fn) => fn()));
+		await explorer.onOpen();
+
+		// A dwell target in the bucket section (stubbed as `.atlas-node-list`), not in the inbox
+		// spacer at all, so an inbox window redraw must never cancel it.
+		const bucketEl = h.panel().querySelector<HTMLElement>(".atlas-node-list")!;
+		const dwell = vi.fn();
+		explorer.cancelActiveDwell = dwell;
+		explorer.activeDwellRow = bucketEl;
+
+		scrollTo(h, ROW * 1000); // the inbox window changes; the bucket is untouched
+		expect(dwell).not.toHaveBeenCalled();
+		expect(explorer.activeDwellRow).toBe(bucketEl);
+	});
+
+	it("clears dragPayload when a render tears down the dragged row mid-drag (R4 hardening)", async () => {
+		const units = fileUnits(2000);
+		const h = setup(units);
+		const registered: (() => void)[] = [];
+		const explorer = h.explorer as unknown as {
+			registerEvent: (ref: unknown) => void;
+			registerDomEvent: (el: Element | Window, type: string, cb: () => void) => void;
+			dragPayload: unknown;
+			onOpen: () => Promise<void>;
+		};
+		explorer.registerEvent = vi.fn();
+		explorer.registerDomEvent = (el, type, cb) => {
+			el.addEventListener(type, cb);
+			registered.push(() => el.removeEventListener(type, cb));
+		};
+		cleanups.push(() => registered.forEach((fn) => fn()));
+		await explorer.onOpen();
+
+		const row = h.panel().querySelector<HTMLElement>(`.atlas-inbox [data-ref-key="${keyAt(units, 5)}"]`)!;
+		row.dispatchEvent(new Event("dragstart"));
+		expect(explorer.dragPayload).not.toBeNull();
+
+		// A render while the drag is still active (an index refresh, say) tears the source row out
+		// from under the drag; the window `dragend` backstop may never fire for it, so render() must
+		// clear the stale drag state itself instead of leaving it to dangle.
+		await render(h.explorer);
+		expect(explorer.dragPayload).toBeNull();
+	});
+
+	it("removes a hidden dragged row immediately on dragend, instead of waiting for the next redraw (R5)", async () => {
+		const units = fileUnits(2000);
+		const h = setup(units);
+		const registered: (() => void)[] = [];
+		const explorer = h.explorer as unknown as {
+			registerEvent: (ref: unknown) => void;
+			registerDomEvent: (el: Element | Window, type: string, cb: () => void) => void;
+			onOpen: () => Promise<void>;
+		};
+		explorer.registerEvent = vi.fn();
+		explorer.registerDomEvent = (el, type, cb) => {
+			el.addEventListener(type, cb);
+			registered.push(() => el.removeEventListener(type, cb));
+		};
+		cleanups.push(() => registered.forEach((fn) => fn()));
+		await explorer.onOpen();
+
+		const row = h.panel().querySelector<HTMLElement>(`.atlas-inbox [data-ref-key="${keyAt(units, 5)}"]`)!;
+		row.dispatchEvent(new Event("dragstart"));
+		scrollTo(h, ROW * 1000); // scrolls the dragged row out of the window: hidden, not removed
+		expect(row.style.display).toBe("none");
+		expect(row.isConnected).toBe(true);
+
+		window.dispatchEvent(new Event("dragend"));
+		expect(row.isConnected).toBe(false);
 	});
 });

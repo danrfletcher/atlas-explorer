@@ -627,7 +627,6 @@ export class AtlasExplorerView extends ItemView {
 	/** PR-1.F1: bumped by every header click, so a title scroll still waiting for an expansion is
 	 * dropped once a newer click supersedes it (E4, chevron-then-title). */
 	private sectionClickSeq = 0;
-	private stickyFrameQueued = false;
 	/** Redraws the inbox's virtual window for the current render. Null between renders and after
 	 * close, so a stale scroll/resize callback from a previous render can never draw into the DOM. */
 	private inboxRedraw: (() => void) | null = null;
@@ -709,6 +708,10 @@ export class AtlasExplorerView extends ItemView {
 	 * own `cancelDwell` while its timer is live and clears it again once the timer fires or cancels
 	 * normally via `dragleave`/`drop`. */
 	private cancelActiveDwell: (() => void) | null = null;
+	/** PR-1.S1 R3: which row `cancelActiveDwell` belongs to, if any — lets `drawWindow` tell a dwell on
+	 * a bucket module icon (which stays in the DOM through an inbox redraw) apart from one on an inbox
+	 * row it's about to tear down. Set/cleared alongside `cancelActiveDwell` in `wireModuleRow`. */
+	private activeDwellRow: HTMLElement | null = null;
 	/** G5a: fires refresh-on-view-load exactly once per open/return of this leaf, not on every
 	 * unrelated re-render. */
 	private viewLoadTrigger = new ViewLoadTrigger();
@@ -776,6 +779,14 @@ export class AtlasExplorerView extends ItemView {
 		// timer) whenever a drag ends, regardless of how.
 		this.registerDomEvent(window, "dragend", () => {
 			this.dragPayload = null;
+			// PR-1.S1 R5: if the drag ends while the row is scrolled out of the window, it's sitting
+			// hidden (`display:none`) in the spacer purely so the browser's drag source survived it
+			// scrolling off-screen (F11/E8) — nothing needs it kept around once the drag itself is over,
+			// so drop it now instead of leaving a hidden leftover for `drawWindow`'s next unrelated window
+			// change to clean up. A row still visible in the current window is left alone: it's exactly
+			// the row the next real render would draw again anyway, so removing it here would just be an
+			// unnecessary flash before that render replaces it.
+			if (this.inboxDragRowEl?.style.display === "none") this.inboxDragRowEl.remove();
 			this.inboxDragRowEl = null;
 			this.cancelActiveDwell?.();
 			// PR 20 follow-up (reviewer-caught, A27): a successful drop already repaints via
@@ -1362,6 +1373,14 @@ export class AtlasExplorerView extends ItemView {
 		// body is rebuilt, and reset to 0 only on a genuine view switch (below). If another render is
 		// still in flight, its target wins: the live body may not have been restored yet.
 		const scrollTop = this.pendingScrollTop ?? container.querySelector<HTMLElement>(".atlas-explorer-scroll")?.scrollTop ?? 0;
+		if (this.inboxDragRowEl) {
+			// PR-1.S1 R4 hardening: `container.empty()` below is about to detach the dragged row (an
+			// index refresh mid-drag, say). Once it's detached, the window-level `dragend` backstop
+			// (registered in `onOpen`) never fires on it, so the drag would otherwise leak as a live,
+			// orphaned payload that outlives the gesture. Clear it here too, same as that backstop does.
+			this.dragPayload = null;
+			this.cancelActiveDwell?.();
+		}
 		this.inboxLayoutObserver?.disconnect();
 		this.inboxLayoutObserver = null;
 		this.inboxRedraw = null;
@@ -1426,40 +1445,58 @@ export class AtlasExplorerView extends ItemView {
 
 		const scrollBody = container.createDiv({ cls: "atlas-explorer-scroll" });
 		const bucketEl = scrollBody.createDiv({ cls: "atlas-section atlas-bucket" });
-		await this.renderBucketSection(bucketEl, view);
-		if (!isCurrent()) return;
+		try {
+			await this.renderBucketSection(bucketEl, view);
+			if (!isCurrent()) return;
+			// PR-1.S1 R2: restored here too, straight after the bucket is built, not only inside
+			// `renderVirtualizedInboxRows` below — if the inbox's `resolveRef` calls it awaits ever wait
+			// on real I/O, a frame could otherwise paint at scrollTop 0 before the inbox section jumps
+			// back (the window doesn't have its full scroll height yet at this point, so this can still
+			// get clamped short; `renderVirtualizedInboxRows` sets it again once the inbox spacer gives
+			// the body its true height).
+			scrollBody.scrollTop = restoreScrollTop;
 
-		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
-		// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
-		// the merged/sorted list at all, matching G8's "renders inline in the existing list" via an
-		// extra input set rather than a post-filter that would still momentarily touch every dismissed row.
-		const dismissedUnits = this.showDismissed
-			? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
-			: [];
-		const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
-		await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
-		if (!isCurrent()) return;
-		// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
-		// so later renders can read it from the DOM again.
-		this.pendingScrollTop = null;
-		// Both sections always render their header; a render without them has nothing to stack.
-		const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
-		const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
-		this.stickyEls = bucketHeader && inboxHeader ? { body: scrollBody, bucketEl, bucketHeader, inboxEl, inboxHeader } : null;
-		this.observeInboxLayout(container, scrollBody, bucketEl);
-		this.updateStickyHeaders();
+			const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
+			// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
+			// the merged/sorted list at all, matching G8's "renders inline in the existing list" via an
+			// extra input set rather than a post-filter that would still momentarily touch every dismissed row.
+			const dismissedUnits = this.showDismissed
+				? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
+				: [];
+			const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
+			await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
+			if (!isCurrent()) return;
+			// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
+			// so later renders can read it from the DOM again.
+			this.pendingScrollTop = null;
+			// Both sections always render their header; a render without them has nothing to stack.
+			const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+			const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+			this.stickyEls = bucketHeader && inboxHeader ? { body: scrollBody, bucketEl, bucketHeader, inboxEl, inboxHeader } : null;
+			this.observeInboxLayout(container, scrollBody, bucketEl);
+			this.updateStickyHeaders();
 
-		if (activeRowKey) {
-			const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
-			// `preventScroll` — this row's own visible position (and the scroll position that shows
-			// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
-			// would otherwise fight that by scrolling to whatever the browser's own default
-			// focus-into-view behavior decides, undoing the fix just above it.
-			restored?.focus({ preventScroll: true });
+			if (activeRowKey) {
+				const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
+				// `preventScroll` — this row's own visible position (and the scroll position that shows
+				// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
+				// would otherwise fight that by scrolling to whatever the browser's own default
+				// focus-into-view behavior decides, undoing the fix just above it.
+				restored?.focus({ preventScroll: true });
+			}
+
+			this.updateActiveHighlight();
+			this.syncRefreshTimers(view);
+		} finally {
+			// PR-1.S1 R6: if `renderBucketSection`/`renderInboxSection` throws (a rejected `resolveRef`,
+			// say) between setting `pendingScrollTop` above and clearing it above, it would otherwise
+			// stay set forever — every later render restoring that one stale value instead of the
+			// user's live scroll position. Guarded on `isCurrent()`: a superseded render's `finally` must
+			// not clear the field out from under whichever later render is still relying on it as its
+			// own restore target (see the comment where `pendingScrollTop` is read, at the top of this
+			// method).
+			if (isCurrent()) this.pendingScrollTop = null;
 		}
-
-		this.updateActiveHighlight();
-		this.syncRefreshTimers(view);
 	}
 
 	/** PR-1.S1: a ResizeObserver on the fixed part of the panel, the scroll body and the bucket. Those
@@ -1481,22 +1518,17 @@ export class AtlasExplorerView extends ItemView {
 			observer.observe(this.stickyEls.inboxHeader);
 		}
 		this.inboxLayoutObserver = observer;
-		scrollBody.addEventListener("scroll", () => this.scheduleStickyUpdate());
-	}
-
-	private scheduleStickyUpdate(): void {
-		if (this.stickyFrameQueued) return;
-		this.stickyFrameQueued = true;
-		window.requestAnimationFrame(() => {
-			this.stickyFrameQueued = false;
-			this.updateStickyHeaders();
-		});
+		// PR-1.F1 R1: synchronous, not rAF-scheduled — `scroll` already fires at most once per frame
+		// (the compositor-driven scroll itself is what's already a frame ahead of this handler), so
+		// queuing the header move into a further rAF only adds a second frame of lag behind the content,
+		// visible as jitter during fast trackpad scrolls.
+		scrollBody.addEventListener("scroll", () => this.updateStickyHeaders());
 	}
 
 	/** PR-1.F1 (G3, G4, E2): moves the two section headers for the body's current scroll. Headers stay
 	 * in normal flow and are shifted with a transform, so section layout and the inbox window never
-	 * change. Also keeps `scroll-padding-top` at the stacked header height, so a programmatic scroll
-	 * never hides a row behind them. */
+	 * change. Also keeps `scroll-padding-top`/`scroll-padding-bottom` clear of whichever headers are
+	 * currently stuck over the content, so a programmatic scroll never hides a row behind them. */
 	private updateStickyHeaders(): void {
 		const s = this.stickyEls;
 		if (!s || !s.body.isConnected) return;
@@ -1517,7 +1549,14 @@ export class AtlasExplorerView extends ItemView {
 		});
 		s.bucketHeader.style.transform = layout.bucketY === bucketTop ? "" : `translateY(${layout.bucketY - bucketTop}px)`;
 		s.inboxHeader.style.transform = layout.inboxY === inboxTop ? "" : `translateY(${layout.inboxY - inboxTop}px)`;
-		s.body.style.scrollPaddingTop = layout.stuck ? `${bucketHeaderHeight + inboxHeaderHeight}px` : "0px";
+		// PR-1.F1 R2: the bucket header is the only one stuck over the top of the content in the
+		// "pinned" and (unstuck-inbox) "flow" sub-states — the stacked height only applies while the
+		// inbox header has *also* moved to sit directly under it. A pinned inbox header instead covers
+		// content at the bottom edge, so that's a bottom padding, not a (too-large) top one.
+		const topPadding = !layout.stuck ? 0 : layout.inboxPosition === "stacked" ? bucketHeaderHeight + inboxHeaderHeight : bucketHeaderHeight;
+		const bottomPadding = layout.stuck && layout.inboxPosition === "pinned" ? inboxHeaderHeight : 0;
+		s.body.style.scrollPaddingTop = `${topPadding}px`;
+		s.body.style.scrollPaddingBottom = `${bottomPadding}px`;
 	}
 
 	/** PR-1.F1 (G5): where a section's header belongs once stuck: the bucket at the top, the inbox
@@ -1555,7 +1594,15 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-1.F1 (G6, G7): only the chevron collapses or expands its section. Collapsing while the panel
 	 * is scrolled past the section's stuck position settles it there, so no landing mid-inbox. Expanding
-	 * doesn't scroll. */
+	 * doesn't scroll.
+	 *
+	 * PR-1.F1 R3: the settle is always instant, never smooth. The section's own CSS collapse transition
+	 * (grid-template-rows, COLLAPSE_TRANSITION_MS) is shrinking the scrollable content under the browser's
+	 * feet at the same time a `behavior: "smooth"` scroll would be easing toward the target. The browser
+	 * clamps scrollTop to the shrinking max every frame of that transition regardless of what our smooth
+	 * scroll wants, so the two fight and the panel can settle below the target (inbox header pinned at the
+	 * bottom edge) instead of at it (stacked under the bucket header), with the clamp making the smooth
+	 * scroll look like a snap anyway. Jumping straight there has no such race. */
 	private onSectionChevronClick(key: SectionKey, parts: SectionParts): void {
 		this.sectionClickSeq++;
 		const collapsed = !this.isSectionCollapsed(key);
@@ -1563,7 +1610,7 @@ export class AtlasExplorerView extends ItemView {
 		if (!collapsed) return;
 		// `min`: a section collapsed while the panel is above its stuck position stays where it is.
 		const current = this.stickyEls?.body.scrollTop ?? 0;
-		this.scrollSectionsTo(Math.min(current, this.sectionStuckTarget(key)), prefersReducedMotion());
+		this.scrollSectionsTo(Math.min(current, this.sectionStuckTarget(key)), true);
 	}
 
 	/** PR-1.F1 (G5, E4, GP4-GP7): a title click scrolls its section to the stuck position. A collapsed
@@ -2656,12 +2703,18 @@ export class AtlasExplorerView extends ItemView {
 			drawnStart = start;
 			drawnEnd = end;
 
-			// A row's module-icon dwell timer dies with its element, and `dragleave` never fires for a
-			// removed node, so cancel any pending dwell before the rows it belongs to are swapped out.
-			this.cancelActiveDwell?.();
 			// The row being dragged is kept in the DOM even when it scrolls out of the window (hidden),
 			// so the browser's drag source survives. Everything else is rebuilt for the new window.
 			const dragged = this.inboxDragRowEl;
+			// A row's module-icon dwell timer dies with its element, and `dragleave` never fires for a
+			// removed node, so cancel any pending dwell before the rows it belongs to are swapped out.
+			// PR-1.S1 R3: only when the dwell actually belongs to a row in this spacer (and isn't the
+			// kept-alive dragged row) — a dwell on a bucket module icon stays valid, since the bucket
+			// isn't touched here, and cancelling it anyway during an inbox-row drag with edge
+			// auto-scroll could drop a dwell the user is legitimately still hovering.
+			if (this.activeDwellRow && this.activeDwellRow !== dragged && spacer.contains(this.activeDwellRow)) {
+				this.cancelActiveDwell?.();
+			}
 			for (const child of Array.from(spacer.children)) {
 				if (child !== dragged) child.remove();
 			}
@@ -3330,14 +3383,19 @@ export class AtlasExplorerView extends ItemView {
 			if (dwellTimer === undefined) return;
 			window.clearTimeout(dwellTimer);
 			dwellTimer = undefined;
-			if (this.cancelActiveDwell === cancelDwell) this.cancelActiveDwell = null;
+			if (this.cancelActiveDwell === cancelDwell) {
+				this.cancelActiveDwell = null;
+				this.activeDwellRow = null;
+			}
 		};
 		const startDwell = () => {
 			if (!this.dragPayload || dwellTimer !== undefined) return;
 			this.cancelActiveDwell = cancelDwell;
+			this.activeDwellRow = row;
 			dwellTimer = window.setTimeout(() => {
 				dwellTimer = undefined;
 				this.cancelActiveDwell = null;
+				this.activeDwellRow = null;
 				this.openModuleContentsModalForDrag(folderPath);
 			}, MODULE_HOVER_DWELL_MS);
 		};
