@@ -1114,10 +1114,13 @@ export class ViewsManager {
 	 * write"), while view mode reads that view's own set OR'd with the global set (so a Global-view
 	 * dismiss cascades here without this method needing to enumerate views itself). */
 	getInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex?: UnitIndex): Unit[] {
-		const placed =
-			mode === "global"
-				? allUnits.filter((u) => !this.isPlacedAnywhere(unitToRef(u)))
-				: allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		let placed: Unit[];
+		if (mode === "global") {
+			const placedKeys = this.placedRefKeys();
+			placed = allUnits.filter((u) => !placedKeys.has(unitRefKey(unitToRef(u))));
+		} else {
+			placed = allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		}
 		if (!unitIndex) return placed;
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
@@ -1132,10 +1135,13 @@ export class ViewsManager {
 	 * dismiss set; view reads that view's own set OR'd with global), so toggling never reveals a row
 	 * that `getInboxUnits` wouldn't otherwise have hidden for the same `(viewId, mode)`. */
 	getDismissedInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex: UnitIndex): Unit[] {
-		const placed =
-			mode === "global"
-				? allUnits.filter((u) => !this.isPlacedAnywhere(unitToRef(u)))
-				: allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		let placed: Unit[];
+		if (mode === "global") {
+			const placedKeys = this.placedRefKeys();
+			placed = allUnits.filter((u) => !placedKeys.has(unitRefKey(unitToRef(u))));
+		} else {
+			placed = allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		}
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
 			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
