@@ -32,7 +32,17 @@ export type ApiSourceModalResult =
 	| { type: "csv"; source: CsvSourceConfig }
 	| { type: "markdown-table"; source: MarkdownTableSourceConfig };
 
-const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
+/** PR-4 R5 fix: the folder suggester (`renderFolderPathSuggester`) is a free-text field with a click
+ * list alongside it — any string is still typeable and savable, not just a picked suggestion. G5's
+ * "stored relative to the vault root" only actually holds once Save normalizes that typed text the
+ * same way a picked suggestion already looks: no leading/trailing slashes, no stray whitespace. A
+ * folder that doesn't currently exist is still accepted after normalizing (E8 already treats an
+ * unresolved path as valid and recoverable later, e.g. once it's created or a drive remounts). */
+function normalizeVaultFolderPath(raw: string): string {
+	return raw.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+export const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "api", label: "API" },
 	{ value: "folder", label: "Folder" },
 	{ value: "markdown-table", label: "Markdown table" },
@@ -121,6 +131,14 @@ export class ApiSourceModal extends Modal {
 	 * no choice to make (zero or one table) and when loading a previously-saved config's stored index. */
 	private mdTablePath: string;
 	private mdTableIndex: number | null;
+	// PR-8 (R2 fix): true once `mdTableIndex` holds a genuinely user-intended value — loaded from a
+	// previously-saved config, or explicitly picked from the index-picker dropdown — as opposed to
+	// `resetMarkdownTableFieldsToBlank`'s own placeholder `0` for a brand-new, never-configured
+	// source. `loadMarkdownTableSample` only keeps the current index across a reload when this is
+	// true; otherwise that placeholder `0` would wrongly look like an "already chosen" index the
+	// moment a brand-new source's first "Load sample" happens to find exactly one or more tables,
+	// defeating R1's "never auto-pick when there's a genuine choice" rule for that very first load.
+	private mdTableIndexIsMeaningful = false;
 	/** PR-8 (G20): the tables detected by the last "Load sample" — cached so the index-picker dropdown
 	 * can switch between tables (re-deriving `sampleFields` for the newly chosen one) without needing
 	 * to re-read the file from disk on every selection change. */
@@ -195,6 +213,7 @@ export class ApiSourceModal extends Modal {
 		if (initialMarkdownTableSource) {
 			this.mdTablePath = initialMarkdownTableSource.path ?? "";
 			this.mdTableIndex = initialMarkdownTableSource.tableIndex ?? 0;
+			this.mdTableIndexIsMeaningful = true;
 			this.mapping = initialMarkdownTableSource.mapping ? { ...initialMarkdownTableSource.mapping } : this.mapping;
 			this.mode = initialMarkdownTableSource.mode ?? "merge";
 			this.keepOnEmpty = initialMarkdownTableSource.keepOnEmpty ?? true;
@@ -276,6 +295,7 @@ export class ApiSourceModal extends Modal {
 	private resetMarkdownTableFieldsToBlank(): void {
 		this.mdTablePath = "";
 		this.mdTableIndex = 0;
+		this.mdTableIndexIsMeaningful = false;
 		this.mdTables = [];
 		this.mapping = { idField: "", labelField: "", secondaryField: undefined };
 		this.extraFields = [];
@@ -755,14 +775,27 @@ export class ApiSourceModal extends Modal {
 	/** PR-7: mirrors `fetchSample`'s role for CSV — reads+parses the selected file (G19) and derives
 	 * `sampleFields` from the parsed rows' own keys via the existing `sampleFieldsForArrayField`
 	 * helper, exactly as a plain-array API response would (CSV rows are already flat, so there's never
-	 * an array field to pick). Never touches `apiCache` — same contract `fetchSample`/`runTest` have. */
+	 * an array field to pick). Never touches `apiCache` — same contract `fetchSample`/`runTest` have.
+	 *
+	 * R7 fix: wrapped in try/catch — `vault.cachedRead` can reject (a permissions error, the file
+	 * vanishing between the picker list and this read), and nothing above this call catches that, so
+	 * it used to surface as an unhandled rejection with no Notice. R7 fix: a header-only file (zero
+	 * data rows) now falls back to the parsed header row itself for `sampleFields`, so drag mapping
+	 * can still be configured — `sampleFieldsForArrayField` has nothing to derive field names from
+	 * when there are no sample rows at all. */
 	private async loadCsvSample(): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(this.csvPath.trim());
 		if (!(file instanceof TFile)) {
 			new Notice("Atlas: file not found.");
 			return;
 		}
-		const text = await this.app.vault.cachedRead(file);
+		let text: string;
+		try {
+			text = await this.app.vault.cachedRead(file);
+		} catch (err) {
+			new Notice(`Atlas: couldn't read the file (${err instanceof Error ? err.message : "unknown error"}).`);
+			return;
+		}
 		const parsed = parseCsv(text);
 		if (!parsed.ok) {
 			new Notice(`Atlas: ${parsed.error}`);
@@ -770,10 +803,12 @@ export class ApiSourceModal extends Modal {
 		}
 		this.lastResponse = parsed.rows;
 		this.arrayFieldCandidates = [];
-		this.sampleFields = sampleFieldsForArrayField(parsed.rows, undefined);
+		this.sampleFields = parsed.rows.length > 0 ? sampleFieldsForArrayField(parsed.rows, undefined) : parsed.headers;
 		this.testResult = null;
-		if (this.sampleFields.length === 0) {
-			new Notice("Atlas: the CSV file has no data rows to map yet.");
+		if (parsed.headers.length === 0) {
+			new Notice("Atlas: the CSV file is empty.");
+		} else if (parsed.rows.length === 0) {
+			new Notice("Atlas: the CSV file has no data rows yet — mapping fields are from its header row.");
 		}
 		this.render();
 	}
@@ -808,6 +843,7 @@ export class ApiSourceModal extends Modal {
 					dropdown.setValue(this.mdTableIndex === null ? "" : String(this.mdTableIndex));
 					dropdown.onChange((value) => {
 						this.mdTableIndex = value === "" ? null : Number(value);
+						this.mdTableIndexIsMeaningful = value !== "";
 						this.applyMarkdownTableSelection();
 						this.render();
 					});
@@ -850,6 +886,14 @@ export class ApiSourceModal extends Modal {
 					.setValue(this.mdTablePath)
 					.onChange((value) => {
 						this.mdTablePath = value;
+						// PR-8 (R2 fix): a stale `mdTables` from whatever file was last loaded must not
+						// survive a path edit — left in place, the index-picker and sample-fields area
+						// kept showing the previous file's tables until the next "Load sample" happened
+						// to overwrite them, which risked a save with `tableIndex` pointed at a
+						// completely unrelated table in the new file.
+						this.mdTables = [];
+						this.sampleFields = [];
+						this.lastResponse = null;
 						this.updateSaveButton();
 						renderList(value);
 					})
@@ -879,19 +923,42 @@ export class ApiSourceModal extends Modal {
 	 * selected index starts at `null` (no auto-pick) — the index picker, rendered only when there's more
 	 * than one, is how the user then actually chooses; with zero or one table there's no real choice, so
 	 * it defaults to 0. Then derives `sampleFields` from whichever table (if any) is selected via
-	 * `applyMarkdownTableSelection`. */
+	 * `applyMarkdownTableSelection`.
+	 *
+	 * PR-7 R7 fix (same class as `loadCsvSample`'s): wrapped in try/catch — `vault.cachedRead` can
+	 * reject, and nothing above this call used to catch that. */
 	private async loadMarkdownTableSample(): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(this.mdTablePath.trim());
 		if (!(file instanceof TFile)) {
 			new Notice("Atlas: file not found.");
 			return;
 		}
-		const text = await this.app.vault.cachedRead(file);
+		let text: string;
+		try {
+			text = await this.app.vault.cachedRead(file);
+		} catch (err) {
+			new Notice(`Atlas: couldn't read the file (${err instanceof Error ? err.message : "unknown error"}).`);
+			return;
+		}
 		this.mdTables = detectMarkdownTables(text);
 		if (this.mdTables.length === 0) {
 			new Notice("Atlas: no markdown table found in this file.");
 		}
-		this.mdTableIndex = needsTableIndexPrompt(this.mdTables) ? null : 0;
+		// PR-8 (R2 fix): a previously-stored or previously-picked index that is still in range for
+		// this file's tables is kept, rather than unconditionally reset — editing an existing source
+		// used to silently drop the saved `tableIndex` back to 0/null the moment "Load sample" ran,
+		// even when the same table was still at the same position. Gated on `mdTableIndexIsMeaningful`
+		// (R5 regression fix): a brand-new, never-configured source's placeholder `0` must not be
+		// mistaken for a real prior choice — that placeholder happening to be "in range" for whatever
+		// the first Load sample finds would otherwise auto-pick table 1 every time, defeating R1.
+		const previousIndex = this.mdTableIndexIsMeaningful ? this.mdTableIndex : null;
+		this.mdTableIndex =
+			previousIndex !== null && previousIndex >= 0 && previousIndex < this.mdTables.length
+				? previousIndex
+				: needsTableIndexPrompt(this.mdTables)
+					? null
+					: 0;
+		this.mdTableIndexIsMeaningful = this.mdTableIndex !== null;
 		this.applyMarkdownTableSelection();
 		this.render();
 	}
@@ -1349,7 +1416,7 @@ export class ApiSourceModal extends Modal {
 				location: this.folderLocation,
 				// G6: `path` stays vault-relative-only — the Outside-Vault absolute path never reaches
 				// this (synced) shape at all, only the modal result's own `outsidePath` field.
-				path: this.folderLocation === "inside" ? this.folderPath.trim() : "",
+				path: this.folderLocation === "inside" ? normalizeVaultFolderPath(this.folderPath) : "",
 				showFiles: this.showFiles,
 				showFolders: this.showFolders,
 				removedRefs: this.removedRefs,

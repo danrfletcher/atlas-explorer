@@ -250,6 +250,25 @@ vi.mock("obsidian", () => {
 		constructor(_message?: string) {}
 	}
 
+	// PR-4 R6: minimal stand-in for `listVaultFolders`'s narrow `TFolder`/`children` surface — real
+	// Obsidian's root folder has `path === "/"`, same as this fake, so `instanceof` checks in
+	// `api-source-modal.ts` work against a plain vault.getRoot() fixture without pulling in the full
+	// vault mock (which this file's own `vi.mock("obsidian", ...)` already shadows).
+	class FakeTFolder {
+		path = "";
+		children: unknown[] = [];
+	}
+
+	// PR-8 (R5 fix): minimal stand-in so `loadCsvSample`/`loadMarkdownTableSample`'s own
+	// `file instanceof TFile` check can be driven for real against a fake `app.vault`, same reasoning
+	// as `FakeTFolder` above.
+	class FakeTFile {
+		path: string;
+		constructor(path = "") {
+			this.path = path;
+		}
+	}
+
 	return {
 		App: class {},
 		ButtonComponent: FakeButtonComponent,
@@ -257,11 +276,14 @@ vi.mock("obsidian", () => {
 		Notice: FakeNotice,
 		Platform: { isMobile: false },
 		Setting: FakeSetting,
+		TFile: FakeTFile,
+		TFolder: FakeTFolder,
 		requestUrl: async () => mockHttpResponse,
 		setTooltip: vi.fn(),
 	};
 });
 
+import { TFile, TFolder } from "obsidian";
 import { ApiSourceModal } from "../../src/api-source-modal";
 import { ApiSourceConfig } from "../../src/types";
 
@@ -597,6 +619,65 @@ describe("PR-3 — source type dropdown and modal-body switching", () => {
 	});
 });
 
+describe("PR-3 R2 — edge cases with no prior direct coverage", () => {
+	it("an existing API config loads with 'api' pre-selected on the dropdown and its fields populated", () => {
+		const modal = new ApiSourceModal({} as any, validConfig(), [], vi.fn());
+		(modal as any).onOpen();
+
+		expect(settingNamed(modal, "Source type").components[0].value).toBe("api");
+		expect(settingNamed(modal, "URL").components[0].value).toBe("https://api.example.com/items");
+		expect((modal as any).mapping).toEqual({ idField: "id", labelField: "name" });
+	});
+
+	it("selecting a different type after opening never mutates the config object the caller passed in", () => {
+		const initial = validConfig();
+		const initialCopy = { ...initial, mapping: { ...initial.mapping } };
+		const modal = new ApiSourceModal({} as any, initial, [], vi.fn());
+		(modal as any).onOpen();
+
+		settingNamed(modal, "URL").components[0].type("https://changed.example.com/items");
+		settingNamed(modal, "Source type").components[0].select("folder");
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+
+		// Nothing writes outside save() — cancelling (never clicking Save) must leave the original
+		// config exactly as the caller handed it over, however many types were tried in between.
+		expect(initial).toEqual(initialCopy);
+	});
+
+	it("reopening a never-saved source (a fresh modal instance) starts unselected again, unaffected by a prior instance's selection", () => {
+		const first = new ApiSourceModal({} as any, null, [], vi.fn());
+		(first as any).onOpen();
+		settingNamed(first, "Source type").components[0].select("folder");
+		expect(settingNamed(first, "Source type").components[0].value).toBe("folder");
+
+		const reopened = new ApiSourceModal({} as any, null, [], vi.fn());
+		(reopened as any).onOpen();
+		expect(settingNamed(reopened, "Source type").components[0].value).toBe("");
+	});
+
+	it("switching through every type in one session leaves no stale fields behind at any step", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("api");
+		settingNamed(modal, "URL").components[0].type("https://one.example.com");
+
+		settingNamed(modal, "Source type").components[0].select("folder");
+		expect(settingNamed(modal, "URL")).toBeUndefined();
+		settingNamed(modal, "Folder").components[0].type("Projects");
+
+		settingNamed(modal, "Source type").components[0].select("csv");
+		expect(settingNamed(modal, "Folder")).toBeUndefined();
+		settingNamed(modal, "CSV file").components[0].type("data.csv");
+
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+		expect(settingNamed(modal, "CSV file")).toBeUndefined();
+
+		settingNamed(modal, "Source type").components[0].select("api");
+		expect(settingNamed(modal, "URL").components[0].value).toBe("");
+	});
+});
+
 describe("R1 — Markdown Table: no auto-pick of the first table when there's a genuine choice", () => {
 	function twoTables() {
 		return [
@@ -638,6 +719,40 @@ describe("R1 — Markdown Table: no auto-pick of the first table when there's a 
 		expect((modal as any).mdTableIndex).toBe(1);
 		expect(settingNamed(modal, "Mapping mode")).toBeTruthy();
 		expect((modal as any).saveButton.disabled).toBe(false);
+	});
+
+	// PR-8 (R5 fix): the test above only ever hand-sets `mdTables`/`mdTableIndex` to simulate "the
+	// state right after Load sample" — it never actually drives `loadMarkdownTableSample` against a
+	// real multi-table file, so a regression in that method's own index decision (e.g. the R1 fix
+	// going back to always defaulting to 0) would still pass every assertion above. This drives the
+	// real method through a fake `app.vault` instead.
+	it("loadMarkdownTableSample itself leaves the index null for a real file with two or more tables, not just the hand-simulated state", async () => {
+		const path = "notes/table.md";
+		const text = "| id | name |\n|---|---|\n| 1 | One |\n\n| id | name |\n|---|---|\n| 2 | Two |\n";
+		const app = {
+			vault: {
+				getRoot: () => ({ path: "/", children: [] }),
+				getAbstractFileByPath: (p: string) => {
+					if (p !== path) return null;
+					const file = new TFile();
+					(file as unknown as { path: string }).path = p;
+					return file;
+				},
+				cachedRead: async () => text,
+			},
+		};
+		const modal = new ApiSourceModal(app as any, null, [], vi.fn());
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+		settingNamed(modal, "Markdown file").components[0].type(path);
+
+		await (modal as any).loadMarkdownTableSample();
+
+		expect((modal as any).mdTables).toHaveLength(2);
+		expect((modal as any).mdTableIndex).toBeNull();
+		const tableDropdown = settingNamed(modal, "Table").components[0];
+		expect(tableDropdown.value).toBe("");
+		expect(settingNamed(modal, "Mapping mode")).toBeUndefined();
 	});
 
 	it("a file with zero or exactly one table never shows the picker and the mapping UI renders immediately", () => {
@@ -724,6 +839,77 @@ describe("PR-4 — Folder source config section", () => {
 		expect(settingNamed(modal, "Show files").components[0].value).toBe(false);
 		expect(settingNamed(modal, "Show folders").components[0].value).toBe(true);
 		expect(settingNamed(modal, "Refresh when Atlas view loads")).toBeUndefined();
+	});
+});
+
+describe("PR-4 R5 — the folder suggester's free-text field is normalized on Save", () => {
+	it("strips a leading slash so an absolute-looking path is stored vault-relative", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		settingNamed(modal, "Folder").components[0].type("/Projects/Active");
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledWith(
+			expect.objectContaining({ source: expect.objectContaining({ path: "Projects/Active" }) })
+		);
+	});
+
+	it("strips a trailing slash and surrounding whitespace", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		settingNamed(modal, "Folder").components[0].type("  Projects/Active/  ");
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledWith(
+			expect.objectContaining({ source: expect.objectContaining({ path: "Projects/Active" }) })
+		);
+	});
+
+	it("a path typed as just '/' normalizes to the vault root, same as picking root from the suggester list", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		settingNamed(modal, "Folder").components[0].type("/");
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ source: expect.objectContaining({ path: "" }) }));
+	});
+
+	it("a nonexistent folder is still accepted, just normalized (E8: an unresolved path can recover later)", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		settingNamed(modal, "Folder").components[0].type("/Nonexistent/Folder/");
+		expect((modal as any).saveButton.disabled).toBe(false);
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledWith(
+			expect.objectContaining({ source: expect.objectContaining({ path: "Nonexistent/Folder" }) })
+		);
+	});
+});
+
+describe("PR-4 R6 — folder suggester with no subfolders to offer", () => {
+	it("a vault containing only its root folder renders zero items in the suggester list", () => {
+		const root = new TFolder();
+		(root as any).path = "/";
+		(root as any).children = [];
+		const modal = new ApiSourceModal({ vault: { getRoot: () => root } } as any, null, [], vi.fn());
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		const [listEl] = findAllByClass((modal as any).contentEl, "atlas-folder-suggest-list");
+		expect(listEl.children).toHaveLength(0);
 	});
 });
 

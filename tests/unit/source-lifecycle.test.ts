@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { App } from "obsidian";
 import { App as MockApp } from "../../tests/mocks/obsidian";
 import { ViewsManager, nodeHasApiRows } from "../../src/views";
@@ -135,18 +135,19 @@ describe("G11a — every source setter accepts every bucket node kind", () => {
 });
 
 describe("E-d — one source type per node, on a unit as on a meta node", () => {
-	// R1 covers API, CSV and markdown-table only; a folder source may sit alongside them (types.ts `folderSourceDeleted`).
-	const R1_SETTERS = SETTERS.filter((s) => s.field !== "folderSource");
+	// PR-4 R3 fix: setFolderSource now joins the other three setters' mutual exclusion (previously a
+	// folder source could sit alongside api/csv/markdown-table — see source-lifecycle PR-4 R3 tests
+	// below for the regression coverage of that specific gap).
 	for (const kind of NODE_KINDS) {
-		it(`setting each R1 source clears the other two on a ${kind.name}`, () => {
+		it(`setting each source clears the other three on a ${kind.name}`, () => {
 			const vm = makeManager();
 			const viewId = vm.getViews()[0].id;
 			const nodeId = kind.make(vm, viewId);
-			for (const setter of R1_SETTERS) {
+			for (const setter of SETTERS) {
 				setter.set(vm, viewId, nodeId);
 				const node = vm.getNode(viewId, nodeId)!;
 				expect(node[setter.field]).toBeDefined();
-				for (const other of R1_SETTERS) {
+				for (const other of SETTERS) {
 					if (other !== setter) expect(node[other.field]).toBeUndefined();
 				}
 			}
@@ -258,6 +259,168 @@ describe("R1 — setApiSource/setCsvSource are mutually exclusive on the same no
 	});
 });
 
+describe("PR-4 R3 — setFolderSource is mutually exclusive with api/csv/markdown-table, and vice versa", () => {
+	it("setFolderSource clears a live apiSource (and its cache/confirmation flag)", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setApiSource(view.id, folder.id, makeSource());
+		const node = vm.getNode(view.id, folder.id)!;
+		node.apiCache = { fetchedAt: 1, ok: true, error: null, rows: [], skippedCount: 0, truncated: false };
+		node.apiAwaitingConfirmation = true;
+
+		vm.setFolderSource(view.id, folder.id, folderSource());
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.folderSource).toEqual(folderSource());
+		expect(after.apiSource).toBeUndefined();
+		expect(after.apiCache).toBeUndefined();
+		expect(after.apiAwaitingConfirmation).toBeUndefined();
+	});
+
+	it("setApiSource clears a live folderSource", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+
+		vm.setApiSource(view.id, folder.id, makeSource());
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.apiSource).toEqual(makeSource());
+		expect(after.folderSource).toBeUndefined();
+	});
+
+	it("setCsvSource and setMarkdownTableSource also clear a live folderSource", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folderForCsv = vm.addMetaFolder(view.id, null, "Folder A")!;
+		vm.setFolderSource(view.id, folderForCsv.id, folderSource());
+		vm.setCsvSource(view.id, folderForCsv.id, makeCsvSource());
+		expect(vm.getNode(view.id, folderForCsv.id)!.folderSource).toBeUndefined();
+
+		const folderForMd = vm.addMetaFolder(view.id, null, "Folder B")!;
+		vm.setFolderSource(view.id, folderForMd.id, folderSource());
+		vm.setMarkdownTableSource(view.id, folderForMd.id, {
+			path: "Notes/t.md",
+			tableIndex: 0,
+			mapping: { idField: "id", labelField: "name" },
+			mode: "merge",
+			refreshOnViewLoad: false,
+		});
+		expect(vm.getNode(view.id, folderForMd.id)!.folderSource).toBeUndefined();
+	});
+
+	it("a Folder-source's managed children survive switching to API as ordinary units, same as 'Remove data source'", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+		vm.refreshFolderSource(view.id, folder.id);
+		expect(vm.getNode(view.id, folder.id)!.children.length).toBe(1);
+
+		vm.setApiSource(view.id, folder.id, makeSource());
+
+		expect(vm.getNode(view.id, folder.id)!.children.length).toBe(1);
+	});
+
+	it("removing a Folder source untouched by any prior API source does not disturb apiSource (stays undefined, no-op clear)", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+
+		vm.setFolderSource(view.id, folder.id, undefined);
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.folderSource).toBeUndefined();
+		expect(after.apiSource).toBeUndefined();
+	});
+
+	it("self-heals legacy data.json where both apiSource and folderSource were saved together before this fix, folderSource taking precedence (PR-1 R4: it's the user's most recent choice, and the one with irreplaceable config) and logging the drop", () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const legacyRaw = {
+			id: "root",
+			type: "meta" as const,
+			label: "Folder",
+			children: [],
+			apiSource: makeSource(),
+			folderSource: folderSource({ path: "Archive" }),
+		};
+		const vm = new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [legacyRaw] }], "v1", () => {});
+		const node = vm.getNode("v1", "root")!;
+		expect(node.folderSource).toMatchObject({ location: "inside", path: "Archive", showFiles: true, showFolders: true });
+		expect(node.apiSource).toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0][0]).toContain("root");
+		warnSpy.mockRestore();
+	});
+
+	it("does not log when only apiSource is present (no folderSource to prefer)", () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const legacyRaw = { id: "root", type: "meta" as const, label: "Folder", children: [], apiSource: makeSource() };
+		new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [legacyRaw] }], "v1", () => {});
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
+	});
+});
+
+describe("PR-4 R11 — removedRefs resets when a Folder source is retargeted", () => {
+	it("re-pointing the same source at a different path clears removedRefs — a row removed under the old target isn't silently missing from the new one", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		app.vault.seedFolder("Archive");
+		app.vault.seedFile("Archive/b.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+		vm.refreshFolderSource(view.id, folder.id);
+		vm.unplaceNode(view.id, vm.getNode(view.id, folder.id)!.children[0].id);
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toEqual(["file:Projects/a.md"]);
+
+		vm.setFolderSource(view.id, folder.id, folderSource({ path: "Archive" }));
+
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toBeUndefined();
+	});
+
+	it("switching Inside/Outside at the same path still clears removedRefs — the two locations use different ref namespaces", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource({ removedRefs: ["file:Projects/a.md"] }));
+
+		vm.setFolderSource(view.id, folder.id, folderSource({ location: "outside", removedRefs: ["file:Projects/a.md"] }));
+
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toBeUndefined();
+	});
+
+	it("re-saving the same source unchanged (e.g. toggling a Show option) leaves removedRefs untouched", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource({ removedRefs: ["file:Projects/a.md"] }));
+
+		vm.setFolderSource(view.id, folder.id, folderSource({ removedRefs: ["file:Projects/a.md"], showFolders: false }));
+
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toEqual(["file:Projects/a.md"]);
+	});
+
+	it("setting a Folder source for the first time (no prior source) is unaffected — nothing to retarget from", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+
+		vm.setFolderSource(view.id, folder.id, folderSource({ removedRefs: ["file:Projects/a.md"] }));
+
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toEqual(["file:Projects/a.md"]);
+	});
+});
+
 describe("G7 — Duplicate Folder deep-copies source, never cache, with no shared references", () => {
 	it("a duplicate of an API-sourced Folder gets its own deep-copied source, a fresh grey dot, and no rows yet", () => {
 		const vm = makeManager();
@@ -344,6 +507,42 @@ describe("G7 — Duplicate Folder deep-copies source, never cache, with no share
 		expect(clone.apiSource).toBeUndefined();
 		expect(clone.apiItemState).toBeUndefined();
 		expect(clone.apiItemOrder).toBeUndefined();
+	});
+
+	it("PR-4 R9: a Folder source's removedRefs is a genuinely independent copy — removing a row under the clone never hides it in the original too", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+		vm.refreshFolderSource(view.id, folder.id);
+
+		const clone = vm.duplicateNode(view.id, folder.id)!;
+		const clonedChild = clone.children[0];
+
+		vm.unplaceNode(view.id, clonedChild.id);
+
+		const original = vm.getNode(view.id, folder.id)!;
+		expect(vm.getNode(view.id, clone.id)!.folderSource?.removedRefs).toEqual(["file:Projects/a.md"]);
+		expect(original.folderSource?.removedRefs ?? []).toEqual([]);
+	});
+
+	it("PR-4 R9: a cloned Folder source's managed children are re-stamped with the clone's own id, not the original's", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+		vm.refreshFolderSource(view.id, folder.id);
+
+		const clone = vm.duplicateNode(view.id, folder.id)!;
+
+		expect(clone.children[0].folderSourceOwnerId).toBe(clone.id);
+		expect(vm.getNode(view.id, folder.id)!.children[0].folderSourceOwnerId).toBe(folder.id);
 	});
 });
 

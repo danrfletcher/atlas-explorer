@@ -416,6 +416,34 @@ describe("UnitIndex dismiss state vs. re-promotion — dismiss always wins (G10)
 	});
 });
 
+describe("UnitIndex.getUnits() — PR-4 R12: a ref both promoted and Folder-source-managed renders once", () => {
+	it("a manually promoted file that's also Folder-source-managed doesn't appear twice", () => {
+		const { index } = makeIndex(["Projects/a.md"], ["Projects"], {}, {}, [{ kind: "file", path: "Projects/a.md" }]);
+		index.setFolderSourceRefs([{ kind: "file", path: "Projects/a.md" }]);
+
+		const matches = index.getUnits().filter((u) => u.path === "Projects/a.md");
+		expect(matches).toHaveLength(1);
+		expect(matches[0].type).toBe("promoted-file");
+	});
+
+	it("a manually promoted folder that's also Folder-source-managed doesn't appear twice", () => {
+		const { index } = makeIndex([], ["Projects", "Projects/Sub"], {}, {}, [{ kind: "folder", path: "Projects/Sub" }]);
+		index.setFolderSourceRefs([{ kind: "folder", path: "Projects/Sub" }]);
+
+		const matches = index.getUnits().filter((u) => u.path === "Projects/Sub");
+		expect(matches).toHaveLength(1);
+		expect(matches[0].type).toBe("promoted-folder");
+	});
+
+	it("a Folder-source-managed ref with no overlapping promotion still renders — the dedup doesn't drop legitimate rows", () => {
+		const { index } = makeIndex(["Projects/a.md", "Projects/b.md"], ["Projects"], {}, {});
+		index.setFolderSourceRefs([{ kind: "file", path: "Projects/b.md" }]);
+
+		const matches = index.getUnits().filter((u) => u.path === "Projects/b.md");
+		expect(matches).toHaveLength(1);
+	});
+});
+
 // --- noAutoPromoteFolders: normalising and covering (G2, E3, E7, lookalike) ----------------------
 
 describe("normalizeNoAutoPromoteFolders and isCoveredByNoAutoPromote (G2, E3, E7)", () => {

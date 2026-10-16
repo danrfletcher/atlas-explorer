@@ -200,10 +200,27 @@ export default class AtlasPlugin extends Plugin {
 		// G21: a saved `.csv` file re-triggers every CSV-sourced node pointed at it, same as the
 		// view-load/every-N-minutes triggers already do for API sources. PR-8: a saved `.md` file
 		// does the same for every Markdown-Table-sourced node pointed at it.
+		this.notifyCsvOrMarkdownTableFileChanged(file.path);
+	}
+
+	/** PR-7 (R4 fix)/PR-8: shared by `onVaultModifyEvent` and `onVaultDeleteEvent` — re-triggers every
+	 * CSV-/Markdown-Table-sourced node pointed at `path` in every open explorer view. Gated by
+	 * extension before walking any view tree at all — every other vault event (images, canvases, an
+	 * ordinary note with no table, anything non-`.csv`/`.md`) used to pay that walk for nothing.
+	 * `notifyCsvFileModified` can only ever match a `.csv` source; `notifyMarkdownTableFileModified`
+	 * can only ever match a `.md` one — neither source type is ever configured with any other
+	 * extension. A deleted file's own controller sees it the same way a dead API URL would (its
+	 * `getAbstractFileByPath` lookup simply fails), so reusing this on delete needs no separate
+	 * "missing" handling — it's the same refresh path, just triggered one event earlier than the next
+	 * view-load/timer/manual refresh would have caught it (PR-7 R6). */
+	private notifyCsvOrMarkdownTableFileChanged(path: string): void {
+		const isCsv = path.endsWith(".csv");
+		const isMd = path.endsWith(".md");
+		if (!isCsv && !isMd) return;
 		for (const leaf of this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE)) {
 			if (leaf.view instanceof AtlasExplorerView) {
-				leaf.view.notifyCsvFileModified(file.path);
-				leaf.view.notifyMarkdownTableFileModified(file.path);
+				if (isCsv) leaf.view.notifyCsvFileModified(path);
+				if (isMd) leaf.view.notifyMarkdownTableFileModified(path);
 			}
 		}
 	}
@@ -229,6 +246,11 @@ export default class AtlasPlugin extends Plugin {
 		// alongside the two existing calls above, which this leaves untouched.
 		this.viewsManager.onVaultDelete(file.path);
 		this.scheduleInsideFolderRefresh([file.path]);
+		// PR-7 (R6 fix): deleting a CSV/Markdown Table source's own backing file used to leave its red
+		// "missing" dot showing only at the next view-load, timer tick or manual refresh. Same trigger
+		// `onVaultModifyEvent` already uses for a save — see its own doc comment for why this needs no
+		// separate "missing" handling.
+		this.notifyCsvOrMarkdownTableFileChanged(file.path);
 		this.externalMoveDetector.onDelete(file);
 	}
 

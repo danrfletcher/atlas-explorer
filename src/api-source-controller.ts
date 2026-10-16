@@ -1,8 +1,9 @@
 import { isMapError, mapResponseRows } from "./api-mapping";
 import { runJsMapping } from "./api-js-mapping";
 import { planApiRefresh } from "./api-refresh-plan";
+import { MergeResult, applyMergeResult, splitFolderSourceDeleted } from "./api-merge";
 import { httpGetJson, HTTP_TIMEOUT_MS, RequestFn, ScheduleTimeout } from "./api-http";
-import { ApiCache, ApiHeader, ApiSourceConfig, ViewNode } from "./types";
+import { ApiCache, ApiHeader, ApiItemState, ApiSourceConfig, ViewNode } from "./types";
 
 /** The outcome of a confirm-delete prompt (G6b(ii)): "confirmed"/"cancelled" are both an *answer* —
  * either button, deliberately clicked; "dismissed" is Escape or the view/modal closing with neither
@@ -84,6 +85,16 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
 		// what the dot's tooltip ("unreachable, last updated 3 h ago") actually reports.
 		lastSuccessAt: prev?.lastSuccessAt,
 	};
+}
+
+/** PR-6 (R7 fix): writes a `planApiRefresh` result back onto `node`, with any Folder-source-deleted
+ * placeholders (set aside by `splitFolderSourceDeleted` before the plan was computed, via
+ * `applyMergeResult`) folded back in exactly as they were — never reconciled, reordered or dropped
+ * by the API refresh that just ran. */
+function applyApiMergeResult(node: ViewNode, result: MergeResult, deletedState: Record<string, ApiItemState>, deletedOrder: string[]): void {
+	const merged = applyMergeResult(result, deletedState, deletedOrder);
+	node.apiItemState = merged.itemState;
+	node.apiItemOrder = merged.order;
 }
 
 /**
@@ -188,9 +199,12 @@ export class ApiSourceController {
 			}
 
 			const fetchedAt = now();
+			// PR-6 (R7 fix): a Folder-source-deleted placeholder on this same node is set aside before
+			// the plan is computed and folded back in untouched below, whatever this refresh's mode is.
+			const { apiState, apiOrder, deletedState, deletedOrder } = splitFolderSourceDeleted(node.apiItemState, node.apiItemOrder);
 			const plan = planApiRefresh({
-				prevState: node.apiItemState ?? {},
-				prevOrder: node.apiItemOrder ?? [],
+				prevState: apiState,
+				prevOrder: apiOrder,
 				rows: mapped.rows,
 				mode: source.mode,
 				truncated: mapped.truncated,
@@ -213,8 +227,7 @@ export class ApiSourceController {
 			};
 
 			if (!plan.needsConfirmation) {
-				node.apiItemState = plan.result.itemState;
-				node.apiItemOrder = plan.result.order;
+				applyApiMergeResult(node, plan.result, deletedState, deletedOrder);
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
 				persist();
@@ -234,8 +247,7 @@ export class ApiSourceController {
 			if (sourceChanged()) return;
 
 			if (answer === "confirmed") {
-				node.apiItemState = plan.result.itemState;
-				node.apiItemOrder = plan.result.order;
+				applyApiMergeResult(node, plan.result, deletedState, deletedOrder);
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
 				persist();

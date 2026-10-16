@@ -1,9 +1,13 @@
 /** PR-8 (G17-G20/G22/G24): a from-scratch markdown pipe-table detector/parser — no markdown-table
  * parser exists anywhere in this codebase. Deliberately not a full CommonMark table implementation:
  * it recognizes the standard pipe-table shape the spec asks for (a header row containing `|`,
- * immediately followed by a `|---|---|`-style separator row, then zero or more data rows), skips
- * YAML front matter at the very top of the file, and never mistakes prose containing a stray `|`
- * for a table (prose is never followed by a matching separator row).
+ * immediately followed by a `|---|---|`-style separator row whose own cell count matches the
+ * header's (R4c), then zero or more data rows), skips YAML front matter at the very top of the file
+ * and any fenced code block's contents (R4b), handles an escaped `\|` as a literal pipe inside a
+ * cell rather than a delimiter (R4a), and never mistakes prose containing a stray `|` for a table
+ * (prose is never followed by a matching separator row). Still not handled: a `|` inside inline code
+ * (`` `a|b` ``) splits as a delimiter same as any other `|` — doing that properly needs tracking
+ * backtick-delimited spans within a row before the pipe-split runs, deferred as a further R4 item.
  *
  * Every table found is returned in source order as a plain `Record<string, string>[]`, the same
  * flat shape `mapSampleRows`/`mapResponseRows`/`runJsMapping` already accept for a top-level-array
@@ -42,12 +46,19 @@ function stripFrontMatter(lines: string[]): string[] {
 
 /** Splits one pipe-table row line into its cell strings: an optional leading/trailing `|` is
  * stripped first (both styles — `| a | b |` and `a | b` — are standard), then the remainder is
- * split on `|` and each cell trimmed. */
+ * split on `|` and each cell trimmed.
+ *
+ * PR-8 (R4a fix): an escaped pipe (`\|`) is a literal `|` inside a cell, not a delimiter — GFM's own
+ * rule. Swapped for a sentinel the actual markdown text can never contain before splitting, then
+ * swapped back after, so `\|` survives as one literal character per cell rather than splitting the
+ * row into one extra (and now misaligned) cell. */
 function splitRowCells(line: string): string[] {
 	let trimmed = line.trim();
 	if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
 	if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
-	return trimmed.split("|").map((cell) => cell.trim());
+	const ESCAPED_PIPE_SENTINEL = "\u0000";
+	const withSentinel = trimmed.replace(/\\\|/g, ESCAPED_PIPE_SENTINEL);
+	return withSentinel.split("|").map((cell) => cell.trim().split(ESCAPED_PIPE_SENTINEL).join("|"));
 }
 
 /** A separator row is every cell matching `:?-+:?` (dashes, with optional alignment colons) AND the
@@ -79,17 +90,45 @@ function dedupeHeaders(headers: string[]): string[] {
 	});
 }
 
+/** PR-8 (R4b fix): a fenced code block's own lines (between a pair of ` ``` ` or `~~~` fence markers)
+ * are never scanned for a table — a code sample that happens to contain `|`-delimited lines (ASCII
+ * art, a shell pipeline, a genuinely unrelated pipe table shown as an example) must not be read as a
+ * live, editable source table. */
+function isFenceMarker(line: string): boolean {
+	return /^\s*(```|~~~)/.test(line);
+}
+
 /** Finds and parses every standard pipe-table in `text`, in source order. Never throws — a file
  * with no tables at all simply yields an empty array, not an error (there is nothing to fail). */
 export function detectMarkdownTables(text: string): MarkdownTable[] {
 	const lines = stripFrontMatter(splitLines(text));
 	const tables: MarkdownTable[] = [];
 	let i = 0;
+	let inFence = false;
 	while (i < lines.length) {
+		if (isFenceMarker(lines[i])) {
+			inFence = !inFence;
+			i++;
+			continue;
+		}
+		if (inFence) {
+			i++;
+			continue;
+		}
 		const headerLine = lines[i];
 		const separatorLine = lines[i + 1];
-		if (headerLine.includes("|") && headerLine.trim() !== "" && separatorLine !== undefined && isSeparatorRow(separatorLine)) {
-			const headers = dedupeHeaders(splitRowCells(headerLine));
+		const headerCells = headerLine.includes("|") ? splitRowCells(headerLine) : [];
+		// R4c fix: a separator row whose own cell count doesn't match the header's is not a table at
+		// all — without this check, a header with e.g. 3 columns and a 2-column `|---|---|` separator
+		// was accepted anyway, misaligning every row parsed under it.
+		if (
+			headerLine.includes("|") &&
+			headerLine.trim() !== "" &&
+			separatorLine !== undefined &&
+			isSeparatorRow(separatorLine) &&
+			splitRowCells(separatorLine).length === headerCells.length
+		) {
+			const headers = dedupeHeaders(headerCells);
 			let j = i + 2;
 			const rawRows: string[][] = [];
 			while (j < lines.length && isTableRow(lines[j])) {

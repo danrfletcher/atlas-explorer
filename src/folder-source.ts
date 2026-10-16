@@ -62,14 +62,6 @@ export function folderToRows(
 	return refs;
 }
 
-/** Edge case: "selecting a target folder that is an ancestor of, or identical to, the source
- * Folder's own location does not crash the explorer." Kept as a standalone pure function, not wired
- * into any live code path in this PR — a meta node (the only place `folderSource` ever lives) has no
- * disk path of its own to compare against, so there is nothing meaningful to call this with yet. */
-export function isAncestorOrSelf(candidateAncestorPath: string, path: string): boolean {
-	return path === candidateAncestorPath || path.startsWith(`${candidateAncestorPath}/`);
-}
-
 /** G7/G9/E2: reconciles a Folder source's current *direct* children against the folder's current
  * listing, touching only nodes this source itself manages (`folderSourceManaged`). Anything else
  * already in `existingChildren` (the user nesting something by hand alongside the managed rows) is
@@ -193,15 +185,31 @@ export function buildFolderSourceChildren(
 ): ViewNode[] {
 	if (source.location === "outside") return buildOutsideFolderChildren(outsidePath ?? "", source, existingChildren, makeNode, context);
 	const target = vault.getAbstractFileByPath(source.path);
+	const sentinelKey = unitRefKey({ kind: "folder", path: source.path });
 	if (!(target instanceof TFolder)) {
+		// PR-4 R10 fix: a managed row dragged or renested elsewhere in the view is still a managed row —
+		// scanning only `existingChildren` (this source's direct children) misses it and would wrongly
+		// append a second, redundant sentinel. Fall back to the same whole-view owner scan the
+		// resolved-target branch below already relies on.
 		if (existingChildren.some((child) => child.folderSourceManaged)) return existingChildren;
+		if (collectManagedRefKeys(context.viewRoot, context.sourceNodeId).size > 0) return existingChildren;
+		// PR-4 R4 fix: a sentinel the user has already removed (its key remembered in `removedRefs`, same
+		// as any other managed-row removal) must stay gone — otherwise every refresh while the target is
+		// still missing would recreate it right back.
+		if (source.removedRefs?.includes(sentinelKey)) return existingChildren;
 		const sentinelRef: UnitRef = { kind: "folder", path: source.path };
 		return [...existingChildren, makeNode(sentinelRef)];
 	}
+	// PR-4 R4 fix: a missing-target sentinel is a managed row whose own ref is the target folder's path
+	// (never a real desired ref — `folderToRows` only ever lists `target`'s *children*, so this key can
+	// never collide with a genuine one). Once the target resolves again, drop it before reconciling, or
+	// it would otherwise pass `reconcileManagedChildren`'s "kind still enabled" keep rule and render the
+	// target folder as a child of its own source.
+	const liveChildren = existingChildren.filter((child) => !(child.folderSourceManaged && child.ref && unitRefKey(child.ref) === sentinelKey));
 	const desiredRefs = folderToRows(target, source, fileFilterFor(source, context.filter));
 	const managedElsewhere = collectManagedRefKeys(context.viewRoot, context.sourceNodeId);
 	const removedRefs = new Set(source.removedRefs ?? []);
-	return reconcileManagedChildren(existingChildren, desiredRefs, source, makeNode, { managedElsewhere, removedRefs });
+	return reconcileManagedChildren(liveChildren, desiredRefs, source, makeNode, { managedElsewhere, removedRefs });
 }
 
 /** PR-6 (G12-G14): the one parameterized rule for how a Folder-source child's row reconciles,

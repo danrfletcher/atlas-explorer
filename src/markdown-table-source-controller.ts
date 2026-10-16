@@ -2,6 +2,7 @@ import { TFile, Vault } from "obsidian";
 import { isMapError, mapResponseRows } from "./api-mapping";
 import { runJsMapping } from "./api-js-mapping";
 import { planApiRefresh } from "./api-refresh-plan";
+import { applyMergeResult, splitFolderSourceDeleted } from "./api-merge";
 import { detectMarkdownTables, selectMarkdownTable } from "./markdown-table-mapping";
 import { ConfirmDeleteAnswer } from "./api-source-controller";
 import { cacheSnapshot } from "./api-cache-snapshot";
@@ -120,9 +121,13 @@ export class MarkdownTableSourceController {
 			const skippedCount = table.skippedCount + mapped.skippedCount;
 
 			const fetchedAt = now();
+			// PR-6 (R7 fix): see `splitFolderSourceDeleted`'s doc comment — a Folder-source-demoted
+			// placeholder can be sitting on this same node (switching source types leaves
+			// `apiItemState`/`apiItemOrder` as-is), and must not be reconciled by this refresh.
+			const { apiState, apiOrder, deletedState, deletedOrder } = splitFolderSourceDeleted(node.apiItemState, node.apiItemOrder);
 			const plan = planApiRefresh({
-				prevState: node.apiItemState ?? {},
-				prevOrder: node.apiItemOrder ?? [],
+				prevState: apiState,
+				prevOrder: apiOrder,
 				rows: mapped.rows,
 				mode: source.mode,
 				truncated: mapped.truncated,
@@ -144,8 +149,9 @@ export class MarkdownTableSourceController {
 			};
 
 			if (!plan.needsConfirmation) {
-				node.apiItemState = plan.result.itemState;
-				node.apiItemOrder = plan.result.order;
+				const merged = applyMergeResult(plan.result, deletedState, deletedOrder);
+				node.apiItemState = merged.itemState;
+				node.apiItemOrder = merged.order;
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
 				persistIfChanged();
@@ -161,8 +167,9 @@ export class MarkdownTableSourceController {
 			if (sourceChanged()) return;
 
 			if (answer === "confirmed") {
-				node.apiItemState = plan.result.itemState;
-				node.apiItemOrder = plan.result.order;
+				const merged = applyMergeResult(plan.result, deletedState, deletedOrder);
+				node.apiItemState = merged.itemState;
+				node.apiItemOrder = merged.order;
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
 				persistIfChanged();

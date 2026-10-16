@@ -106,6 +106,43 @@ describe("ViewsManager.onVaultDelete (G27)", () => {
 		expect(vm.getNode("v1", "child")!.apiItemState!["1"].noteRef).toBeUndefined();
 	});
 
+	// PR-2 R1 fix: Obsidian can fire a single delete event for a whole folder instead of one per
+	// child file, so a noteRef inside that folder must clear on a `${path}/` prefix match too, the
+	// same subtree rule unitIndex.onVaultDelete already applies.
+	it("clears a noteRef inside a deleted folder, matched by subtree prefix rather than exact path", () => {
+		const node: ViewNode = {
+			id: "n1",
+			type: "meta",
+			label: "Folder",
+			children: [],
+			apiItemState: { "1": item({ id: "1", noteRef: { kind: "file", path: "Folder/Inside.md" } }) },
+			apiItemOrder: ["1"],
+		};
+		const { vm, persist } = setup([{ id: "v1", root: [node] }]);
+
+		vm.onVaultDelete("Folder");
+
+		expect(vm.getNode("v1", "n1")!.apiItemState!["1"].noteRef).toBeUndefined();
+		expect(persist).toHaveBeenCalled();
+	});
+
+	it("does not clear a noteRef for a similarly-named sibling path that is not actually under the deleted folder", () => {
+		const node: ViewNode = {
+			id: "n1",
+			type: "meta",
+			label: "Folder",
+			children: [],
+			apiItemState: { "1": item({ id: "1", noteRef: { kind: "file", path: "Folder2/Inside.md" } }) },
+			apiItemOrder: ["1"],
+		};
+		const { vm, persist } = setup([{ id: "v1", root: [node] }]);
+
+		vm.onVaultDelete("Folder");
+
+		expect(vm.getNode("v1", "n1")!.apiItemState!["1"].noteRef).toEqual({ kind: "file", path: "Folder2/Inside.md" });
+		expect(persist).not.toHaveBeenCalled();
+	});
+
 	it("does not remove the apiItemState entry, only the noteRef field", () => {
 		const node: ViewNode = {
 			id: "n1",
@@ -123,14 +160,14 @@ describe("ViewsManager.onVaultDelete (G27)", () => {
 		expect(result).toEqual({ id: "1", label: "1", kind: PLACEHOLDER_ROW_KIND, explicitStatusId: "done" });
 	});
 
-	it("race condition: a noteRef already rewritten elsewhere to a different path is untouched by a stale delete", () => {
+	it("a noteRef pointing elsewhere is untouched by a delete for a different, unrelated path", () => {
 		const node: ViewNode = {
 			id: "n1",
 			type: "meta",
 			label: "Folder",
 			children: [],
-			// Simulates the reference having already moved (e.g. renamed) before this delete for the old
-			// path is processed — exact-match-only semantics mean it is not mistaken for this file's ref.
+			// The deleted path below ("Note.md") does not match this noteRef's path at all — the delete
+			// handler only clears refs under the path it was actually called with.
 			apiItemState: { "1": item({ id: "1", noteRef: { kind: "file", path: "Moved.md" } }) },
 			apiItemOrder: ["1"],
 		};

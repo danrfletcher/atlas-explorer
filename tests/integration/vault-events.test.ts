@@ -33,7 +33,7 @@ describe("G27 — onVaultDelete integration: clearing noteRef across a realistic
 		expect(result.apiCache).toEqual({ fetchedAt: 1, ok: true, error: null, rows: [], skippedCount: 0, truncated: false });
 	});
 
-	it("race: a noteRef already rewritten away from the deleted path by an intervening rename is untouched", () => {
+	it("a rename followed by a stale delete at the old path leaves the already-rewritten noteRef untouched", () => {
 		const vm = makeViewsManager();
 		const view = vm.getViews()[0];
 		const folder = vm.addMetaFolder(view.id, null, "API folder")!;
@@ -41,8 +41,8 @@ describe("G27 — onVaultDelete integration: clearing noteRef across a realistic
 		node.apiItemState = { "1": item({ id: "1", noteRef: { kind: "file", path: "Old.md" } }) };
 		node.apiItemOrder = ["1"];
 
-		// Rename fires first (e.g. a move-then-recreate at the old path), rewriting the live reference
-		// away from "Old.md" before the stale delete for "Old.md" is processed.
+		// Rename fires first (e.g. a move), rewriting the live reference away from "Old.md" before a
+		// delete event for the old path "Old.md" (e.g. from a watcher that queued both) is processed.
 		vm.onVaultRename("Old.md", "New.md");
 		vm.onVaultDelete("Old.md");
 

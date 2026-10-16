@@ -77,3 +77,50 @@ export function mergeApiItems(
 
 	return { itemState: nextState, order: nextOrder };
 }
+
+/** PR-6 (R7 fix): splits `itemState`/`itemOrder` into the rows a refresh should actually see
+ * (`apiState`/`apiOrder`) and any Folder-source-demoted placeholders already sitting on the same
+ * node (`item.folderSourceDeleted`) that it must not — a node can carry a `folderSource`'s own
+ * demoted-child placeholders alongside an `apiSource`/`csvSource`/`markdownTableSource` of its own
+ * (switching a Folder's source type leaves `apiItemState`/`apiItemOrder` as-is; only `apiCache` and
+ * `apiAwaitingConfirmation` are cleared — see `ViewsManager.setApiSource`'s own doc comment). Only
+ * the Folder-source sweep (`ViewsManager.sweepFolderSourceDeletedPlaceholders`) is meant to ever
+ * touch these rows; left in an API/CSV/Markdown-Table refresh's own `mergeApiItems` call, Overwrite
+ * mode would delete one outright as "genuinely vanished" (it never appears in that refresh's own
+ * rows) and Merge/Append would leave it untouched only by accident.
+ *
+ * Pair with `applyRefreshResult`, which folds the set-aside rows back in afterwards, unchanged. */
+export function splitFolderSourceDeleted(
+	itemState: Record<string, ApiItemState> | undefined,
+	itemOrder: string[] | undefined
+): { apiState: Record<string, ApiItemState>; apiOrder: string[]; deletedState: Record<string, ApiItemState>; deletedOrder: string[] } {
+	const order = itemOrder ?? [];
+	const state = itemState ?? {};
+	const apiOrder: string[] = [];
+	const apiState: Record<string, ApiItemState> = {};
+	const deletedOrder: string[] = [];
+	const deletedState: Record<string, ApiItemState> = {};
+	for (const id of order) {
+		const item = state[id];
+		if (!item) continue;
+		if (item.folderSourceDeleted) {
+			deletedOrder.push(id);
+			deletedState[id] = item;
+		} else {
+			apiOrder.push(id);
+			apiState[id] = item;
+		}
+	}
+	return { apiState, apiOrder, deletedState, deletedOrder };
+}
+
+/** The other half of `splitFolderSourceDeleted`: re-attaches the Folder-source-deleted placeholders
+ * it set aside to a freshly-computed `MergeResult`, exactly as they were — never reconciled,
+ * reordered or dropped by the refresh that just ran. */
+export function applyMergeResult(
+	result: MergeResult,
+	deletedState: Record<string, ApiItemState>,
+	deletedOrder: string[]
+): { itemState: Record<string, ApiItemState>; order: string[] } {
+	return { itemState: { ...result.itemState, ...deletedState }, order: [...result.order, ...deletedOrder] };
+}

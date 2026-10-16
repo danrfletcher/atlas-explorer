@@ -129,6 +129,39 @@ describe.each(MODES)("outside reconcile — %s mode", (mode) => {
 		expect(owner.children[0]).toBe(nodeA);
 		expect(owner.apiItemState ?? {}).toEqual({});
 	});
+
+	// PR-5 (R8 fix): the unmount/remount tests in folder-source-outside-path-resolution.test.ts and
+	// folder-source-outside-indicator.test.ts only ever exercised resolveOutsidePath/listOutsideChildren
+	// directly — nothing drove a real refreshFolderSource through an unresolved-then-resolved cycle and
+	// checked that a managed child's own status and position (not just the low-level listing) survive
+	// it, which is exactly why R1 and R2 got past the suite in the first place.
+	it("R8: an unresolved-then-resolved cycle leaves a placed child's status, position and children untouched, and the node is never recreated", () => {
+		write("a.pdf", "b.pdf");
+		const { vm, owner, nodeA, nodeB } = fixture(mode);
+		const missingMount = path.join(dir, "not-mounted");
+
+		// The device-local mount disappears: refreshing against a path that doesn't resolve must leave
+		// every existing managed row exactly as it is (buildOutsideFolderChildren's "leave existing
+		// managed rows alone while unresolved" contract), not demote, reorder or drop any of them.
+		vm.refreshFolderSource("v1", "owner", missingMount);
+		expect(childIds(owner)).toEqual(["node-a", "node-b"]);
+		expect(owner.children[0]).toBe(nodeA);
+		expect(owner.children[1]).toBe(nodeB);
+		expect(nodeA.explicitStatusId).toBe("done");
+		expect(nodeA.children.map((c) => c.id)).toEqual(["nested"]);
+		expect(owner.apiItemState ?? {}).toEqual({});
+
+		// The mount reappears with the same files: refreshing against the real path again must restore
+		// the same nodes (same object identity, not freshly built ones) with the same status, position
+		// and manually-nested children — never a delete-then-recreate round trip.
+		vm.refreshFolderSource("v1", "owner", dir);
+		expect(childIds(owner)).toEqual(["node-a", "node-b"]);
+		expect(owner.children[0]).toBe(nodeA);
+		expect(owner.children[1]).toBe(nodeB);
+		expect(nodeA.explicitStatusId).toBe("done");
+		expect(nodeA.children.map((c) => c.id)).toEqual(["nested"]);
+		expect(owner.apiItemState ?? {}).toEqual({});
+	});
 });
 
 describe("diffOutsideChildren (pure rename detection)", () => {

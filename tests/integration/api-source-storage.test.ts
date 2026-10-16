@@ -20,6 +20,7 @@ const SECRET = "Bearer super-secret-token-xyz";
 
 function makeSource(url = "https://api.example.com/items"): ApiSourceConfig {
 	return {
+		type: "api",
 		url,
 		method: "GET",
 		mapping: { idField: "id", labelField: "name" },

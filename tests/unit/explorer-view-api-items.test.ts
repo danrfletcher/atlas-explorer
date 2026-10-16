@@ -12,6 +12,53 @@ import {
 	view,
 } from "./explorer-view-sort-truncate-helpers";
 
+// PR-1 R2 fix: the tests below only ever compared two post-fix calls to each other, so a
+// regression inside `renderApiItemRow` itself (as opposed to the wiring that reaches it) would
+// pass unnoticed. Pin the actual markup against a fixed string instead.
+describe("PR-1 R2 — regression: renderApiItemRow markup is pinned against a fixed snapshot", () => {
+	it("a normal API row's markup matches the known-good snapshot", () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "status" });
+		const item: ApiItemState = { id: "api-1", label: "My Item", secondary: "extra", explicitStatusId: "doing" };
+		folder.apiItemState = { "api-1": item };
+		folder.apiItemOrder = ["api-1"];
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		callRenderApiItemRow(fake, item, container, view, folder, 1, [folder]);
+
+		expect(container.innerHTML).toBe(
+			'<div class="atlas-row atlas-row-unit atlas-row-api-item" style="padding-left: 16px;">' +
+				'<div class="atlas-chevron"></div>' +
+				'<div class="atlas-icon atlas-status-dot"><div class="atlas-status-dot-circle" style="background-color: rgb(0, 136, 255); color: rgb(0, 136, 255);"></div></div>' +
+				'<span class="atlas-row-text">My Item</span>' +
+				'<span class="atlas-row-secondary">extra</span>' +
+				"</div>"
+		);
+	});
+
+	it("a 'not found' API row's markup matches the known-good snapshot", () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "status" });
+		const item: ApiItemState = { id: "api-1", label: "Gone", explicitStatusId: "todo", notFound: true, lastSeenAt: "2026-09-25T10:00:00.000Z" };
+		folder.apiItemState = { "api-1": item };
+		folder.apiItemOrder = ["api-1"];
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		callRenderApiItemRow(fake, item, container, view, folder, 1, [folder]);
+
+		expect(container.innerHTML).toBe(
+			'<div class="atlas-row atlas-row-unit atlas-row-api-item atlas-not-found" style="padding-left: 16px;">' +
+				'<div class="atlas-chevron"></div>' +
+				'<div class="atlas-icon atlas-status-dot"><div class="atlas-status-dot-circle" style="background-color: rgb(136, 136, 136); color: rgb(136, 136, 136);"></div></div>' +
+				'<span class="atlas-row-text">Gone</span>' +
+				'<span class="atlas-row-secondary">not found, last seen 2026-09-25</span>' +
+				"</div>"
+		);
+	});
+});
+
 describe("G25 — regression: renderApiItemRow output is unchanged by the merged sort/truncate pass", () => {
 	it("row content/icon/click wiring is byte-identical called directly vs. via the merged renderNodeList path", async () => {
 		const sm = makeStatusesManager();
@@ -113,6 +160,41 @@ describe("PR-6 R3 fix: a Folder-source-demoted row renders back at its recorded 
 		await callRenderNodeList(fake, realChildren, container, view, 1, [folder], folder);
 
 		expect(rowOrder(container)).toEqual(["a-real", "demoted-z"]);
+	});
+
+	// PR-6 R5 fix: more than one positioned row in the same batch used to come out in reverse
+	// (descending-position splice order) relative to each other, reordering a surviving real child
+	// between them.
+	it("two rows demoted in the same batch render in ascending position order, not reversed around a surviving sibling", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor();
+		const demotedC1: ApiItemState = { id: "demoted-c1", label: "c1", kind: "placeholder", notFound: true, lastSeenAt: "2026-01-01T00:00:00.000Z", folderSourceDeleted: true, position: 1 };
+		const demotedC2: ApiItemState = { id: "demoted-c2", label: "c2", kind: "placeholder", notFound: true, lastSeenAt: "2026-01-01T00:00:00.000Z", folderSourceDeleted: true, position: 2 };
+		folder.apiItemState = { "demoted-c1": demotedC1, "demoted-c2": demotedC2 };
+		folder.apiItemOrder = ["demoted-c1", "demoted-c2"];
+		const realChildren = [realNode("c0-real"), realNode("c3-real")];
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, realChildren, container, view, 1, [folder], folder);
+
+		expect(rowOrder(container)).toEqual(["c0-real", "demoted-c1", "demoted-c2", "c3-real"]);
+	});
+
+	it("two rows demoted sequentially (recording the same position) render in apiItemOrder, not reversed", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor();
+		const demotedC1: ApiItemState = { id: "demoted-c1", label: "c1", kind: "placeholder", notFound: true, lastSeenAt: "2026-01-01T00:00:00.000Z", folderSourceDeleted: true, position: 1 };
+		const demotedC2: ApiItemState = { id: "demoted-c2", label: "c2", kind: "placeholder", notFound: true, lastSeenAt: "2026-01-01T00:00:00.000Z", folderSourceDeleted: true, position: 1 };
+		folder.apiItemState = { "demoted-c1": demotedC1, "demoted-c2": demotedC2 };
+		folder.apiItemOrder = ["demoted-c1", "demoted-c2"];
+		const realChildren = [realNode("c0-real"), realNode("c3-real")];
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, realChildren, container, view, 1, [folder], folder);
+
+		expect(rowOrder(container)).toEqual(["c0-real", "demoted-c1", "demoted-c2", "c3-real"]);
 	});
 });
 

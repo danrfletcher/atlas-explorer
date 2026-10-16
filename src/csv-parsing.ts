@@ -11,6 +11,10 @@
 export interface CsvParseOk {
 	ok: true;
 	rows: Record<string, string>[];
+	/** PR-7 (R7 fix): the parsed, deduped header row — present even when there are zero data rows
+	 * (header-only file), so a caller that needs field names to configure mapping (the modal's
+	 * `loadCsvSample`) doesn't have to derive them from a sample row that doesn't exist. */
+	headers: string[];
 	/** R2 fix (G22/E3): rows dropped because they were unparseable or lost data — a quote that opens
 	 * and is never closed (every row it swallows, not just the trailing one — see
 	 * `countLostLineBreaks`), plus any data row with MORE fields than the header row (it can't be
@@ -83,7 +87,13 @@ function tokenize(text: string): TokenizeResult {
 			i++;
 			continue;
 		}
-		if (c === '"') {
+		// R10 fix (G22/E3): a quote only opens a quoted field when it's the field's very first
+		// character — same rule RFC4180 uses. A quote appearing mid-field (e.g. `ab"c`) used to be
+		// treated as an opener too, silently merging everything up to the next quote (even across
+		// line breaks) into one field and losing whatever row that quote happened to close, uncounted.
+		// Treated as a literal character here instead, matching the leniency the rest of this parser
+		// already applies elsewhere.
+		if (c === '"' && field === "") {
 			inQuotes = true;
 			quoteOpenIndex = i;
 			i++;
@@ -159,7 +169,7 @@ export function parseCsv(text: string): CsvParseOutcome {
 		return { ok: false, error: "Couldn't read a header row: a quoted field is opened but never closed." };
 	}
 
-	if (rawRows.length === 0) return { ok: true, rows: [], skippedCount: 0 };
+	if (rawRows.length === 0) return { ok: true, rows: [], headers: [], skippedCount: 0 };
 
 	const headers = dedupeHeaders(rawRows[0]);
 	const dataRows = rawRows.slice(1);
@@ -178,5 +188,5 @@ export function parseCsv(text: string): CsvParseOutcome {
 		rows.push(obj);
 	}
 
-	return { ok: true, rows, skippedCount };
+	return { ok: true, rows, headers, skippedCount };
 }

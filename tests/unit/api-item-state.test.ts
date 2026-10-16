@@ -71,11 +71,14 @@ describe("ViewsManager.clearApiItemNoteRef (G28)", () => {
 		expect(item.label).toBe("One");
 	});
 
-	it("is a safe no-op when noteRef is already unset", () => {
+	// PR-2 R2 fix: previously called save() (and so fired every change listener/re-render) even
+	// though noteRef was already unset — now returns early, matching onVaultDelete's guarded no-save
+	// no-op for the same situation.
+	it("is a safe no-op when noteRef is already unset, and does not persist", () => {
 		const { vm, viewId, nodeId, persist } = setupNode({ "1": { id: "1", label: "One", kind: PLACEHOLDER_ROW_KIND } }, ["1"]);
 		vm.clearApiItemNoteRef(viewId, nodeId, "1");
 		expect(vm.getNode(viewId, nodeId)!.apiItemState!["1"].noteRef).toBeUndefined();
-		expect(persist).toHaveBeenCalled();
+		expect(persist).not.toHaveBeenCalled();
 	});
 
 	it("is a safe no-op for an unknown item id", () => {

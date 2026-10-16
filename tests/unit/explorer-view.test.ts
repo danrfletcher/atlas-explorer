@@ -137,6 +137,89 @@ describe("R8 — switching API->CSV drops the API source's device-local headers,
 	});
 });
 
+describe("PR-4 R3 — switching source types cleans up the other type's device-local state", () => {
+	it("switching API->Folder drops the API source's device-local headers, same as switching to csv/markdown-table", () => {
+		FakeApiSourceModal.instances.length = 0;
+		const node = meta("m", "Folder");
+		node.apiSource = { url: "https://api.example.com/items", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge" };
+
+		const apiHeadersStore = { get: vi.fn(() => []), set: vi.fn(), delete: vi.fn() };
+		const viewsManager = { setFolderSource: vi.fn() };
+		const folderSourcePathStore = { get: vi.fn(() => ""), set: vi.fn(), delete: vi.fn() };
+		const plugin = { app: {}, apiHeadersStore, viewsManager, folderSourcePathStore };
+		const refreshFolderSource = vi.fn();
+		(AtlasExplorerView.prototype as unknown as { openApiSourceModal: (...a: unknown[]) => void }).openApiSourceModal.call(
+			{ plugin, refreshFolderSource },
+			view,
+			node
+		);
+
+		const modal = FakeApiSourceModal.instances[0];
+		const folderSource = { location: "inside" as const, path: "Projects", showFiles: true, showFolders: true };
+		modal.onSave({ type: "folder", source: folderSource, outsidePath: "" });
+
+		expect(viewsManager.setFolderSource).toHaveBeenCalledWith(view.id, node.id, folderSource);
+		expect(apiHeadersStore.delete).toHaveBeenCalledWith(node.id);
+		expect(refreshFolderSource).toHaveBeenCalledWith(view, node);
+	});
+
+	it("does not touch ApiHeadersStore when switching to folder from a node that never had an apiSource", () => {
+		FakeApiSourceModal.instances.length = 0;
+		const node = meta("m2", "Folder");
+
+		const apiHeadersStore = { get: vi.fn(() => []), set: vi.fn(), delete: vi.fn() };
+		const viewsManager = { setFolderSource: vi.fn() };
+		const folderSourcePathStore = { get: vi.fn(() => ""), set: vi.fn(), delete: vi.fn() };
+		const plugin = { app: {}, apiHeadersStore, viewsManager, folderSourcePathStore };
+		(AtlasExplorerView.prototype as unknown as { openApiSourceModal: (...a: unknown[]) => void }).openApiSourceModal.call(
+			{ plugin, refreshFolderSource: vi.fn() },
+			view,
+			node
+		);
+
+		const modal = FakeApiSourceModal.instances[0];
+		modal.onSave({ type: "folder", source: { location: "inside" as const, path: "Projects", showFiles: true, showFolders: true }, outsidePath: "" });
+
+		expect(apiHeadersStore.delete).not.toHaveBeenCalled();
+	});
+
+	it("switching Folder(outside)->API drops the folder source's device-local outside path", () => {
+		FakeApiSourceModal.instances.length = 0;
+		const node = meta("m3", "Folder");
+		node.folderSource = { location: "outside", path: "/abs/Notes", showFiles: true, showFolders: true };
+
+		const apiHeadersStore = { get: vi.fn(() => []), set: vi.fn(), delete: vi.fn() };
+		const viewsManager = { setApiSource: vi.fn() };
+		const folderSourcePathStore = { get: vi.fn(() => "/abs/Notes"), set: vi.fn(), delete: vi.fn() };
+		const plugin = { app: {}, apiHeadersStore, viewsManager, folderSourcePathStore };
+		const refreshApiSource = openApiSourceModal(node, plugin);
+
+		const modal = FakeApiSourceModal.instances[0];
+		modal.onSave({ type: "api", source: { url: "https://api.example.com/items" }, headers: [] });
+
+		expect(viewsManager.setApiSource).toHaveBeenCalledWith(view.id, node.id, { url: "https://api.example.com/items" });
+		expect(folderSourcePathStore.delete).toHaveBeenCalledWith(node.id);
+		expect(refreshApiSource).toHaveBeenCalledWith(view, node, "manual");
+	});
+
+	it("does not touch FolderSourcePathStore when switching to API from an Inside-Vault (not Outside) folder source", () => {
+		FakeApiSourceModal.instances.length = 0;
+		const node = meta("m4", "Folder");
+		node.folderSource = { location: "inside", path: "Projects", showFiles: true, showFolders: true };
+
+		const apiHeadersStore = { get: vi.fn(() => []), set: vi.fn(), delete: vi.fn() };
+		const viewsManager = { setApiSource: vi.fn() };
+		const folderSourcePathStore = { get: vi.fn(() => ""), set: vi.fn(), delete: vi.fn() };
+		const plugin = { app: {}, apiHeadersStore, viewsManager, folderSourcePathStore };
+		openApiSourceModal(node, plugin);
+
+		const modal = FakeApiSourceModal.instances[0];
+		modal.onSave({ type: "api", source: { url: "https://api.example.com/items" }, headers: [] });
+
+		expect(folderSourcePathStore.delete).not.toHaveBeenCalled();
+	});
+});
+
 // PR-1 (G11b/E-a): the four source walks visit every node and recurse into every node's children,
 // including unit children, so a sourced folder nested under a unit still refreshes at load and on timers.
 describe("PR-1 G11b/E-a — source walks reach a sourced node nested under units and meta folders", () => {

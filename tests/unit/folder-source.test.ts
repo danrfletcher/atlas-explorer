@@ -4,9 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { App } from "obsidian";
 import { App as MockApp, TFile, TFolder, Vault } from "../../tests/mocks/obsidian";
-import { buildFolderSourceChildren, folderToRows, isAncestorOrSelf, reconcileManagedChildren } from "../../src/folder-source";
+import { buildFolderSourceChildren, collectManagedRefKeys, folderToRows, reconcileManagedChildren } from "../../src/folder-source";
 import { ViewsManager } from "../../src/views";
-import { FolderSourceConfig, UnitRef, ViewNode } from "../../src/types";
+import { FolderSourceConfig, UnitRef, ViewNode, unitRefKey } from "../../src/types";
 
 function source(overrides: Partial<FolderSourceConfig> = {}): FolderSourceConfig {
 	return {
@@ -70,21 +70,6 @@ describe("folderToRows — G3/G4", () => {
 	});
 });
 
-describe("isAncestorOrSelf", () => {
-	it("is true for the identical path", () => {
-		expect(isAncestorOrSelf("Projects", "Projects")).toBe(true);
-	});
-
-	it("is true for a descendant path", () => {
-		expect(isAncestorOrSelf("Projects", "Projects/Sub/file.md")).toBe(true);
-	});
-
-	it("is false for an unrelated or sibling path", () => {
-		expect(isAncestorOrSelf("Projects", "Other")).toBe(false);
-		expect(isAncestorOrSelf("Projects", "ProjectsArchive")).toBe(false);
-	});
-});
-
 describe("reconcileManagedChildren — G7/G9/E2", () => {
 	it("appends new managed children for refs with no existing match", () => {
 		const result = reconcileManagedChildren([], [{ kind: "file", path: "Projects/a.md" }], { showFiles: true, showFolders: true }, (ref) =>
@@ -95,7 +80,7 @@ describe("reconcileManagedChildren — G7/G9/E2", () => {
 		expect(result[0].folderSourceManaged).toBe(true);
 	});
 
-	it("keeps a reordered/renested managed child in place even if its ref vanished from desiredRefs (never auto-removed)", () => {
+	it("PR-4 R6: keeps a managed child in place even if its ref vanished from desiredRefs (never auto-removed)", () => {
 		const existing = [unitNode({ kind: "file", path: "Projects/gone.md" }, { folderSourceManaged: true })];
 		const result = reconcileManagedChildren(existing, [], { showFiles: true, showFolders: true }, (ref) => unitNode(ref, { folderSourceManaged: true }));
 		expect(result).toEqual(existing);
@@ -153,6 +138,27 @@ describe("reconcileManagedChildren — G7/G9/E2", () => {
 	});
 });
 
+describe("collectManagedRefKeys — R1 fix", () => {
+	it("PR-4 R6: finds a managed row that got dragged out of its source Folder and renested elsewhere in the view", () => {
+		const renested = unitNode({ kind: "file", path: "Projects/a.md" }, { folderSourceManaged: true, folderSourceOwnerId: "owner1" });
+		const unrelatedParent = unitNode({ kind: "folder", path: "Elsewhere" }, { children: [renested] });
+		const keys = collectManagedRefKeys([unrelatedParent], "owner1");
+		expect(keys.has("file:Projects/a.md")).toBe(true);
+	});
+
+	it("ignores a managed row owned by a different Folder source", () => {
+		const otherOwners = unitNode({ kind: "file", path: "Projects/a.md" }, { folderSourceManaged: true, folderSourceOwnerId: "owner2" });
+		const keys = collectManagedRefKeys([otherOwners], "owner1");
+		expect(keys.size).toBe(0);
+	});
+
+	it("ignores a hand-placed (non-managed) row even if its ref would otherwise match", () => {
+		const handPlaced = unitNode({ kind: "file", path: "Projects/a.md" });
+		const keys = collectManagedRefKeys([handPlaced], "owner1");
+		expect(keys.size).toBe(0);
+	});
+});
+
 describe("buildFolderSourceChildren — G16/E1", () => {
 	// PR-5: Outside Vault is no longer a no-op — see tests/unit/folder-source-outside-children-behavior.test.ts
 	// for the full Outside-Vault reconciliation contract. This just confirms hand-placed (non-managed)
@@ -179,7 +185,7 @@ describe("buildFolderSourceChildren — G16/E1", () => {
 		expect(second[0]).toBe(first[0]);
 	});
 
-	it("drops non-managed children too once the target becomes unresolvable (nothing resolvable to reconcile against)", () => {
+	it("PR-4 R6: keeps non-managed children, and keeps the existing sentinel without duplicating it, once the target is already unresolvable", () => {
 		const nonManaged = unitNode({ kind: "file", path: "keep-me.md" });
 		const existingSentinel = buildFolderSourceChildren({ getAbstractFileByPath: () => null }, source({ path: "Gone" }), [], (ref) =>
 			unitNode(ref, { folderSourceManaged: true })
@@ -199,12 +205,79 @@ describe("buildFolderSourceChildren — G16/E1", () => {
 		expect(result).toEqual([expect.objectContaining({ ref: { kind: "file", path: "Projects/a.md" }, folderSourceManaged: true })]);
 	});
 
-	it("edge case: a target folder that is an ancestor of, or identical to, the source Folder's own location does not crash (isAncestorOrSelf is available for callers to guard with)", () => {
+	it("PR-4 R4: a user-removed sentinel (its key remembered in removedRefs) is not recreated while the target stays missing", () => {
+		const removedKey = "folder:Gone";
+		const result = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ path: "Gone", removedRefs: [removedKey] }),
+			[],
+			(ref) => unitNode(ref, { folderSourceManaged: true })
+		);
+		expect(result).toEqual([]);
+	});
+
+	it("PR-4 R4: a sentinel from an unrelated removedRefs entry is unaffected (only its own key suppresses it)", () => {
+		const result = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ path: "Gone", removedRefs: ["file:Projects/a.md"] }),
+			[],
+			(ref) => unitNode(ref, { folderSourceManaged: true })
+		);
+		expect(result).toHaveLength(1);
+		expect(result[0].ref).toEqual({ kind: "folder", path: "Gone" });
+	});
+
+	it("PR-4 R10: a managed row dragged elsewhere in the view (not a direct child of this source) still suppresses the missing-target sentinel", () => {
+		const renested = unitNode({ kind: "file", path: "Projects/a.md" }, { folderSourceManaged: true, folderSourceOwnerId: "src1" });
+		const unrelatedParent = unitNode({ kind: "folder", path: "Elsewhere" }, { children: [renested] });
+		const result = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ path: "Gone" }),
+			[],
+			(ref) => unitNode(ref, { folderSourceManaged: true }),
+			{ sourceNodeId: "src1", viewRoot: [unrelatedParent] }
+		);
+		expect(result).toEqual([]);
+	});
+
+	it("PR-4 R10: a managed row owned by a different Folder source does not suppress this source's missing-target sentinel", () => {
+		const otherOwners = unitNode({ kind: "file", path: "Projects/a.md" }, { folderSourceManaged: true, folderSourceOwnerId: "src2" });
+		const result = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ path: "Gone" }),
+			[],
+			(ref) => unitNode(ref, { folderSourceManaged: true }),
+			{ sourceNodeId: "src1", viewRoot: [otherOwners] }
+		);
+		expect(result).toHaveLength(1);
+		expect(result[0].ref).toEqual({ kind: "folder", path: "Gone" });
+	});
+
+	it("PR-4 R4: once the target folder reappears, the stale missing-target sentinel is dropped instead of rendering the folder as a child of its own source", () => {
 		const vault = new Vault();
 		vault.seedFolder("Projects");
-		vault.seedFolder("Projects/Sub");
-		expect(isAncestorOrSelf("Projects", "Projects")).toBe(true);
-		expect(() => buildFolderSourceChildren(vault, source({ path: "Projects" }), [], (ref) => unitNode(ref, { folderSourceManaged: true }))).not.toThrow();
+		vault.seedFile("Projects/a.md");
+		const sentinel = unitNode({ kind: "folder", path: "Projects" }, { folderSourceManaged: true });
+
+		const result = buildFolderSourceChildren(vault, source({ path: "Projects" }), [sentinel], (ref) => unitNode(ref, { folderSourceManaged: true }));
+
+		expect(result.some((n) => n.ref && unitRefKey(n.ref) === "folder:Projects")).toBe(false);
+		expect(result).toEqual([expect.objectContaining({ ref: { kind: "file", path: "Projects/a.md" }, folderSourceManaged: true })]);
+	});
+
+	it("PR-4 R4: dropping the stale sentinel on reappearance leaves other hand-nested rows untouched", () => {
+		const vault = new Vault();
+		vault.seedFolder("Projects");
+		vault.seedFile("Projects/a.md");
+		const sentinel = unitNode({ kind: "folder", path: "Projects" }, { folderSourceManaged: true });
+		const handPlaced = unitNode({ kind: "file", path: "keep-me.md" });
+
+		const result = buildFolderSourceChildren(vault, source({ path: "Projects" }), [sentinel, handPlaced], (ref) =>
+			unitNode(ref, { folderSourceManaged: true })
+		);
+
+		expect(result).toContain(handPlaced);
+		expect(result.some((n) => n.ref && unitRefKey(n.ref) === "folder:Projects")).toBe(false);
 	});
 
 	it("R2: keeps existing managed rows as-is when the target folder stops resolving, instead of collapsing them into a sentinel", () => {
