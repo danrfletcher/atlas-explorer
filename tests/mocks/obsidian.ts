@@ -427,7 +427,10 @@ export class Menu {
 	showAtMouseEvent(_evt: MouseEvent): void {}
 	/** Every menu shown through `showAtPosition`, newest last (a chooser popped from an item). */
 	static shownAtPosition: Menu[] = [];
-	showAtPosition(_position: { x: number; y: number }): void {
+	/** Where `showAtPosition` was last asked to show this menu (null until it is). */
+	position: { x: number; y: number } | null = null;
+	showAtPosition(position: { x: number; y: number }): void {
+		this.position = position;
 		Menu.shownAtPosition.push(this);
 	}
 	titles(): string[] {

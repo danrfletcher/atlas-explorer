@@ -194,14 +194,6 @@ export class UnitIndex {
 		};
 	}
 
-	/** PR-1.S1: test-only visibility into the hold count for `path` (0 once every outstanding
-	 * `holdUnit` release for it has run). Lets create-and-nest tests assert the hold is balanced
-	 * after every outcome — ok, disk-create failure, parent-gone, and save failure — rather than
-	 * only inferring it indirectly from `getUnits()`. */
-	heldCount(path: string): number {
-		return this.held.get(path) ?? 0;
-	}
-
 	getManualPromotions(): UnitRef[] {
 		return this.manualPromotions;
 	}

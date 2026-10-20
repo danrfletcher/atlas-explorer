@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Notice } from "obsidian";
 import { AddUnderBlockDeps, startAddUnderBlock } from "../../src/add-under-block";
+import { acquireParentLock } from "../../src/create-and-nest";
 import { UnitRef, ViewNode } from "../../src/types";
+import { heldCount } from "../helpers";
 import { setup, tMany, tNested } from "../integration/create-from-meta-fixtures";
 
 // PR-3.F1 (G1): `startAddUnderBlock` is driven against the real `ViewsManager`/`UnitIndex` the
@@ -121,9 +123,10 @@ describe("startAddUnderBlock — E3 pool misconfigured", () => {
 	it.each(["", "  ", ".", "/", "//"])("pool %j: Notice with the existing wording, zero vault writes, zero placeUnit calls, lock released", async (pool) => {
 		const s = setup(tMany());
 		const placeUnitSpy = vi.fn();
+		const selectOnly = vi.fn();
 		const createSpy = vi.spyOn(s.app.vault, "create");
 		const createFolderSpy = vi.spyOn(s.app.vault, "createFolder");
-		const deps = blockDeps(s, { getPoolFolder: () => pool, placeUnit: placeUnitSpy });
+		const deps = blockDeps(s, { getPoolFolder: () => pool, placeUnit: placeUnitSpy, selectOnly });
 
 		const result = await startAddUnderBlock(deps, "default", "ft");
 
@@ -131,6 +134,7 @@ describe("startAddUnderBlock — E3 pool misconfigured", () => {
 		expect(createSpy).not.toHaveBeenCalled();
 		expect(createFolderSpy).not.toHaveBeenCalled();
 		expect(placeUnitSpy).not.toHaveBeenCalled();
+		expect(selectOnly).not.toHaveBeenCalled(); // the selection is left exactly as it was
 		expect(Notice.instances).toHaveLength(1);
 		expect(Notice.instances[0].message).toContain("the pool folder setting is empty or the vault root");
 		expect(s.views.getNode("default", "ft")!.children).toHaveLength(4); // unchanged (tMany's "ft")
@@ -141,6 +145,8 @@ describe("startAddUnderBlock — E3 pool misconfigured", () => {
 		const second = await startAddUnderBlock(deps, "default", "ft");
 		expect(second).toBeNull();
 		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).not.toContain("already adding"); // the lock really was free
+		expect(selectOnly).not.toHaveBeenCalled();
 	});
 
 	it("a missing pool folder with a valid setting is created on demand, then removed again (empty) if the nest step fails", async () => {
@@ -190,12 +196,22 @@ describe("startAddUnderBlock — failure paths roll back, Notice, no node, selec
 		expect(again).not.toBeNull();
 	});
 
-	it("placeUnit returns null (parent gone immediately before nesting): file deleted, Notice, no node, selection unchanged", async () => {
+	it("placeUnit returns null (parent gone immediately before nesting): file deleted, Notice, no node, selection unchanged, lock and hold released", async () => {
 		const s = setup(tMany());
 		const before = s.listing().filter((p) => !p.startsWith("_pool/"));
 		const selectOnly = vi.fn();
+		const expandParent = vi.fn();
 		const placeUnit = vi.fn(() => null);
-		const deps = blockDeps(s, { placeUnit, selectOnly });
+		const heldPaths: string[] = [];
+		const deps = blockDeps(s, {
+			placeUnit,
+			selectOnly,
+			expandParent,
+			holdUnit: (path: string) => {
+				heldPaths.push(path);
+				return s.index.holdUnit(path);
+			},
+		});
 
 		const result = await startAddUnderBlock(deps, "default", "ft");
 
@@ -203,23 +219,50 @@ describe("startAddUnderBlock — failure paths roll back, Notice, no node, selec
 		// The file `createOnDisk` made is rolled back; nothing new is left on disk anywhere.
 		expect(s.listing().filter((p) => !p.startsWith("_pool/"))).toEqual(before);
 		expect(s.app.vault.getFiles().some((f) => f.path.startsWith("_pool/") && f.path.endsWith(".md") && s.contentOf(f.path) === "")).toBe(false);
+		expect(placeUnit).toHaveBeenCalledTimes(1);
+		expect(s.views.getNode("default", "ft")!.children).toHaveLength(4); // nothing added under the parent
 		expect(selectOnly).not.toHaveBeenCalled();
+		expect(expandParent).not.toHaveBeenCalled();
+		expect(heldPaths).toHaveLength(1);
+		expect(heldCount(s.index, heldPaths[0])).toBe(0);
 		expect(Notice.instances).toHaveLength(1);
 		expect(Notice.instances[0].message).toContain("no longer exists");
+
+		const lock = acquireParentLock("default", "ft", false);
+		expect(lock).not.toBeNull();
+		lock!();
 	});
 
-	it("placeUnit throws (treated the same as a null return): rolled back, Notice, no node", async () => {
+	it("placeUnit throws (treated the same as a null return): rolled back, Notice, no node, selection unchanged, lock and hold released", async () => {
 		const s = setup(tMany());
+		const selectOnly = vi.fn();
 		const placeUnit = vi.fn(() => {
 			throw new Error("boom");
 		});
-		const deps = blockDeps(s, { placeUnit });
+		const heldPaths: string[] = [];
+		const deps = blockDeps(s, {
+			placeUnit,
+			selectOnly,
+			holdUnit: (path: string) => {
+				heldPaths.push(path);
+				return s.index.holdUnit(path);
+			},
+		});
 
 		const result = await startAddUnderBlock(deps, "default", "ft");
 
 		expect(result).toBeNull();
 		expect(s.app.vault.getFiles().some((f) => f.path.startsWith("_pool/") && s.contentOf(f.path) === "")).toBe(false);
+		expect(s.views.getNode("default", "ft")!.children).toHaveLength(4);
+		expect(selectOnly).not.toHaveBeenCalled();
+		expect(heldPaths).toHaveLength(1);
+		expect(heldCount(s.index, heldPaths[0])).toBe(0);
 		expect(Notice.instances).toHaveLength(1);
+
+		// The lock is free again: a real add on the same parent now runs to completion.
+		const again = await startAddUnderBlock(blockDeps(s, { random: () => 1 / 36 }), "default", "ft");
+		expect(again).not.toBeNull();
+		expect(s.views.getNode("default", "ft")!.children).toHaveLength(5);
 	});
 
 	it("parent already gone before anything is created: Notice, zero vault writes, no node", async () => {
@@ -233,6 +276,50 @@ describe("startAddUnderBlock — failure paths roll back, Notice, no node, selec
 		expect(createSpy).not.toHaveBeenCalled();
 		expect(Notice.instances).toHaveLength(1);
 		expect(Notice.instances[0].message).toContain("no longer exists");
+	});
+});
+
+describe("startAddUnderBlock — opening the new block in the editor fails", () => {
+	it("openFile rejects: still resolves to the node (already placed, expanded, selected), with a Notice naming the open failure", async () => {
+		const s = setup(tMany());
+		const selectOnly = vi.fn();
+		const deps = blockDeps(s, { selectOnly });
+		(s.app as unknown as { workspace: Record<string, unknown> }).workspace.getLeaf = vi.fn(() => ({
+			openFile: vi.fn(async () => {
+				throw new Error("no leaf available");
+			}),
+		}));
+
+		const created = await startAddUnderBlock(deps, "default", "ft");
+
+		expect(created).not.toBeNull();
+		const ft = s.views.getNode("default", "ft")!;
+		expect(ft.children.at(-1)!.id).toBe(created!.id);
+		expect(ft.collapsed).toBe(false);
+		expect(selectOnly).toHaveBeenCalledWith(created!.id);
+		expect(s.contentOf(newBlockPath(created!))).toBe(""); // the file stays: nothing is rolled back
+		expect(heldCount(s.index, newBlockPath(created!))).toBe(0);
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toBe("Atlas: the block was added, but opening it failed: no leaf available");
+
+		// And the lock came free, so the same parent can be added under again.
+		const lock = acquireParentLock("default", "ft", false);
+		expect(lock).not.toBeNull();
+		lock!();
+	});
+
+	it("the editor cursor step failing is reported the same way", async () => {
+		const s = setup(tMany());
+		const deps = blockDeps(s);
+		(s.app as unknown as { workspace: Record<string, unknown> }).workspace.getActiveViewOfType = vi.fn(() => {
+			throw new Error("editor gone");
+		});
+
+		const created = await startAddUnderBlock(deps, "default", "ft");
+
+		expect(created).not.toBeNull();
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("the block was added, but opening it failed: editor gone");
 	});
 });
 
@@ -254,7 +341,7 @@ describe("startAddUnderBlock — E7 inbox hold", () => {
 		expect(created).not.toBeNull();
 		const path = newBlockPath(created!);
 		expect(midCreatePaths).not.toContain(path);
-		expect(s.index.heldCount(path)).toBe(0);
+		expect(heldCount(s.index, path)).toBe(0);
 	});
 
 	it("the hold is released on a failure too, so nothing stays hidden", async () => {
@@ -272,7 +359,7 @@ describe("startAddUnderBlock — E7 inbox hold", () => {
 		const result = await startAddUnderBlock(deps, "default", "ft");
 
 		expect(result).toBeNull();
-		expect(s.index.heldCount(createdPath)).toBe(0);
+		expect(heldCount(s.index, createdPath)).toBe(0);
 	});
 });
 

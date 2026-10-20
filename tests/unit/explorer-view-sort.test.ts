@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types";
 import { activeSortFor } from "../../src/sort";
-import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, proto, realNode, rowOrder, view } from "./explorer-view-sort-truncate-helpers";
+import { basenameRowInfo, callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, proto, realNode, rowOrder, useRealRenderNode, view } from "./explorer-view-sort-truncate-helpers";
 import { dragOverAt, makeDropFake, makeRow, makeVm } from "./explorer-view-drop-helpers";
 
 function apiItem(id: string, explicitStatusId?: string): ApiItemState {
@@ -125,20 +125,23 @@ describe("G25 — sort: API item rows share the one sort pass real units get", (
 // PR-2.F3 (G10) regression: a newly added-under row with a hidden status (hideCompleted) gets no
 // element of its own regardless of where the sort pass places it — the sort pass reorders what's
 // visible, it never rescues a row `hideCompleted`/`hideCancelled` already excluded (G10's "current
-// sort or grouping" reason assumes exactly this).
-describe("PR-2.F3 (G10) regression — a hidden-status row stays elementless even when the sort pass runs", () => {
+// sort or grouping" reason assumes exactly this). Runs the REAL `renderNode`, so the assertion is on
+// the `data-select-key` attribute the hidden-row helper itself queries.
+describe("PR-2.F3 (G10) regression — a hidden-status row yields no data-select-key element even when the sort pass runs", () => {
 	it("a 'done' sibling under hideCompleted renders no element, whatever position sortMode would otherwise give it", async () => {
 		const sm = makeStatusesManager();
 		const folder = folderGovernor({ sortMode: "status", hideCompleted: true });
-		const real1 = realNode("real-1", { explicitStatusId: "todo" });
-		const real2 = realNode("real-2", { explicitStatusId: "done" }); // stands in for the newly added-under row
+		const real1 = realNode("real-1", { ref: { kind: "file", path: "R1.md" }, explicitStatusId: "todo" });
+		const real2 = realNode("real-2", { ref: { kind: "file", path: "R2.md" }, explicitStatusId: "done" }); // stands in for the newly added-under row
 
-		const fake = makeFakeExplorer(sm);
+		const fake = makeFakeExplorer(sm, { resolveRef: basenameRowInfo });
+		useRealRenderNode(fake);
 		const container = document.createElement("div");
 		await callRenderNodeList(fake, [real1, real2], container, view, 1, [folder], folder);
 
-		expect(container.querySelector('[data-id="real-2"]')).toBeNull();
-		expect(rowOrder(container)).toEqual(["real-1"]);
+		expect(container.querySelector('[data-select-key="real-1"]')).not.toBeNull(); // positive control
+		expect(container.querySelector('[data-select-key="real-2"]')).toBeNull();
+		expect(container.querySelectorAll("[data-select-key]")).toHaveLength(1);
 	});
 });
 

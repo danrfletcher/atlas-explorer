@@ -25,3 +25,11 @@ export function key(k: string, init: KeyboardEventInit = {}, target: HTMLElement
 
 /** Lets a resolved promise's continuation run. */
 export const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+
+/** How many `holdUnit` releases are still outstanding for `path` (0 once every one has run). Reads
+ * `UnitIndex`'s private hold map, so the production class carries no test-only accessor. */
+export function heldCount(index: object, path: string): number {
+	const held = (index as { held?: Map<string, number> }).held;
+	if (!(held instanceof Map)) throw new Error("heldCount: UnitIndex no longer has a `held` map");
+	return held.get(path) ?? 0;
+}

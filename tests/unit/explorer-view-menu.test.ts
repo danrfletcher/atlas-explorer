@@ -145,7 +145,7 @@ describe("PR-1 G11e — shared source/status menu items on a meta and a unit men
 	const apiSource = { url: "https://x", method: "GET" as const, mapping: { idField: "id", labelField: "name" }, mode: "merge" as const, refreshOnViewLoad: false };
 
 	function fakeFor(): Record<string, unknown> {
-		const plugin = { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null } };
+		const plugin = { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } };
 		const target: Record<string, unknown> = { plugin };
 		return new Proxy(target, {
 			get: (t, prop: string) => (prop in t ? t[prop] : vi.fn()),
@@ -180,6 +180,22 @@ describe("PR-1 G11e — shared source/status menu items on a meta and a unit men
 		expect(sourceOf(menuTitles("showMetaFolderMenu", folder))).toEqual(SOURCE_TITLES);
 	});
 
+	it.each([
+		["an API source", { apiSource }],
+		["a CSV source", { csvSource: { url: "https://x/y.csv", mapping: { idField: "id", labelField: "name" } } }],
+		["an Inside Vault folder source", { folderSource: { location: "inside", path: "Notes" } }],
+		["an Outside Vault folder source", { folderSource: { location: "outside", path: "/tmp/notes" } }],
+	])("a Folder row with %s configured still gets 'Replace with…', once, above the source items", (_name, source) => {
+		const folder = { id: "f", type: "meta", label: "Sourced", children: [], ...source } as unknown as ViewNode;
+		const titles = menuTitles("showMetaFolderMenu", folder);
+		expect(titles.filter((t) => t === "Replace with…")).toHaveLength(1);
+		expect(titles.indexOf("Replace with…")).toBeLessThan(titles.indexOf("Data source…"));
+	});
+
+	it("a Folder row with no source gets 'Replace with…' too (the unchanged baseline)", () => {
+		expect(menuTitles("showMetaFolderMenu", { id: "f", type: "meta", label: "Plain", children: [] })).toContain("Replace with…");
+	});
+
 	it("an Atlas folder without a source offers the same single Data source… item as a unit does", () => {
 		const folder: ViewNode = { id: "f", type: "meta", label: "Plain", children: [] };
 		const unit: ViewNode = { id: "u", type: "unit", ref: { kind: "file", path: "U.md" }, children: [] };
@@ -195,7 +211,7 @@ describe("PR-2 G1-G4 — Swap menu items", () => {
 
 	function swapFake() {
 		return {
-			plugin: { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null } },
+			plugin: { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } },
 			openSwapPicker: vi.fn(),
 			openSwapForFolder: vi.fn(),
 		};
@@ -472,6 +488,7 @@ describe("PR-2.F3 — Add under… > Folder: an active filter is never named as 
 		const fakeThis = {
 			plugin: { app, statusesManager, viewsManager: vm },
 			filterText: "drone",
+			openAddUnderPrompts: new Set<{ close(): void }>(),
 			bucketListEl: document.createElement("div"), // never gets the new row appended: a plain fixture, not a real render
 			selectedBucketNodeIds: new Set<string>(),
 			selectedInboxRefKeys: new Set<string>(),
@@ -488,6 +505,8 @@ describe("PR-2.F3 — Add under… > Folder: an active filter is never named as 
 		};
 		(fakeThis as Record<string, unknown>).addUnderFolderDeps = proto.addUnderFolderDeps;
 		(fakeThis as Record<string, unknown>).addUnderHiddenSignals = proto.addUnderHiddenSignals;
+		(fakeThis as Record<string, unknown>).addUnderParentLabel = (AtlasExplorerView.prototype as unknown as Record<string, unknown>).addUnderParentLabel;
+		(fakeThis as Record<string, unknown>).expandAddUnderParent = (AtlasExplorerView.prototype as unknown as Record<string, unknown>).expandAddUnderParent;
 		(fakeThis as Record<string, unknown>).ancestorsForNode = proto.ancestorsForNode;
 
 		return { fakeThis, parentNode, promise: proto.runAddUnderFolder.call(fakeThis, liveView, parentNode) };
@@ -583,6 +602,9 @@ describe("PR-3.F1 — Add under… > Block: real flow, wired through startAddUnd
 		};
 		for (const key of ["runAddUnderBlock", "addUnderBlockDeps", "addUnderHiddenSignals", "ancestorsForNode", "matchesFilter"] as const) {
 			(fakeThis as Record<string, unknown>)[key] = proto[key];
+		}
+		for (const key of ["addUnderParentLabel", "expandAddUnderParent"]) {
+			(fakeThis as Record<string, unknown>)[key] = (AtlasExplorerView.prototype as unknown as Record<string, unknown>)[key];
 		}
 
 		return { fakeThis, proto, liveView, parentNode };
@@ -689,6 +711,99 @@ describe("PR-3.F1 — Add under… > Block: real flow, wired through startAddUnd
 });
 
 
+// PR-3.F1 (E3): "Block" is offered on every row whatever the pool setting is. The entry never looks at
+// the pool (`canAddUnder`/`addAddUnderItem` take no settings), so a misconfigured pool shows up as the
+// flow's own Notice after the click — never as a missing or disabled entry.
+describe("PR-3.F1 E3 — the Block chooser entry is present with an empty or root pool folder", () => {
+	const POOLS = ["", "  ", ".", "/", "//"];
+
+	function fakeHost(poolFolder: string) {
+		return {
+			plugin: {
+				app: new App(),
+				settings: { poolFolder },
+				unitIndex: { getUnits: () => [{ type: "root-file", path: "U.md" }] },
+				viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" },
+			},
+			startAddUnder: vi.fn(),
+		};
+	}
+
+	function chooserFor(method: "showUnitMenu" | "showMetaFolderMenu", node: ViewNode, fake: ReturnType<typeof fakeHost>): Menu {
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		const evt = new MouseEvent("contextmenu");
+		const proto = AtlasExplorerView.prototype as unknown as Record<string, (...a: unknown[]) => void>;
+		if (method === "showUnitMenu") proto.showUnitMenu.call(fake, evt, { kind: "file", path: "U.md" }, view, node, "U");
+		else proto.showMetaFolderMenu.call(fake, evt, node, view);
+		show.mockRestore();
+		built!.items.find((i) => i.title === "Add under…")!.clickHandler!();
+		return Menu.shownAtPosition[Menu.shownAtPosition.length - 1];
+	}
+
+	const unitNode = (): ViewNode => ({ id: "u", type: "unit", ref: { kind: "file", path: "U.md" }, children: [] });
+	const folderRow = (): ViewNode => ({ id: "m", type: "meta", label: "Folder", children: [] });
+
+	it.each(POOLS.flatMap((pool) => (["showUnitMenu", "showMetaFolderMenu"] as const).map((method) => [pool, method] as const)))(
+		"pool %j, %s: Block is listed, enabled, and reaches startAddUnder(\"block\", view, node)",
+		(pool, method) => {
+			const fake = fakeHost(pool);
+			const node = method === "showUnitMenu" ? unitNode() : folderRow();
+			const chooser = chooserFor(method, node, fake);
+
+			expect(chooser.titles()).toEqual(["Block", "File", "Module", "Folder"]);
+			const block = chooser.items.find((i) => i.title === "Block")!;
+			expect(block.disabled).toBe(false);
+			block.clickHandler!();
+			expect(fake.startAddUnder).toHaveBeenCalledWith("block", view, node);
+		}
+	);
+
+	it.each(POOLS)("pool %j, through the real flow: the click gives the pool Notice, writes nothing and adds no node", async (pool) => {
+		Notice.reset();
+		const app = new App();
+		(app as unknown as { workspace: Record<string, unknown> }).workspace.getLeaf = vi.fn(() => ({ openFile: vi.fn(async () => {}) }));
+		(app as unknown as { workspace: Record<string, unknown> }).workspace.getActiveViewOfType = vi.fn(() => null);
+		const vm = new ViewsManager(app as unknown as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [meta("projects", "Projects", [])] }], "v1", () => {});
+		const liveView = vm.getViews()[0];
+		const parentNode = vm.getNode("v1", "projects")!;
+		const createSpy = vi.spyOn(app.vault, "create");
+		const fakeThis: Record<string, unknown> = {
+			plugin: {
+				app,
+				statusesManager: { findGoverningAncestor: () => null, resolveNodeStatus: () => null },
+				viewsManager: vm,
+				unitIndex: { holdUnit: () => () => {}, getUnits: () => [] },
+				settings: { poolFolder: pool, blockDisplayLength: 80 },
+			},
+			filterText: "",
+			bucketListEl: document.createElement("div"),
+			selectedBucketNodeIds: new Set<string>(["something-else"]),
+			selectedInboxRefKeys: new Set<string>(),
+			render: vi.fn(() => Promise.resolve()),
+			awaitRenderSettled: vi.fn(() => Promise.resolve()),
+		};
+		const proto = AtlasExplorerView.prototype as unknown as Record<string, unknown>;
+		for (const name of ["startAddUnder", "runAddUnderBlock", "addUnderBlockDeps", "addUnderHiddenSignals", "ancestorsForNode", "matchesFilter", "addUnderParentLabel", "expandAddUnderParent"]) {
+			fakeThis[name] = proto[name];
+		}
+
+		// The entry is there and enabled; choosing it is what runs the flow.
+		const chooser = chooserFor("showMetaFolderMenu", parentNode, { ...fakeHost(pool), startAddUnder: (...args: unknown[]) => (proto.startAddUnder as (...a: unknown[]) => void).call(fakeThis, ...args) } as ReturnType<typeof fakeHost>);
+		chooser.items.find((i) => i.title === "Block")!.clickHandler!();
+		await flush();
+
+		expect(Notice.instances.map((n) => n.message)).toEqual([expect.stringContaining("the pool folder setting is empty or the vault root")]);
+		expect(createSpy).not.toHaveBeenCalled();
+		expect(parentNode.children).toHaveLength(0);
+		expect([...(fakeThis.selectedBucketNodeIds as Set<string>)]).toEqual(["something-else"]); // selection untouched
+		expect(fakeThis.render).not.toHaveBeenCalled();
+	});
+});
+
+
 // PR-1 (G6/G7/G11/F8/G19): "Sort children…" submenu — same on a unit row, a Folder row and the
 // Bucket header, written through the generic updateStatusGovernance(viewId, nodeId, patch).
 describe("PR-1 G6/G7 — Sort children… menu", () => {
@@ -713,7 +828,7 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 			plugin: {
 				app: { vault, fileManager: { renameFile: vi.fn() } },
 				unitIndex: { getUnits: () => [] },
-				viewsManager: { getNode: () => null, updateStatusGovernance: vi.fn() },
+				viewsManager: { getNode: () => null, managedRowFilterState: () => "shown", updateStatusGovernance: vi.fn() },
 				statusesManager: { findSortGovernor: vi.fn(() => statusGovernor) },
 			},
 		};

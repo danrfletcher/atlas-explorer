@@ -9,10 +9,12 @@ import {
 	blockPath,
 	buildBlockContent,
 	createOnDisk,
+	describe,
 	filePath,
 	freeBlockPath,
 	modulePaths,
 	parentExists,
+	trimmed,
 	usablePoolFolder,
 } from "./create-and-nest";
 
@@ -27,15 +29,6 @@ export const CREATE_ITEM_TITLE = "Replace with…";
 export function createDialogTitle(kind: CreateKind): string {
 	const { label } = CREATE_KINDS.find((entry) => entry.kind === kind)!;
 	return `Create ${label}`;
-}
-
-/** The chosen name with surrounding whitespace dropped. Inner text is kept exactly as typed. */
-function trimmed(name: string): string {
-	return name.trim();
-}
-
-function describe(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 export interface CreateFromMetaDeps {
@@ -75,8 +68,7 @@ export async function createFromMeta(deps: CreateFromMetaDeps, kind: CreateKind,
 	};
 
 	// The dialog may have been open a while: the folder must still be there, and the name still free.
-	const node = deps.getNode(viewId, nodeId);
-	if (!node || node.type !== "meta") return fail("the folder no longer exists");
+	if (!parentExists(deps, viewId, nodeId) || deps.getNode(viewId, nodeId)?.type !== "meta") return fail("the folder no longer exists");
 	const validation = validateName(name, {
 		mode: kind === "block" ? "non-empty" : "full",
 		root: kind === "block" ? [] : collectRootEntries(vault),
@@ -121,7 +113,7 @@ export async function startCreateFromMeta(deps: CreateFromMetaFlowDeps, kind: Cr
 	const release = acquireParentLock(viewId, nodeId, false);
 	if (!release) return;
 	try {
-		const node = deps.getNode(viewId, nodeId);
+		const node = parentExists(deps, viewId, nodeId) ? deps.getNode(viewId, nodeId) : null;
 		if (!node || node.type !== "meta") return;
 		const name = await openNameDialog(deps.app, {
 			title: createDialogTitle(kind),

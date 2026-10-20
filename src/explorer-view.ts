@@ -859,6 +859,10 @@ export class AtlasExplorerView extends ItemView {
 	 * close every still-open one itself, resolving it as "dismissed" (the edge case: "confirmation modal
 	 * dismissed by ... view close counts as unanswered on an automatic refresh"). */
 	private openConfirmDeleteModals: ConfirmDeleteRowsModal[] = [];
+	/** Add under… > Folder's label prompt, while it is open. Same reason as above: closing the leaf
+	 * must close it too (resolving the flow as a cancel), or confirming it afterwards would mutate
+	 * and `render()` a view that is gone. */
+	private openAddUnderPrompts = new Set<{ close(): void }>();
 	private renderQueued = false;
 	/** PR-2.F2 R2: every call to `render()` (direct or via `queueRender`'s timeout) overwrites this
 	 * with its own promise before any `await` inside it can yield, so this always names the most
@@ -983,6 +987,8 @@ export class AtlasExplorerView extends ItemView {
 		// wired in refreshApiSource) removes itself from this array — iterate a copy so that in-loop
 		// mutation of the live array never skips an entry.
 		for (const modal of [...this.openConfirmDeleteModals]) modal.close();
+		// Same iterate-a-copy rule: closing a prompt settles it, which un-registers it from the set.
+		for (const prompt of [...this.openAddUnderPrompts]) prompt.close();
 	}
 
 	/** Collapses bursts of index/view change events (a drag can fire several) into one render. */
@@ -3720,9 +3726,9 @@ export class AtlasExplorerView extends ItemView {
 		// fresh here from the live node, never from render-time state — `missing`/`filteredOut` may
 		// have changed since the row was last drawn (e.g. a data source was just added).
 		if (
-			canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager?.getNode(viewId, nodeId) ?? null }, view.id, node, {
+			canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager.getNode(viewId, nodeId) ?? null }, view.id, node, {
 				missing: !unitForRef(this.plugin.unitIndex.getUnits(), ref),
-				filteredOut: this.plugin.viewsManager?.managedRowFilterState?.(view.id, node) === "filteredOut",
+				filteredOut: this.plugin.viewsManager.managedRowFilterState(view.id, node) === "filteredOut",
 			})
 		) {
 			addAddUnderItem(menu, evt, (kind) => this.startAddUnder(kind, view, node));
@@ -3813,7 +3819,7 @@ export class AtlasExplorerView extends ItemView {
 		// — it follows `latestRenderPromise` until it stops changing, so the DOM check inside it
 		// always runs against a render that has actually finished.
 		void this.render();
-		await noticeIfAddedRowHidden(created.id, created.label ?? "New folder", node.label ?? unitBasename(node), {
+		await noticeIfAddedRowHidden(created.id, created.label ?? "New folder", await this.addUnderParentLabel(view.id, node.id), {
 			render: () => this.awaitRenderSettled(),
 			getBucketListEl: () => this.bucketListEl,
 			...signals,
@@ -3833,7 +3839,7 @@ export class AtlasExplorerView extends ItemView {
 		const label = getFreeBlockDisplayTextFromContent("", this.plugin.settings.blockDisplayLength);
 		const signals = this.addUnderHiddenSignals(view, node, created, label);
 		void this.render();
-		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+		await noticeIfAddedRowHidden(created.id, label, await this.addUnderParentLabel(view.id, node.id), {
 			render: () => this.awaitRenderSettled(),
 			getBucketListEl: () => this.bucketListEl,
 			...signals,
@@ -3852,11 +3858,39 @@ export class AtlasExplorerView extends ItemView {
 		const label = unitBasename(created).replace(/\.md$/, "");
 		const signals = this.addUnderHiddenSignals(view, node, created, label);
 		void this.render();
-		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+		await noticeIfAddedRowHidden(created.id, label, await this.addUnderParentLabel(view.id, node.id), {
 			render: () => this.awaitRenderSettled(),
 			getBucketListEl: () => this.bucketListEl,
 			...signals,
 		});
+	}
+
+	/** The text the clicked row shows right now, for the File/Module dialog titles and the G10
+	 * hidden-row Notice: a Folder's own label, or the resolved text `resolveRef`/
+	 * `resolveOutsideManagedRowInfo` already compute for a unit row (the basename without its
+	 * extension, or a free block's title/first line) — never a node's raw ref path, which for a file
+	 * carries `.md` and for a free block is the pool ID (IDs are never shown), and never a value
+	 * captured at the row's last render. Reads the live node by id, so a rename since then still shows. */
+	private async addUnderParentLabel(viewId: string, parentId: string): Promise<string> {
+		const { viewsManager } = this.plugin;
+		const parentNode = viewsManager.getNode(viewId, parentId);
+		if (!parentNode) return "";
+		if (parentNode.type === "meta") return parentNode.label ?? "";
+		const view = viewsManager.getViews().find((v) => v.id === viewId);
+		if (!view) return parentNode.ref ? unitBasename(parentNode) : "";
+		const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
+		return info.text;
+	}
+
+	/** Expands the clicked row after an add-under so the new child is visible. While a filter is
+	 * active, `computeEffectiveCollapsed` has snapshotted each row's fold state so clearing the filter
+	 * can put it back; that snapshot would re-collapse this parent and hide the new row again with no
+	 * Notice, so the snapshot is updated too: the expansion is the user's own, not the filter's. */
+	private expandAddUnderParent(viewId: string, parentId: string): void {
+		this.plugin.viewsManager.setNodeCollapsed(viewId, parentId, false);
+		if (!this.filterText.trim()) return;
+		if (!this.preFilterCollapsedState) this.preFilterCollapsedState = new Map();
+		this.preFilterCollapsedState.set(parentId, false);
 	}
 
 	private addUnderFileDeps(): AddUnderFileDeps {
@@ -3867,20 +3901,9 @@ export class AtlasExplorerView extends ItemView {
 			getExcludedFolders: () => plugin.settings.excludedFolders,
 			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
 			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
-			// The same label a live row currently shows: a Folder's own label, or the resolved text
-			// `resolveRef`/`resolveOutsideManagedRowInfo` already compute for a unit row (basename, or
-			// a free block's title/first line) — never a stale value captured at the row's last render.
-			getParentLabel: async (viewId, parentId) => {
-				const parentNode = plugin.viewsManager.getNode(viewId, parentId);
-				if (!parentNode) return "";
-				if (parentNode.type === "meta") return parentNode.label ?? "";
-				const view = plugin.viewsManager.getViews().find((v) => v.id === viewId);
-				if (!view) return parentNode.ref ? unitBasename(parentNode) : "";
-				const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
-				return info.text;
-			},
+			getParentLabel: (viewId, parentId) => this.addUnderParentLabel(viewId, parentId),
 			placeNewUnit: (viewId, ref, parentId) => plugin.viewsManager.placeNewUnit(viewId, ref, parentId),
-			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			expandParent: (viewId, parentId) => this.expandAddUnderParent(viewId, parentId),
 			// Same selection/anchor handling as Block and Folder (E5).
 			selectOnly: (nodeId) => {
 				this.selectedInboxRefKeys.clear();
@@ -3904,7 +3927,7 @@ export class AtlasExplorerView extends ItemView {
 		const label = unitBasename(created);
 		const signals = this.addUnderHiddenSignals(view, node, created, label);
 		void this.render();
-		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+		await noticeIfAddedRowHidden(created.id, label, await this.addUnderParentLabel(view.id, node.id), {
 			render: () => this.awaitRenderSettled(),
 			getBucketListEl: () => this.bucketListEl,
 			...signals,
@@ -3919,18 +3942,9 @@ export class AtlasExplorerView extends ItemView {
 			getExcludedFolders: () => plugin.settings.excludedFolders,
 			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
 			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
-			// Same live-label resolver as File's own deps (see its doc comment above).
-			getParentLabel: async (viewId, parentId) => {
-				const parentNode = plugin.viewsManager.getNode(viewId, parentId);
-				if (!parentNode) return "";
-				if (parentNode.type === "meta") return parentNode.label ?? "";
-				const view = plugin.viewsManager.getViews().find((v) => v.id === viewId);
-				if (!view) return parentNode.ref ? unitBasename(parentNode) : "";
-				const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
-				return info.text;
-			},
+			getParentLabel: (viewId, parentId) => this.addUnderParentLabel(viewId, parentId),
 			placeNewUnit: (viewId, ref, parentId) => plugin.viewsManager.placeNewUnit(viewId, ref, parentId),
-			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			expandParent: (viewId, parentId) => this.expandAddUnderParent(viewId, parentId),
 			// Same selection/anchor handling as File, Block and Folder (E5).
 			selectOnly: (nodeId) => {
 				this.selectedInboxRefKeys.clear();
@@ -3954,7 +3968,7 @@ export class AtlasExplorerView extends ItemView {
 			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
 			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
 			placeUnit: (viewId, ref, parentId) => plugin.viewsManager.placeUnit(viewId, ref, parentId),
-			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			expandParent: (viewId, parentId) => this.expandAddUnderParent(viewId, parentId),
 			// R1 fix (same as Folder): clears a prior inbox selection too (E5 — bucket and inbox
 			// selections are mutually exclusive) and sets the anchor to the new row, so a later
 			// shift-click extends from it rather than a stale pre-add anchor.
@@ -3979,7 +3993,8 @@ export class AtlasExplorerView extends ItemView {
 	 * Folder's own row fails to render; naming it anyway broke G10's "whichever applies" whenever a
 	 * filter happened to be active while adding a Folder (the row always shows regardless).
 	 *
-	 * PR-3.F1: a unit-kind row (so far Block and File, via `runAddUnderBlock`/`runAddUnderFile`) is
+	 * PR-3.F1: a unit-kind row (Block, File and Module, via `runAddUnderBlock`/`runAddUnderFile`/
+	 * `runAddUnderModule`) is
 	 * different — the filter *can* be the cause, but only when that new row's own display text
 	 * itself fails `matchesFilter`, since a matching row bypasses hide and truncate the same way it
 	 * does today (never a blanket "any filter active" check). The caller computes that display text
@@ -4005,7 +4020,9 @@ export class AtlasExplorerView extends ItemView {
 		if (sameStatusSiblings < 2) return { filterActive };
 		const key = (governor === view ? `view:${view.id}` : `node:${(governor as ViewNode).id}`) + `:${status.id}`;
 		if (this.expandedTruncationGroups.has(key)) return { filterActive };
-		return { filterActive, truncatedGroupLabel: config.label?.trim() || status.label };
+		// Same label function the group row itself shows (`renderTruncationGroupHeader`), so the Notice
+		// names the group the way the row reads ("Dones", not "Done").
+		return { filterActive, truncatedGroupLabel: config.label?.trim() || pluralizeStatusLabel(status.label) };
 	}
 
 	/** The ancestors chain (nearest first, ending with `view`) for `targetId`'s own parent — the
@@ -4030,7 +4047,11 @@ export class AtlasExplorerView extends ItemView {
 			app: plugin.app,
 			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
 			addMetaFolder: (viewId, parentId, label) => plugin.viewsManager.addMetaFolder(viewId, parentId, label),
-			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			trackPrompt: (prompt) => {
+				this.openAddUnderPrompts.add(prompt);
+				return () => void this.openAddUnderPrompts.delete(prompt);
+			},
+			expandParent: (viewId, parentId) => this.expandAddUnderParent(viewId, parentId),
 			// R1 fix: bucket and inbox selections are mutually exclusive (E5) — right-clicking a
 			// bucket row doesn't itself change the selection, so a prior inbox selection could still
 			// be live when this runs. Clear it too, and set the anchor the same way
@@ -4304,7 +4325,7 @@ export class AtlasExplorerView extends ItemView {
 				})
 		);
 		// PR-2.F1 (G6): "Add under…" sits directly above "Replace with…", i.e. after "Rename folder".
-		if (canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager?.getNode(viewId, nodeId) ?? null }, view.id, node)) {
+		if (canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager.getNode(viewId, nodeId) ?? null }, view.id, node)) {
 			addAddUnderItem(menu, evt, (kind) => this.startAddUnder(kind, view, node));
 		}
 		// Replace with… (PR-1.F1: renamed from "Create" to sit beside "Swap with…"): turns this meta

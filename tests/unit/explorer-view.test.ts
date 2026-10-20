@@ -398,6 +398,8 @@ describe("PR-2.F2 R2 — runAddUnderFolder waits for an overlapping queued rende
 			fakeThis.awaitRenderSettled = (AtlasExplorerView.prototype as unknown as { awaitRenderSettled: () => Promise<void> }).awaitRenderSettled;
 			fakeThis.addUnderFolderDeps = (AtlasExplorerView.prototype as unknown as { addUnderFolderDeps: () => AddUnderFolderDeps }).addUnderFolderDeps;
 			fakeThis.queueRender = (AtlasExplorerView.prototype as unknown as { queueRender: () => void }).queueRender;
+			fakeThis.addUnderParentLabel = (AtlasExplorerView.prototype as unknown as { addUnderParentLabel: (...a: unknown[]) => unknown }).addUnderParentLabel;
+			fakeThis.expandAddUnderParent = (AtlasExplorerView.prototype as unknown as { expandAddUnderParent: (...a: unknown[]) => unknown }).expandAddUnderParent;
 			fakeThis.runAddUnderFolder = (AtlasExplorerView.prototype as unknown as { runAddUnderFolder: (view: View, node: ViewNode) => Promise<void> }).runAddUnderFolder;
 			fakeThis.addUnderHiddenSignals = (AtlasExplorerView.prototype as unknown as { addUnderHiddenSignals: (...a: unknown[]) => unknown }).addUnderHiddenSignals;
 			fakeThis.ancestorsForNode = (AtlasExplorerView.prototype as unknown as { ancestorsForNode: (...a: unknown[]) => unknown }).ancestorsForNode;

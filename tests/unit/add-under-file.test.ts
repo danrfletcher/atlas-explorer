@@ -6,7 +6,7 @@ import { ViewsManager } from "../../src/views";
 import { UnitRef, ViewNode } from "../../src/types";
 import { AddUnderFileDeps, startAddUnderFile } from "../../src/add-under-file";
 import { file, meta, unit } from "../integration/create-from-meta-fixtures";
-import { seedRoot } from "../helpers";
+import { heldCount, seedRoot } from "../helpers";
 
 // PR-3.F2: `openNameDialog` is replaced by a controllable spy for most of this file — the dialog's
 // own validation, clash rule and real-DOM behaviour are already covered generically by
@@ -111,6 +111,7 @@ describe("startAddUnderFile — G2/GP3-GP5 happy path", () => {
 		expect(openNameDialog).toHaveBeenCalledWith(s.deps.app, {
 			title: "Add file under quarry-drones",
 			confirmLabel: "Add",
+			mode: "full",
 			initialValue: "",
 			poolFolder: "_pool",
 			excludedFolders: ["_pool"],
@@ -128,7 +129,7 @@ describe("startAddUnderFile — G2/GP3-GP5 happy path", () => {
 		expect([...s.selection]).toEqual([created!.id]);
 
 		// E7: not left in the Inbox — it was held until nested, and the hold is released right after.
-		expect(s.index.heldCount(path)).toBe(0);
+		expect(heldCount(s.index, path)).toBe(0);
 		const inbox = s.vm.getInboxUnits(s.index.getUnits(), VIEW_ID, "view").map((u) => u.path);
 		expect(inbox).not.toContain(path);
 	});

@@ -36,11 +36,11 @@ Judgement calls made during the build, the alternative considered, and why. Newe
 
 **Not a regression:** matches PR-2 tester-1.json's identical E7 finding on PR-2's own base. Nothing in PR-3's diff removed or weakened any promotion-conversion capability, because none exists to weaken.
 
-## Create from a meta folder (block, file or module): the menu, the body and the failure order
+## Replace with… on a meta folder (first built as "Create"): the menu, the body and the failure order
 
-**Decision:** "Create" sits in a meta folder's right-click menu after "Rename folder". Obsidian's public `Menu` has no submenu API (`minAppVersion` 1.5.0, public APIs only), so choosing it pops a second small menu (Block, File, Module) at the same spot. It is still two clicks. Nothing else was added: no command, palette entry or setting.
+**Decision:** "Replace with…" sits in a meta folder's right-click menu after "Rename folder". Obsidian's public `Menu` has no submenu API (`minAppVersion` 1.5.0, public APIs only), so choosing it pops a second small menu (Block, File, Module) at the same spot. It is still two clicks. Nothing else was added: no command, palette entry or setting.
 
-**PR-1.F1 update:** the menu entry's label is renamed "Replace with…" (was "Create"), so it reads consistently alongside the later-added "Swap with…" entry right below it (plan G5/Q4). This is a label-only change — the operation described above (Block/File/Module chooser, dialog titles, body, failure order, replace-in-place) is unchanged, so "Create" below still refers to the operation and its dialogs, not the menu's wording.
+**PR-1.F1 update:** the menu entry's label is renamed "Replace with…" (was "Create"), so it reads consistently alongside the later-added "Swap with…" entry right below it (plan G5/Q4). This is a label-only change — the operation described above (Block/File/Module chooser, dialog titles, body, failure order, replace-in-place) is unchanged, so "Create" in the text below (the original name) still refers to the operation and its dialogs, not the menu's wording.
 
 **Decision:** every file Create writes has the body `# <name>` plus one trailing newline (Block, File and the Module's note alike). The name is trimmed when the dialog returns it, and validated again against the live vault root at create time, because the dialog can stay open while other things change. Block only needs a non-empty name (its file is named by ID); File and Module use the full name rules.
 
