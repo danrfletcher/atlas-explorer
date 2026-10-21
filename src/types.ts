@@ -221,9 +221,8 @@ export interface ViewNode extends StatusGovernance {
 	 * top-level field afterwards). Children lifted one level by removing their parent keep their
 	 * stamps too — nothing rewrites this field on a lift, only on an actual place/move/duplicate.
 	 * Absent means "no stamp" — counts as oldest (sorts last, including under Reverse): a node
-	 * persisted before this field existed (E8), or one `reconcileManagedChildren`/`makeNode` forgot
-	 * to set (it doesn't — new Folder-source rows get a fresh stamp at creation, same as any other
-	 * new node). */
+	 * persisted before this field existed (E8). New Folder-source rows get a fresh stamp at
+	 * creation, same as any other new node. */
 	placedAt?: number;
 	/** PR-2 (API-backed Atlas Folders): request/mapping config for a "Folder" (meta node) whose rows
 	 * are pulled from a JSON API instead of (or alongside) manually placed children. Set on any bucket

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App, Menu, Notice } from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
-import { ATLAS_SORT_AZ_ICON_ID } from "../../src/sort";
+import { ATLAS_SORT_AZ_ICON_ID, activeSortFor } from "../../src/sort";
 import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types";
 import { ViewsManager } from "../../src/views";
 import { flush } from "../helpers";
@@ -875,10 +875,26 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 
 		it('labels it "Status (inherited)" when the governor is an ancestor, not this row itself (E5)', () => {
 			const node = metaNode({ id: "f1" }); // no statusEnabled/statusSetId of its own
-			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S" }; // an ancestor's
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" }; // an ancestor's, sorting by status
 			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
 			expect(chooser.titles()).toContain("Status (inherited)");
 			expect(chooser.titles()).not.toContain("Status");
+		});
+
+		it('PR-2 R9: labels it plain "Status" when nothing is inherited — an ancestor governs but is not sorting by status', () => {
+			const node = metaNode({ id: "f1" });
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S" }; // governs, sorts Manual
+			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
+			expect(chooser.titles()).toContain("Status");
+			expect(chooser.titles()).not.toContain("Status (inherited)");
+		});
+
+		it('PR-2 R9: labels it plain "Status" when this row\'s own setting is explicitly Status, even under a status-sorting ancestor', () => {
+			const node = metaNode({ id: "f1", sortMode: "status" });
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" };
+			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
+			expect(chooser.titles()).toContain("Status");
+			expect(chooser.titles()).not.toContain("Status (inherited)");
 		});
 
 		it('ticks Status when this row\'s own setting is explicitly "status"', () => {
@@ -902,7 +918,8 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 			const node = metaNode({ id: "f1", sortMode: "alphabetical" });
 			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" };
 			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
-			expect(chooser.items.find((i) => i.title === "Status (inherited)")!.checked).toBe(false);
+			// PR-2 R9: an explicit own mode inherits nothing, so the item is plain "Status".
+			expect(chooser.items.find((i) => i.title === "Status")!.checked).toBe(false);
 			expect(chooser.items.find((i) => i.title === "A-Z")!.checked).toBe(true);
 		});
 
@@ -915,12 +932,46 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 			expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", "f1", { sortMode: "manual", sortReverse: false });
 		});
 
+		it("PR-2 R12: Reverse on a row inheriting a status sort writes the effective mode too, so the effective sort really reverses", () => {
+			const node = metaNode({ id: "f1" }); // absent own sortMode, following the governor's status sort
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" };
+			const { menu, fake } = build("showMetaFolderMenu", node, undefined, governor);
+			const chooser = openChooser(menu);
+			const reverse = chooser.items.find((i) => i.title === "Reverse order")!;
+			expect(reverse.disabled).toBe(false);
+			reverse.clickHandler!();
+			const update = fake.plugin.viewsManager.updateStatusGovernance;
+			expect(update).toHaveBeenCalledWith("v1", "f1", { sortMode: "status", sortReverse: true });
+			// What the render pass and the indicator read back after that patch lands:
+			const patch = update.mock.calls[0][2] as Partial<StatusGovernance>;
+			expect(activeSortFor({ ...node, ...patch }, governor)).toEqual({ mode: "status", reverse: true });
+		});
+
+		it("PR-2 R12: Reverse on a row inheriting an already-reversed status sort flips it back to forward", () => {
+			const node = metaNode({ id: "f1" });
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status", sortReverse: true };
+			const { menu, fake } = build("showMetaFolderMenu", node, undefined, governor);
+			const chooser = openChooser(menu);
+			const reverse = chooser.items.find((i) => i.title === "Reverse order")!;
+			expect(reverse.checked).toBe(true);
+			reverse.clickHandler!();
+			expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", "f1", { sortMode: "status", sortReverse: false });
+		});
+
+		it("PR-2 R6: a stale own sortMode \"status\" with no reachable governor reads as Manual — no Status item, Manual ticked, Reverse disabled", () => {
+			const node = metaNode({ id: "f1", sortMode: "status" });
+			const chooser = openChooser(build("showMetaFolderMenu", node).menu);
+			expect(chooser.titles()).not.toContain("Status");
+			expect(chooser.items.find((i) => i.title === "Manual")!.checked).toBe(true);
+			expect(chooser.items.find((i) => i.title === "Reverse order")!.disabled).toBe(true);
+		});
+
 		it('clicking Status stores an explicit sortMode: "status" with sortReverse reset off', () => {
 			const node = metaNode({ id: "f1", sortMode: "modified", sortReverse: true });
 			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S" };
 			const { menu, fake } = build("showMetaFolderMenu", node, undefined, governor);
 			const chooser = openChooser(menu);
-			chooser.items.find((i) => i.title === "Status (inherited)")!.clickHandler!();
+			chooser.items.find((i) => i.title === "Status")!.clickHandler!();
 			expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", "f1", { sortMode: "status", sortReverse: false });
 		});
 

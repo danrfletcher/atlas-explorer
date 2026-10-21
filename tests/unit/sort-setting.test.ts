@@ -6,12 +6,13 @@
  * never mutates `children`; place/remove/drop under a sorted folder edit the stored order
  * underneath), E7 (Folder removal under a sorted vs Manual parent), E15 (folder-source
  * reconciliation stamps new nodes it creates). */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { App } from "obsidian";
 import { App as MockApp } from "../../tests/mocks/obsidian";
 import { ViewsManager } from "../../src/views";
 import { currentSortMode } from "../../src/sort";
 import type { View, ViewNode } from "../../src/types";
+import { callRenderNodeList, makeFakeExplorer, makeStatusesManager, rowOrder } from "./explorer-view-sort-truncate-helpers";
 
 describe("PR-1 G16/E11 — sortMode/sortReverse round-trip through data.json", () => {
 	it("a node's sortMode/sortReverse survive a save-then-reload cycle", () => {
@@ -212,12 +213,49 @@ describe("PR-1 E7 — Folder removal under a sorted vs Manual parent", () => {
 		void a;
 		void b;
 	});
+
+	// PR-1 R7: the splice assertions above are identical for Manual and sorted parents, so on their
+	// own they can't show that the lifted children follow the *parent's* sort. Render both lists.
+	describe("rendered through the real renderNodeList", () => {
+		async function renderRoot(sortMode: "manual" | "alphabetical") {
+			const app = new MockApp();
+			const views = new ViewsManager(app as unknown as App, [], "v1", () => {});
+			const viewId = views.getViews()[0].id;
+			views.updateStatusGovernance(viewId, null, { sortMode });
+			const { folder } = buildThreeSiblings(views, viewId);
+			views.deleteMetaFolder(viewId, folder.id);
+			const root = views.getView(viewId)!;
+
+			const label = (n: ViewNode) => (n.type === "meta" ? n.label! : (n.ref as { path: string }).path);
+			const fake = makeFakeExplorer(makeStatusesManager(), {
+				resolveRef: vi.fn(async (ref: { path: string }) => ({ text: ref.path, icon: "file", promoted: false, added: false, missing: false })),
+			});
+			const container = document.createElement("div");
+			await callRenderNodeList(fake, root.root, container, root, 0, [root]);
+			const byId = new Map(root.root.map((n) => [n.id, label(n)]));
+			return rowOrder(container).map((id) => byId.get(id));
+		}
+
+		it("under a Manual parent the lifted children render in the removed Folder's slot", async () => {
+			expect(await renderRoot("manual")).toEqual(["A", "C1.md", "C2.md", "B"]);
+		});
+
+		it("under an A-Z parent the lifted children are sorted with their new siblings, not left in the Folder's slot", async () => {
+			// Same stored order as above; only the parent's sort differs — B now precedes the lifted C files.
+			expect(await renderRoot("alphabetical")).toEqual(["A", "B", "C1.md", "C2.md"]);
+		});
+	});
 });
 
 describe("PR-1 E15 — folder-source reconciliation stamps new nodes it creates", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		vi.setSystemTime(7_000_000);
+	});
+
+	// PR-1 R7: put the real timers back so a block added below this one can't inherit fake ones.
+	afterEach(() => {
+		vi.useRealTimers();
 	});
 
 	it("refreshFolderSource stamps a freshly-discovered managed child with placedAt", () => {

@@ -844,19 +844,20 @@ export class ViewsManager {
 	 * ref (PR 13) has more than one placement can resolve to the *other* copy, not the one this call
 	 * just moved.
 	 *
-	 * PR-1 (G10/G15): also stamps `placedAt` — fresh on both branches, since placing a unit
-	 * always means "into its current parent right now," whether that's a brand-new node or one
-	 * moved here from wherever it was placed before (a drag-reorder within the same parent goes
-	 * through `moveNode` instead, which only restamps on an actual parent change).
+	 * PR-1 (G10/G15): also stamps `placedAt` for a brand-new node, and for an already-placed one
+	 * moved here from a *different* parent. A same-parent placement ("Place in" onto the node's own
+	 * current parent) leaves the stamp alone, same as `moveNode`'s same-parent reorder (G10: a
+	 * same-parent action must not restamp).
 	 *
 	 * PR-3 (G1/E1 for the inbox): `position`, when given, is the index among `parentId`'s (or the
 	 * bucket root's) `children` this unit lands at — an inbox drop on a row's edge, not just its
 	 * middle. Omitted (the only way every pre-PR-3 caller still calls this), it appends, same as
 	 * before. Out of range, it clamps to the end rather than throwing or silently dropping the
-	 * unit. Unlike `moveNode`, this never needs the same-parent downward-index adjustment: a unit
-	 * coming from the inbox is by definition not already placed anywhere in this view, so the
-	 * "already placed" branch below only ever fires for a *different* prior parent, never this
-	 * same `targetChildren` array. */
+	 * unit. Like `moveNode`, `position` is read against the array as it stood before this call
+	 * removes the unit: when the unit is already placed in this same parent above `position`,
+	 * removing it shifts every later slot left by one, so the index is adjusted by one to
+	 * compensate. The inbox drop never hits that case (an inbox unit isn't placed in this view),
+	 * but a "Place in" onto the unit's own parent could. */
 	placeUnit(viewId: string, ref: UnitRef, parentId: string | null, position?: number): ViewNode | null {
 		const view = this.getView(viewId);
 		if (!view) return null;
@@ -865,13 +866,17 @@ export class ViewsManager {
 		const parent = parentId ? this.findNode(view.root, parentId) : null;
 		const targetChildren = parent ? parent.node.children : view.root;
 		let node: ViewNode;
+		const sameParent = !!existing && existing.siblings === targetChildren;
 		const insert = (n: ViewNode): void => {
 			if (position === undefined) targetChildren.push(n);
-			else targetChildren.splice(Math.max(0, Math.min(position, targetChildren.length)), 0, n);
+			else {
+				const adjusted = sameParent && existing && existing.index < position ? position - 1 : position;
+				targetChildren.splice(Math.max(0, Math.min(adjusted, targetChildren.length)), 0, n);
+			}
 		};
 		if (existing) {
 			[node] = existing.siblings.splice(existing.index, 1);
-			node.placedAt = Date.now();
+			if (!sameParent) node.placedAt = Date.now();
 			insert(node);
 		} else {
 			node = { id: generateNodeId(), type: "unit", ref, children: [], placedAt: Date.now() };
@@ -1220,7 +1225,7 @@ export class ViewsManager {
 	 * meta folder already could, without a real disk move.
 	 *
 	 * PR-1 (G10): also restamps `placedAt` — but only when the target parent container is actually
-	 * a *different* array from the one the node is moving out of (`samePParent`, captured before
+	 * a *different* array from the one the node is moving out of (`sameParent`, captured before
 	 * either splice touches either array). A same-parent reorder (drag within one list) leaves the
 	 * stamp alone; moving to a different parent (including moving to/from the view root) always
 	 * counts as a fresh placement, same as `placeUnit`.
@@ -1245,18 +1250,18 @@ export class ViewsManager {
 		if (newParentId && !newParent) return false;
 
 		const targetChildren = newParent ? newParent.node.children : view.root;
-		const samePParent = targetChildren === found.siblings;
+		const sameParent = targetChildren === found.siblings;
 		const oldIndex = found.index;
 		let targetIndex = index;
-		if (samePParent && oldIndex < targetIndex) targetIndex -= 1;
+		if (sameParent && oldIndex < targetIndex) targetIndex -= 1;
 
 		found.siblings.splice(oldIndex, 1);
 		const clampedIndex = Math.max(0, Math.min(targetIndex, targetChildren.length));
-		if (samePParent && clampedIndex === oldIndex) {
+		if (sameParent && clampedIndex === oldIndex) {
 			found.siblings.splice(oldIndex, 0, found.node); // E1: restores the exact pre-call array.
 			return true;
 		}
-		if (!samePParent) found.node.placedAt = Date.now();
+		if (!sameParent) found.node.placedAt = Date.now();
 		targetChildren.splice(clampedIndex, 0, found.node);
 		this.save();
 		return true;

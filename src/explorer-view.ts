@@ -11,7 +11,7 @@ import {
 	flattenMetaFolders,
 	nodeHasApiRows,
 } from "./views";
-import { resolveOutsidePath } from "./folder-source-outside";
+import { outsideChildMtime, resolveOutsidePath } from "./folder-source-outside";
 import { DropDecision, DropZone, resolveDropDecision, resolveDropZone } from "./drop-zones";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
@@ -50,6 +50,8 @@ import {
 	SORT_MODE_ICONS,
 	SortRefreshGate,
 	EffectiveSort,
+	displayNameFor,
+	validPlacedAt,
 } from "./sort";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
@@ -490,8 +492,9 @@ function addSwapItems(menu: Menu, host: SwapMenuHost, view: View, node: ViewNode
  * Reverse-disabled-for-Manual rule (G11/F8) can't drift between call sites. `governance` is read
  * live, right when the submenu opens (not captured once at the outer menu's build time), so the
  * ticked mode and Reverse's checked/disabled state can never go stale between the two clicks.
- * G19: picking any mode here always resets Reverse to off; the Reverse item itself only ever
- * flips `sortReverse`, never the mode. Adds no separator — the caller owns it. */
+ * G19: picking any mode here always resets Reverse to off; the Reverse item flips the effective
+ * direction and changes the mode only to pin an inherited status sort to this row (PR-2 R12).
+ * Adds no separator — the caller owns it. */
 function addSortMenuItem(
 	menu: Menu,
 	evt: Pick<MouseEvent, "clientX" | "clientY">,
@@ -529,10 +532,15 @@ function addSortMenuItem(
 				// absent own setting that's currently following an inherited status sort shows ticked
 				// here too.
 				if (statusGovernor) {
+					// PR-1 (PR-2 R9): "(inherited)" only when this row really is following its
+					// ancestor's status sort — no own setting, and the reaching governor is another
+					// row that sorts by status. An explicit own Status, or a governor that isn't
+					// sorting by status, inherits nothing.
 					const isOwnGovernor = !!governance.statusEnabled && !!governance.statusSetId;
+					const isInherited = !isOwnGovernor && governance.sortMode === undefined && statusGovernor.sortMode === "status";
 					chooser.addItem((entry) =>
 						entry
-							.setTitle(isOwnGovernor ? "Status" : "Status (inherited)")
+							.setTitle(isInherited ? "Status (inherited)" : "Status")
 							.setChecked(active?.mode === "status")
 							.onClick(() => onChange({ sortMode: "status", sortReverse: false }))
 					);
@@ -543,7 +551,16 @@ function addSortMenuItem(
 						.setTitle("Reverse order")
 						.setChecked(active !== null && !!active.reverse)
 						.setDisabled(active === null)
-						.onClick(() => onChange({ sortReverse: !governance.sortReverse }))
+						.onClick(() => {
+							if (!active) return;
+							// PR-1 (PR-2 R12): flips the *effective* direction. A row with no own mode
+							// is following an inherited status sort whose direction comes from the
+							// governor, so flipping only this row's own `sortReverse` would change
+							// nothing on screen; write the effective mode alongside it so the flip
+							// takes effect and stays in step with the render pass.
+							if (governance.sortMode === undefined) onChange({ sortMode: active.mode, sortReverse: !active.reverse });
+							else onChange({ sortReverse: !active.reverse });
+						})
 				);
 				chooser.showAtPosition({ x: evt.clientX, y: evt.clientY });
 			})
@@ -799,6 +816,30 @@ export class AtlasExplorerView extends ItemView {
 	 * per `render()` call (via `sortRefreshGate.consume()`), not per list, so every Modified-sorted
 	 * list in the same pass refreshes together or not at all. */
 	private sortRefreshAllowedForThisRender = false;
+	/** PR-1 (PR-2 R4): true while a render that consumed the gate's refresh has not yet finished as
+	 * the current render. Atlas fires unawaited renders, so such a render can be superseded
+	 * mid-await; the gate was already cleared, so without this the newer render would see "no
+	 * refresh pending" and serve stale cached mtimes for refs the superseded one never reached,
+	 * losing the trigger's re-sort until the next trigger. The next render inherits the allowance;
+	 * the first one that finishes as current clears it. If a drag has started by then, the next
+	 * render instead puts the allowance back on the gate (`markDirty`) so the first render after
+	 * the drag takes it. */
+	private sortRefreshUnfinished = false;
+	/** PR-1 (PR-2 R5): true from a window-level `dragstart` until the drag is known to be over. A
+	 * render clears `dragPayload`/`inboxDragRowEl`/`bucketDragRowEl` (the dragged row is about to be
+	 * detached), so only the first render during a drag could see "a drag is in progress"; this
+	 * outlives that clearing so every render during the same physical drag defers the sort refresh.
+	 * Cleared by `dragend`, `drop`, or any pointer event — the browser fires none of the pointer
+	 * events during a native drag, so one arriving means the drag is over even when `dragend` was
+	 * lost with a detached drag source. */
+	private nativeDragActive = false;
+	/** PR-1 (PR-2 R11): true between a `pointerdown` and the end of that gesture (`pointerup`,
+	 * `dragend`, `contextmenu`). Obsidian activates a leaf from a capture-phase `pointerdown`, so
+	 * `active-leaf-change` fires mid-gesture; rendering then detaches the row under the pointer and
+	 * its click never fires. */
+	private pointerGestureActive = false;
+	/** PR-1 (PR-2 R11): a focus-regain refresh that arrived mid-gesture and is waiting for it to end. */
+	private renderAfterPointerGesture = false;
 	/** The last row clicked (in either scope) — where a following shift-click's range starts from.
 	 * Cleared implicitly by scope: a shift-click only extends a range if the anchor's own scope
 	 * matches the row just clicked, so a stray shift-click in the *other* list can't try to build a
@@ -917,7 +958,13 @@ export class AtlasExplorerView extends ItemView {
 						// going to, so the Modified re-sort was deferred to whatever render happened
 						// to come along later (typically the next autosave), which is exactly the
 						// timing G9/E4 forbid. Queue the refresh this trigger itself promised.
-						this.queueRender();
+						// PR-1 (PR-2 R11): Obsidian activates a leaf from a capture-phase
+						// `pointerdown`, so when the user clicks a row while another pane was
+						// active this fires *before* the click. Rendering now would detach the
+						// row under the pointer and swallow the click (or the drag), so a refresh
+						// that arrives mid-gesture waits until the gesture ends.
+						if (this.pointerGestureActive) this.renderAfterPointerGesture = true;
+						else this.queueRender();
 					}
 				} else {
 					this.viewLoadTrigger.deactivate();
@@ -940,7 +987,48 @@ export class AtlasExplorerView extends ItemView {
 		// unrelated drag hovering a module row within the dwell window could pop the Contents modal
 		// using stale drag data. This window-level backstop clears it (and cancels any pending dwell
 		// timer) whenever a drag ends, regardless of how.
+		// PR-1 (PR-2 R11): tracks whether a pointer gesture is under way, so the focus-regain refresh
+		// can wait for it. Registered on the document in the capture phase: that runs before
+		// Obsidian's own capture-phase `pointerdown` listener on the leaf container (the one that
+		// activates the leaf), so the flag is already set when `active-leaf-change` fires. Browsers
+		// dispatch `pointerup`, `mouseup` and `click` back-to-back from one input event, so the
+		// `setTimeout(0)` render `queueRender` schedules from `pointerup` runs after the click.
+		const doc = document;
+		this.registerDomEvent(
+			doc,
+			"pointerdown",
+			() => {
+				this.pointerGestureActive = true;
+				this.nativeDragActive = false;
+			},
+			true
+		);
+		this.registerDomEvent(
+			doc,
+			"pointerup",
+			() => {
+				this.nativeDragActive = false;
+				this.endPointerGesture();
+			},
+			true
+		);
+		this.registerDomEvent(doc, "contextmenu", () => this.endPointerGesture(), true);
+		this.registerDomEvent(window, "dragstart", () => (this.nativeDragActive = true), true);
+		this.registerDomEvent(window, "drop", () => (this.nativeDragActive = false), true);
+		this.registerDomEvent(
+			doc,
+			"pointermove",
+			(evt) => {
+				this.nativeDragActive = false;
+				// No button held: the gesture is over even though its `pointerup` never reached us
+				// (released over a native menu, say). Don't leave a held-back refresh waiting.
+				if (evt.buttons === 0) this.endPointerGesture();
+			},
+			true
+		);
 		this.registerDomEvent(window, "dragend", () => {
+			this.nativeDragActive = false;
+			this.endPointerGesture();
 			this.dragPayload = null;
 			this.clearDropIndicator(); // PR-3 (G1): same abandoned-drag backstop, for the indicator line.
 			this.clearSortedDropOutline(); // PR-4 (G5): same abandoned-drag backstop, for the sorted-insert outline.
@@ -983,6 +1071,15 @@ export class AtlasExplorerView extends ItemView {
 		// wired in refreshApiSource) removes itself from this array — iterate a copy so that in-loop
 		// mutation of the live array never skips an entry.
 		for (const modal of [...this.openConfirmDeleteModals]) modal.close();
+	}
+
+	/** PR-1 (PR-2 R11): ends the current pointer gesture and, if a focus-regain refresh was held back
+	 * for it, queues that render now. */
+	private endPointerGesture(): void {
+		this.pointerGestureActive = false;
+		if (!this.renderAfterPointerGesture) return;
+		this.renderAfterPointerGesture = false;
+		this.queueRender();
 	}
 
 	/** Collapses bursts of index/view change events (a drag can fire several) into one render. */
@@ -1515,14 +1612,25 @@ export class AtlasExplorerView extends ItemView {
 		return file instanceof TFile ? file.stat.mtime : null;
 	}
 
+	/** PR-1 (R2): for a row an Outside-Vault Folder source manages, the source's id and its device-local
+	 * root path, so Modified can stat the child through the folder-source layer (`outsideChildMtime`)
+	 * instead of looking an Outside-relative name up in the vault, which never finds it. `undefined`
+	 * for every other row. */
+	private outsideSortSource(view: View, node: ViewNode): { ownerId: string; root: string } | undefined {
+		if (!this.isOutsideManagedUnit(view, node) || !node.folderSourceOwnerId) return undefined;
+		return { ownerId: node.folderSourceOwnerId, root: this.plugin.folderSourcePathStore.get(node.folderSourceOwnerId) };
+	}
+
 	/** PR-2 (G9): the Modified-sort-only wrapper around `modifiedTimeForRef` — serves the cached
 	 * value from `modifiedMtimeCache` unless `sortRefreshAllowedForThisRender` says this render
 	 * pass may recompute, or there's no cached value yet (a ref sorted by Modified for the first
 	 * time always resolves its real mtime, trigger or not). */
-	private resolvedMtimeForSort(ref: UnitRef): number | null {
-		const key = unitRefKey(ref);
+	private resolvedMtimeForSort(ref: UnitRef, outside?: { ownerId: string; root: string }): number | null {
+		// An Outside-Vault child's ref is a name relative to its source's root, so it could collide
+		// with a real vault ref of the same path — keyed by its owning source as well.
+		const key = outside ? `outside:${outside.ownerId}:${unitRefKey(ref)}` : unitRefKey(ref);
 		if (this.sortRefreshAllowedForThisRender || !this.modifiedMtimeCache.has(key)) {
-			const value = this.modifiedTimeForRef(ref);
+			const value = outside ? outsideChildMtime(outside.root, ref) : this.modifiedTimeForRef(ref);
 			this.modifiedMtimeCache.set(key, value);
 			return value;
 		}
@@ -1648,7 +1756,7 @@ export class AtlasExplorerView extends ItemView {
 		// lines are about to leave behind. Consumed into `sortRefreshAllowedForThisRender` further
 		// down, after the view-switch branch's own `markDirty()` call below so a trigger that fires
 		// in *this* render pass (a genuine view switch) is already reflected in this same render.
-		const dragInProgress = !!(this.dragPayload || this.inboxDragRowEl || this.bucketDragRowEl);
+		const dragInProgress = !!(this.dragPayload || this.inboxDragRowEl || this.bucketDragRowEl || this.nativeDragActive);
 		// PR-1.S1: the bucket and inbox share one scroll body (`.atlas-explorer-scroll`) under a
 		// fixed toolbar. Capturing its scrollTop here means a click-driven re-render (multi-select,
 		// status change, drag drop) doesn't snap the panel back to the top; it's restored after the
@@ -1730,7 +1838,13 @@ export class AtlasExplorerView extends ItemView {
 			}
 			// PR-2 (G9): consumed here, after the view-switch branch above has had its chance to
 			// `markDirty()` for this same render pass — see `dragInProgress`'s own comment for why.
-			this.sortRefreshAllowedForThisRender = this.sortRefreshGate.consume(dragInProgress);
+			// PR-1 (PR-2 R4): a superseded render that consumed the refresh hands it on (see
+			// `sortRefreshUnfinished`). During a drag the refresh must keep waiting, so an allowance
+			// the superseded render had already consumed (a drag that started after it) goes back
+			// onto the gate: the gate is what survives until the first render after the drag ends.
+			if (dragInProgress && this.sortRefreshUnfinished) this.sortRefreshGate.markDirty();
+			this.sortRefreshAllowedForThisRender = this.sortRefreshGate.consume(dragInProgress) || (this.sortRefreshUnfinished && !dragInProgress);
+			this.sortRefreshUnfinished = this.sortRefreshAllowedForThisRender;
 
 			this.renderToolbar(container, view);
 			if (filterHadFocus && this.filterInputEl) {
@@ -1795,7 +1909,10 @@ export class AtlasExplorerView extends ItemView {
 			// `isCurrent()`: a superseded render's `finally` must not clear the field out from under
 			// whichever later render is still relying on it as its own restore target (see the comment
 			// where `pendingScrollTop` is read, at the top of this method).
-			if (isCurrent()) this.pendingScrollTop = null;
+			if (isCurrent()) {
+				this.pendingScrollTop = null;
+				this.sortRefreshUnfinished = false; // PR-1 (PR-2 R4): the refresh landed in the live DOM.
+			}
 		}
 	}
 
@@ -2113,6 +2230,16 @@ export class AtlasExplorerView extends ItemView {
 		// track means collapsed content has no interactable area regardless.
 		this.makeDropZone(sectionInner, { kind: "bucket-root", viewId: view.id });
 
+		// PR-1 (G7): right-clicking the Bucket header offers the same "Sort children…" submenu as
+		// any row, writing through the view itself (nodeId: null) — the same root-governor
+		// mechanism the top-level render call below resolves status against. PR-1 (R6): attached
+		// before the `await renderNodeList` below, not after it, so a right-click during a slow
+		// first render gets this menu rather than the native one.
+		header.addEventListener("contextmenu", (evt) => {
+			evt.preventDefault();
+			this.showBucketHeaderMenu(evt, view);
+		});
+
 		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
 		this.bucketListEl = listEl; // PR 20: queried live for shift-click range selection
 		// PR 17: the view itself is the root governor — top-level items resolve their status against
@@ -2122,13 +2249,6 @@ export class AtlasExplorerView extends ItemView {
 		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
 		chevron.addEventListener("click", () => this.onSectionChevronClick("bucket", parts));
 		title.addEventListener("click", () => this.onSectionTitleClick("bucket", parts));
-		// PR-1 (G7): right-clicking the Bucket header offers the same "Sort children…" submenu as
-		// any row, writing through the view itself (nodeId: null) — the same root-governor
-		// mechanism the top-level render call just above already resolves status against.
-		header.addEventListener("contextmenu", (evt) => {
-			evt.preventDefault();
-			this.showBucketHeaderMenu(evt, view);
-		});
 	}
 
 	private showBucketHeaderMenu(evt: MouseEvent, view: View): void {
@@ -2288,11 +2408,13 @@ export class AtlasExplorerView extends ItemView {
 			const sortKeyFor = async (r: Resolved): Promise<SortKey> => {
 				if (r.apiItem) return { name: r.apiItem.label, mtime: null, placedAt: null };
 				const { node } = r;
-				const placedAt = node.placedAt ?? null;
-				if (node.type === "meta" || !node.ref) return { name: node.label ?? "", mtime: null, placedAt };
+				// PR-1 (R6): `placedAt` comes from a hand-editable `data.json`; a non-number would
+				// make the comparator return NaN and the order unstable.
+				const placedAt = validPlacedAt(node.placedAt);
+				if (node.type === "meta" || !node.ref) return { name: displayNameFor(node, undefined), mtime: null, placedAt };
 				if (directMode === "time-added") return { name: "", mtime: null, placedAt };
-				const mtime = directMode === "modified" ? this.resolvedMtimeForSort(node.ref) : null;
-				const name = directMode === "alphabetical" ? (await this.resolveRef(node.ref)).text : "";
+				const mtime = directMode === "modified" ? this.resolvedMtimeForSort(node.ref, this.outsideSortSource(view, node)) : null;
+				const name = directMode === "alphabetical" ? displayNameFor(node, (await this.resolveRef(node.ref)).text) : "";
 				return { name, mtime, placedAt };
 			};
 			const keyed = await Promise.all(resolved.map(async (r) => ({ r, key: await sortKeyFor(r) })));
@@ -2745,7 +2867,7 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	/** PR-2 (G13): a small icon + tooltip on a Folder row (or the Bucket header, via
+	/** PR-2 (G13): a small icon + tooltip on a Folder or unit row (or the Bucket header, via
 	 * `renderBucketSection`) whose own children are actually sorted by something other than
 	 * Manual. Built on `activeSortFor` — the same helper the render pass's own status-sort
 	 * activation and the "Sort children…" menu's Status tick use — so this can never show an
@@ -2876,6 +2998,15 @@ export class AtlasExplorerView extends ItemView {
 		// PR-1 R4: a unit (not just a meta folder) can hold a data source after Create or Swap, and
 		// needs the same ok/failed/awaiting-confirmation signal.
 		this.renderConnectionDots(row, node);
+		// PR-2 R7 (G13): a unit row (a module, or any unit holding children) gets the same "Sort
+		// children…" menu as a Folder (G6), so it shows the same icon + tooltip when its own children
+		// are sorted. Same `[node, ...ancestors]` convention `renderNodeList` uses to recurse.
+		// A row with no children has nothing to sort, so the status sort it would only inherit from
+		// a governor above is not shown (that would put an icon on every leaf in a sorted list); an
+		// explicitly set own mode still shows.
+		if (node.children.length > 0 || node.sortMode !== undefined) {
+			this.renderSortIndicator(row, node, this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null);
+		}
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
 		// PR-1.F2 (G5/G7): "filtered out" takes the place of "last seen". Remove works the same way as on a
@@ -3251,7 +3382,8 @@ export class AtlasExplorerView extends ItemView {
 			// E2: a target inside the dragged node's own subtree can never accept an edge drop (its
 			// own parent is itself inside that subtree, so `moveNode`'s cycle guard would refuse it
 			// anyway) — fall back to the plain, pre-PR-3 nest highlight rather than show a line that
-			// promises a move the drop will silently refuse.
+			// promises a move the drop will silently refuse. A target that is itself in the batch is
+			// not covered here (PR-3 R2): it takes the normal edge/nest path below.
 			if (this.isCycleDrop(target.viewId, target.nodeId)) {
 				zone = "nest";
 				this.clearDropIndicator();
@@ -3314,18 +3446,23 @@ export class AtlasExplorerView extends ItemView {
 		this.dropIndicatorEl = null;
 	}
 
-	/** PR-3 (E2): true when any node in the currently-dragged payload is `nodeId` itself, or an
-	 * ancestor of it — i.e. dropping on `nodeId` (or any edge of it) would require reparenting a
-	 * node into its own descendant, which `moveNode`'s own cycle guard already refuses
-	 * unconditionally. Used only to decide the *visual* feedback during `dragover`; the actual
-	 * refusal happens in `moveNode` regardless of whether this check runs at all. */
+	/** PR-3 (E2): true when `nodeId` sits strictly inside the subtree of a node in the currently-dragged
+	 * payload — i.e. dropping on `nodeId` (or any edge of it) would require reparenting a node into its
+	 * own descendant, which `moveNode`'s own cycle guard already refuses unconditionally. Used only to
+	 * decide the *visual* feedback during `dragover`; the actual refusal happens in `moveNode`
+	 * regardless of whether this check runs at all.
+	 *
+	 * PR-3 R2: a target that is itself one of the dragged nodes is *not* a cycle for edge purposes.
+	 * It is part of the batch: an edge drop lands the whole batch together at the slot beside it, in
+	 * drag order, and the target's own move is the usual no-op (E1) or a harmless reorder. Only the
+	 * nest zone onto the dragged row itself is refused, by `moveNode`'s cycle guard. */
 	private isCycleDrop(viewId: string, nodeId: string): boolean {
 		const payload = this.dragPayload;
 		if (!payload || payload.kind !== "node" || payload.viewId !== viewId) return false;
 		const view = this.plugin.viewsManager.getView(viewId);
 		if (!view) return false;
 		return payload.nodeIds.some((draggedId) => {
-			if (draggedId === nodeId) return true;
+			if (draggedId === nodeId) return false;
 			const dragged = this.findNodeAnywhere(view.root, draggedId);
 			return !!dragged && this.nodeContainsDescendant(dragged.node, nodeId);
 		});
@@ -3586,7 +3723,12 @@ export class AtlasExplorerView extends ItemView {
 	 * `renderApiItemRow`/`renderTruncationGroupHeader` all create a row as a direct child of
 	 * whichever list element `renderNodeList` was handed (`listEl` at the bucket root,
 	 * `childrenInner` for a nested Folder/unit) — never any other wrapper layer at the row's own
-	 * depth. Same one-at-a-time convention as `showDropIndicator`/`dropIndicatorEl`. */
+	 * depth. Same one-at-a-time convention as `showDropIndicator`/`dropIndicatorEl`.
+	 *
+	 * Known limitation (PR-4 R6): for a folder-source *hoisted* row (G20) that list is the
+	 * grandparent's rendered list, while the drop decision and landing use the row's real hidden
+	 * parent and that parent's sort. The outline can therefore highlight a list the item won't land
+	 * in. The decision and the landing are right; only the highlight is approximate. */
 	private showSortedDropOutline(el: HTMLElement): void {
 		const list = el.parentElement;
 		if (!list) return;

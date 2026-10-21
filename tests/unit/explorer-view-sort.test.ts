@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types";
 import { activeSortFor } from "../../src/sort";
 import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, proto, realNode, rowOrder, view } from "./explorer-view-sort-truncate-helpers";
@@ -555,8 +558,8 @@ describe("PR-2 G19/E5 — activeSortFor: absent vs. explicit Manual vs. explicit
 		expect(activeSortFor({ sortMode: "status", sortReverse: true }, governor)).toEqual({ mode: "status", reverse: true });
 	});
 
-	it("explicit Status on this row with no governor reachable at all still resolves to status (G19's own setting wins, independent of governance)", () => {
-		expect(activeSortFor({ sortMode: "status" }, null)).toEqual({ mode: "status", reverse: false });
+	it("PR-2 R6: explicit Status on this row with no governor reachable resolves to nothing (effectively Manual) — the render pass has no status set to rank by, so the indicator and menu must not claim a sort", () => {
+		expect(activeSortFor({ sortMode: "status" }, null)).toBeNull();
 	});
 });
 
@@ -614,5 +617,106 @@ describe("PR-4 G5 — sorted-place landing: display always follows the sort, the
 		const manualContainer = document.createElement("div");
 		await callRenderNodeList(renderFake, folderNode.children, manualContainer, view, 1, [folderNode]);
 		expect(rowOrder(manualContainer)).toEqual(["Oslo.md", "Annual.md", "Quarry.md", "Zebra.md"]);
+	});
+});
+
+// PR-1 (R6): `placedAt` is read from a hand-editable data.json; a non-number must not poison the
+// comparator (NaN comparisons give an unstable order).
+describe("PR-1 R6 — a hand-edited non-number placedAt counts as 'no stamp' under Time added", () => {
+	it("string, NaN and null stamps sort last in build order, after the validly stamped rows (newest first)", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "time-added" });
+		const mk = (id: string, placedAt: unknown) => realNode(id, { ref: { kind: "file", path: `${id}.md` }, placedAt: placedAt as number });
+		const rows = [mk("str", "2026-01-01"), mk("old", 100), mk("nan", Number.NaN), mk("new", 500), mk("nul", null), mk("inf", Number.POSITIVE_INFINITY)];
+
+		const container = document.createElement("div");
+		await callRenderNodeList(makeFakeExplorer(sm), rows, container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["new", "old", "str", "nan", "nul", "inf"]);
+	});
+
+	it("the same holds reversed: invalid stamps still sort last, not first", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "time-added", sortReverse: true });
+		const mk = (id: string, placedAt: unknown) => realNode(id, { ref: { kind: "file", path: `${id}.md` }, placedAt: placedAt as number });
+		const rows = [mk("str", "oops"), mk("old", 100), mk("new", 500)];
+
+		const container = document.createElement("div");
+		await callRenderNodeList(makeFakeExplorer(sm), rows, container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["old", "new", "str"]);
+	});
+});
+
+// PR-1 (R2): Outside-Vault Folder-source children are named relative to their source's root, which
+// the vault can't look up. Modified stats them through the folder-source layer instead, so they sort
+// normally (G18) rather than all counting as 'no time'. Real files in a real temp directory.
+describe("PR-1 R2 — Modified sorts Outside-Vault Folder-source children by their real file mtime", () => {
+	function makeOutsideRoot(files: Record<string, number>): string {
+		const root = mkdtempSync(join(tmpdir(), "atlas-outside-mtime-"));
+		for (const [name, seconds] of Object.entries(files)) {
+			writeFileSync(join(root, name), name);
+			utimesSync(join(root, name), seconds, seconds);
+		}
+		mkdirSync(join(root, "Sub"));
+		return root;
+	}
+	const outsideChild = (id: string, ref: ViewNode["ref"]): ViewNode => realNode(id, { ref, folderSourceManaged: true, folderSourceOwnerId: "owner" });
+	const outsideFake = (root: string, overrides = {}) =>
+		makeFakeExplorer(makeStatusesManager(), {
+			isOutsideManagedUnit: vi.fn(() => true),
+			plugin: { statusesManager: makeStatusesManager(), settings: {}, viewsManager: { managedRowFilterState: vi.fn(() => "shown") }, folderSourcePathStore: { get: vi.fn(() => root) } } as never,
+			...overrides,
+		});
+
+	it("sorts newest file first, with a folder child (no time) last — also reversed", async () => {
+		const root = makeOutsideRoot({ "old.md": 1_000, "new.md": 3_000, "mid.md": 2_000 });
+		try {
+			const owner = folderGovernor({ id: "owner", sortMode: "modified" });
+			const kids = [outsideChild("sub", { kind: "folder", path: "Sub" }), outsideChild("old", { kind: "file", path: "old.md" }), outsideChild("new", { kind: "file", path: "new.md" }), outsideChild("mid", { kind: "file", path: "mid.md" })];
+
+			const container = document.createElement("div");
+			await callRenderNodeList(outsideFake(root), kids, container, view, 1, [owner]);
+			expect(rowOrder(container)).toEqual(["new", "mid", "old", "sub"]);
+
+			const reversed = document.createElement("div");
+			await callRenderNodeList(outsideFake(root), kids, reversed, view, 1, [{ ...owner, sortReverse: true }]);
+			expect(rowOrder(reversed)).toEqual(["old", "mid", "new", "sub"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("an Outside child never reads the vault, and a vault file of the same relative name doesn't share its cached time", async () => {
+		const root = makeOutsideRoot({ "note.md": 9_000 });
+		try {
+			const owner = folderGovernor({ id: "owner", sortMode: "modified" });
+			const outside = outsideChild("outside", { kind: "file", path: "note.md" });
+			const fake = outsideFake(root, { modifiedTimeForRef: vi.fn(() => 1) });
+			// Same ref the vault would key as "file:note.md"; the vault copy is far older.
+			const vaultTwin = realNode("vault", { ref: { kind: "file", path: "note.md" } });
+			fake.isOutsideManagedUnit = vi.fn((_v: unknown, n: ViewNode) => n.id === "outside");
+
+			const container = document.createElement("div");
+			await callRenderNodeList(fake, [vaultTwin, outside], container, view, 1, [owner]);
+
+			expect(rowOrder(container)).toEqual(["outside", "vault"]); // 9_000_000 ms vs the vault's 1 ms
+			expect(fake.modifiedTimeForRef).toHaveBeenCalledTimes(1); // only the vault row went through the vault lookup
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("an Outside child whose file has vanished since the last scan counts as no time rather than throwing", async () => {
+		const root = makeOutsideRoot({ "here.md": 5_000 });
+		try {
+			const owner = folderGovernor({ id: "owner", sortMode: "modified" });
+			const kids = [outsideChild("gone", { kind: "file", path: "gone.md" }), outsideChild("here", { kind: "file", path: "here.md" })];
+			const container = document.createElement("div");
+			await callRenderNodeList(outsideFake(root), kids, container, view, 1, [owner]);
+			expect(rowOrder(container)).toEqual(["here", "gone"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

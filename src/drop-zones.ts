@@ -32,7 +32,7 @@ export function resolveDropZone(offsetY: number, rowHeight: number, hasBottomZon
 
 /** PR-4 (G4/G5/G22): what an edge/nest drop over a row actually does, once the row's own target
  * list's effective sort is known —
- * - `"nest"`: the zone itself is `\"nest\"` — unaffected by sort, same as before this PR.
+ * - `"nest"`: the zone itself is `"nest"` — unaffected by sort, same as before this PR.
  * - `"reorder"`: the target list is effectively Manual (`effectiveSort` is `null`) — a plain
  *   edge-drop sibling-insert, same as PR-3.
  * - `"refuse"`: the target list *is* sorted, and the drag is a row already a child of that same

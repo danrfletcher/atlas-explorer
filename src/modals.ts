@@ -237,9 +237,13 @@ export class StatusesModal extends Modal {
 					.setValue(this.governance.sortMode === "status")
 					.setDisabled(disabled)
 					.onChange((value) => {
+						// G12/G19: on sets Status from whatever mode was set before; off can only
+						// have come from Status (the toggle shows on only then), and sets Manual.
+						// Like picking a mode in the "Sort children…" menu, either resets Reverse.
 						this.governance.sortMode = value ? "status" : "manual";
-						this.onChange({ sortMode: this.governance.sortMode });
-						reverseToggle?.setDisabled(disabled || !value);
+						this.governance.sortReverse = false;
+						this.onChange({ sortMode: this.governance.sortMode, sortReverse: false });
+						reverseToggle?.setValue(false).setDisabled(disabled || !value);
 					})
 			);
 		new Setting(contentEl)

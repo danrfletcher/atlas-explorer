@@ -95,10 +95,17 @@ export function currentSortMode(governance: Pick<StatusGovernance, "sortMode">):
 /** G8/G9/E12: the key used to break ties under A-Z — the row's *displayed* name: a meta Folder's
  * label, or (for a unit) whatever text the caller already resolved for it (block title/first
  * line, file name, module name, or a missing ref's last-known name — `resolveRef` already falls
- * back to that last case on its own). */
+ * back to that last case on its own). Used by the render pass's `sortKeyFor` for every non-API row. */
 export function displayNameFor(node: ViewNode, resolvedText: string | undefined): string {
 	if (node.type === "meta") return node.label ?? "";
 	return resolvedText ?? "";
+}
+
+/** PR-1 (R6): a stored `placedAt` is only trusted when it is a finite number. `data.json` is
+ * hand-editable, and a string/NaN/Infinity would make `compareSortKeys` return NaN and the order
+ * unstable; anything else counts as "no stamp" (sorts last, G10), same as an absent one. */
+export function validPlacedAt(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 /** PR-2: the effective (mode, direction) a list actually renders by, once "absent falls back to
@@ -113,17 +120,25 @@ export interface EffectiveSort {
  * `View` root; never an inherited one, F6) with the nearest reachable status governor
  * (`statusGovernor`, from `StatusesManager.findSortGovernor`) into the one effective sort this
  * list actually renders by. An explicit own `sortMode` — any value, including `"manual"` — always
- * wins outright; only an *absent* own setting ever falls through to an inherited status sort.
+ * wins outright (an own `"status"` only counts while a status set is reachable to rank by — with
+ * none, the render pass leaves the rows in manual order, so this returns `null`); only an *absent*
+ * own setting ever falls through to an inherited status sort.
  * Shared by the render pass's own status-sort activation, the "Sort children…" menu's Status
  * tick/label and the G13 sort indicator, so the three can't drift apart on what "currently sorted
  * by status" means. */
 export function activeSortFor(
 	ownGovernance: Pick<StatusGovernance, "sortMode" | "sortReverse">,
-	statusGovernor: Pick<StatusGovernance, "sortMode" | "sortReverse"> | null
+	statusGovernor: Pick<StatusGovernance, "sortMode" | "sortReverse" | "statusSetId"> | null
 ): EffectiveSort | null {
 	const ownMode = ownGovernance.sortMode;
 	if (ownMode !== undefined) {
 		if (ownMode === "manual") return null;
+		// PR-1 (PR-2 R6): an own "status" sort needs a status set to rank by, and the render pass
+		// only sorts when the reaching governor has one (`findSortGovernor` only ever returns a
+		// governor with statuses enabled and a set chosen). With none — a governor whose statuses
+		// were switched off after it was sorted by Status, say — the rows are in manual order, so
+		// the effective sort is Manual and the indicator/menu must say so too.
+		if (ownMode === "status" && !statusGovernor?.statusSetId) return null;
 		return { mode: ownMode, reverse: !!ownGovernance.sortReverse };
 	}
 	if (statusGovernor?.sortMode === "status") {

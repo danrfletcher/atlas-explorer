@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { App } from "obsidian";
-import { Menu } from "obsidian";
+import { Menu, Notice } from "obsidian";
 import { App as MockApp } from "../../tests/mocks/obsidian";
 import { ViewsManager } from "../../src/views";
 import { FolderSourceConfig, ViewNode } from "../../src/types";
@@ -14,6 +14,7 @@ import type { InboxSortRow } from "../../src/explorer-view";
 import { SORT_MODE_CHOICES } from "../../src/sort";
 import { file, meta, unit } from "../integration/create-from-meta-fixtures";
 import { renderUnitRow } from "./folder-source-outside-children-behavior.test";
+import { dragOverAt, flushNoticeMicrotasks, makeDropFake, makeRow } from "./explorer-view-drop-helpers";
 import { callRenderNodeList, makeFakeExplorer, makeStatusesManager, rowOrder, view as sortView } from "./explorer-view-sort-truncate-helpers";
 
 /** F5: "Folder source introduces no new disk-moving behavior beyond the three existing named
@@ -21,6 +22,8 @@ import { callRenderNodeList, makeFakeExplorer, makeStatusesManager, rowOrder, vi
  * files. Combines a static source-text check (no disk-write API call anywhere in the Folder-source
  * code) with a behavioral one (actually driving the real reconcile/refresh/rename paths against the
  * mock `Vault`'s own `calls` tracker and confirming it never records a write). */
+
+const dropUnit = (id: string, path: string): ViewNode => ({ id, type: "unit", ref: { kind: "file", path }, children: [] });
 
 const root = join(__dirname, "../..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
@@ -412,21 +415,38 @@ describe("PR-4 fence — the sorted-drop gating has no disk-write call", () => {
 		expect(noticeBody).not.toMatch(DISK_WRITE_CALL);
 	});
 
-	it("driving a real refused drop and a real sorted-insert drop records no Vault call", async () => {
+	it("driving a real refused drop and a real sorted-insert drop, through makeDropZone/handleDrop, records no Vault call", async () => {
 		const app = new MockApp();
 		app.vault.seedFile("A.md");
 		app.vault.seedFile("B.md");
-		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
-		const view = vm.getViews()[0];
-		vm.placeUnit(view.id, { kind: "file", path: "A.md" }, null);
-		vm.placeUnit(view.id, { kind: "file", path: "B.md" }, null);
-		const folderNodeId = vm.getViews()[0].root[0].id;
-		vm.getViews()[0].root[0] = { ...vm.getViews()[0].root[0], type: "meta", label: "Folder", sortMode: "alphabetical" };
+		app.vault.seedFile("C.md");
+		const sorted: ViewNode = { id: "sorted", type: "meta", label: "Sorted", sortMode: "alphabetical", children: [dropUnit("a", "A.md"), dropUnit("b", "B.md")] };
+		const loose = dropUnit("c", "C.md");
+		const vm = new ViewsManager(app as unknown as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [sorted, loose] }], "v1", () => {});
+		const fake = makeDropFake(vm, makeStatusesManager());
+		const zone = (nodeId: string) => {
+			const row = makeRow();
+			document.body.appendChild(row);
+			fake.makeDropZone(row, { kind: "node", nodeId, viewId: "v1" }, true);
+			return row;
+		};
+		Notice.reset();
 
-		// a refused in-folder edge drop
-		vm.moveNode(view.id, folderNodeId, null, 1);
-		// a sorted-insert from elsewhere
-		vm.placeUnit(view.id, { kind: "file", path: "C.md" }, null, 1);
+		// a refused in-folder edge drop: B onto A's top edge inside the sorted folder
+		fake.dragPayload = { kind: "node", nodeIds: ["b"], viewId: "v1" };
+		const refusedRow = zone("a");
+		dragOverAt(refusedRow, 5);
+		refusedRow.dispatchEvent(new Event("drop", { bubbles: true }));
+		await flushNoticeMicrotasks();
+		expect(Notice.instances.map((n) => n.message)).toEqual(["Sorted is sorted A-Z. Set it to Manual to reorder."]); // it really was refused
+		expect(vm.getViews()[0].root[0].children.map((n) => n.id)).toEqual(["a", "b"]); // and nothing moved
+
+		// a sorted-insert from elsewhere: C (a root row) onto A's top edge
+		fake.dragPayload = { kind: "node", nodeIds: ["c"], viewId: "v1" };
+		const insertRow = zone("a");
+		dragOverAt(insertRow, 5);
+		insertRow.dispatchEvent(new Event("drop", { bubbles: true }));
+		expect(vm.getViews()[0].root[0].children.map((n) => n.id)).toEqual(["c", "a", "b"]); // it really landed
 
 		expect(app.vault.calls).toEqual([]);
 	});

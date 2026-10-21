@@ -66,6 +66,10 @@ export interface FakeExplorer {
 	renderSortIndicator: (...args: unknown[]) => unknown;
 	renderApiItemRow: ((...args: unknown[]) => unknown) | ReturnType<typeof vi.fn>;
 	isOutsideManagedAndUnresolved: ReturnType<typeof vi.fn>;
+	/** PR-1 (R2): real `outsideSortSource`, backed by this stubbable `isOutsideManagedUnit` — `false`
+	 * for every node by default, so a test only opts a row into the Outside-Vault Modified path. */
+	isOutsideManagedUnit: ReturnType<typeof vi.fn>;
+	outsideSortSource: (...args: unknown[]) => unknown;
 	visibleFolderSourceRows: (...args: unknown[]) => unknown;
 	/** PR-1: stands in for the real `modifiedTimeForRef` (file-stat lookups), the same way
 	 * `resolveRef` stands in for display-text resolution — defaults to "no time" (`null`) for
@@ -107,6 +111,8 @@ export function makeFakeExplorer(sm: StatusesManager, overrides: Partial<FakeExp
 			container.createDiv({ cls: "marker-api", attr: { "data-id": item.id } });
 		}),
 		isOutsideManagedAndUnresolved: vi.fn(() => false),
+		isOutsideManagedUnit: vi.fn(() => false),
+		outsideSortSource: proto.outsideSortSource,
 		visibleFolderSourceRows: proto.visibleFolderSourceRows,
 		modifiedTimeForRef: vi.fn(() => null),
 		resolvedMtimeForSort: proto.resolvedMtimeForSort,

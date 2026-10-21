@@ -44,6 +44,7 @@ function makeFakeExplorerForRenderNode(overrides: Record<string, unknown> = {}) 
 		showUnitMenu: vi.fn(),
 		renderFoldableChildren: vi.fn(),
 		renderConnectionDots: proto.renderConnectionDots,
+		renderSortIndicator: proto.renderSortIndicator,
 		...overrides,
 	};
 }
