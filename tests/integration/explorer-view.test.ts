@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import type { App, TFile } from "obsidian";
-import { Notice } from "obsidian";
+import type { App, TAbstractFile, TFile } from "obsidian";
+import { Menu, Notice } from "obsidian";
 import { App as MockApp } from "../mocks/obsidian";
 import { ViewsManager } from "../../src/views";
-import { ApiItemState, FolderSourceConfig, PLACEHOLDER_ROW_KIND, UnitRef, View, ViewNode } from "../../src/types";
+import { ApiItemState, FolderSourceConfig, PLACEHOLDER_ROW_KIND, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "../../src/types";
 import { YamlFilterRule } from "../../src/folder-filter";
 import { AtlasSettingTab, DEFAULT_SETTINGS, AtlasSettings } from "../../src/settings";
-import { ATLAS_VIEW_TYPE, AtlasExplorerView } from "../../src/explorer-view";
+import { ATLAS_VIEW_TYPE, AtlasExplorerView, candidateFilesForAdd } from "../../src/explorer-view";
 import AtlasPlugin from "../../src/main";
+import { UnitIndex } from "../../src/unit-index";
 import { callRenderApiItemRow, callRenderNodeList, makeFakeExplorer, makeStatusesManager, proto } from "../unit/explorer-view-sort-truncate-helpers";
 
 // R1 (PR-1.F2 review): Obsidian's `Setting` is replaced with a recorder so the "Highlight the open
@@ -896,5 +897,526 @@ describe("PR-1 (deferred-findings R3) — a bucket row's own dragstart tracks it
 		const fake = h.fake as unknown as { dragPayload: unknown; bucketDragRowEl: HTMLElement | null };
 		expect(fake.dragPayload).not.toBeNull();
 		expect(fake.bucketDragRowEl).toBe(row);
+	});
+});
+
+// --- Atlas #13 PR-1: a placed file/folder that exists renders normally even when it is not a unit ----
+//
+// Dan's case: `Responsibilities.md` is placed under Areas > Career > Tracks > Short Term > FDE Play in
+// the Actionable view, then moved into the `FDE Play` folder. It has no backlink, so after the move it
+// is no longer an Atlas unit. These tests run the REAL `ViewsManager` rename rewrite, the REAL
+// `UnitIndex`, the REAL `resolveRef` and the REAL `renderNode`; only the chrome helpers a row calls
+// (drag zones, tooltips, selection) are stubbed.
+describe("Atlas #13 PR-1 — a moved note that is no longer a unit stays a normal row", () => {
+	const flushPromises = () => new Promise<void>((r) => setTimeout(r, 0));
+	const PRESENCE_REAL = ["renderNode", "renderConnectionDots", "resolveRef", "resolveOutsideManagedRowInfo", "isOutsideManagedUnit", "wireModuleRow", "matchesFilter", "removeUnitsFromView", "holdsLiveDataSource", "forgetDeviceLocalSourceState", "trackModuleModal"] as const;
+	const MOVED = "FDE Play/Responsibilities.md";
+
+	function unitNode(id: string, ref: UnitRef, children: ViewNode[] = []): ViewNode {
+		return { id, type: "unit", ref, children };
+	}
+	function metaNode(id: string, label: string, children: ViewNode[] = []): ViewNode {
+		return { id, type: "meta", label, children };
+	}
+
+	/** The Actionable view: Areas > Career > Tracks > Short Term > FDE Play > [children]. */
+	function actionableView(leaf: ViewNode[]): View {
+		return {
+			id: "actionable",
+			name: "Actionable",
+			inboxMode: "view",
+			root: [metaNode("areas", "Areas", [metaNode("career", "Career", [metaNode("tracks", "Tracks", [metaNode("short", "Short Term", [metaNode("fde", "FDE Play", leaf)])])])])],
+		};
+	}
+
+	function build(opts: { files: string[]; folders: string[]; view: View; excludedFolders?: string[]; persist?: () => void }) {
+		const app = new MockApp();
+		for (const f of opts.folders) app.vault.seedFolder(f);
+		for (const f of opts.files) app.vault.seedFile(f);
+		const settings = { ...DEFAULT_SETTINGS, excludedFolders: opts.excludedFolders ?? [] };
+		const unitIndex = new UnitIndex(app as unknown as App, settings, [], {}, [], []);
+		unitIndex.rebuild();
+		const persist = opts.persist ?? vi.fn();
+		const views = new ViewsManager(app as unknown as App, [opts.view], opts.view.id, persist);
+		// Mirrors `AtlasPlugin.onVaultRenameEvent`: the unit index first, then the views rewrite.
+		app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
+			unitIndex.onVaultRename(file, oldPath);
+			views.onVaultRename(oldPath, file.path);
+		});
+		app.vault.on("delete", (file: TAbstractFile) => {
+			unitIndex.onVaultDelete(file.path);
+			views.onVaultDelete(file.path);
+		});
+		app.vault.on("create", (file: TAbstractFile) => unitIndex.onVaultCreate(file));
+		return { app, settings, unitIndex, views, persist: persist as ReturnType<typeof vi.fn> };
+	}
+	type Built = ReturnType<typeof build>;
+
+	function explorerFor(b: Built) {
+		const explorer = {
+			plugin: {
+				app: b.app,
+				settings: b.settings,
+				unitIndex: b.unitIndex,
+				viewsManager: b.views,
+				freeBlockTextCache: undefined,
+				isModuleFolderExpanded: vi.fn(() => false),
+				setModuleFolderExpanded: vi.fn(),
+				folderSourcePathStore: { get: () => undefined },
+			},
+			filterText: "",
+			dragPayload: null,
+			selectedBucketNodeIds: new Set<string>(),
+			selectedInboxRefKeys: new Set<string>(),
+			unitsByRefKey: new Map(),
+			renderRowIcon: vi.fn(),
+			makeDropZone: vi.fn(),
+			setPlacementTooltip: vi.fn(),
+			handleSelectionClick: vi.fn(() => false),
+			bucketVisibleOrder: vi.fn(() => []),
+			buildNodeDragPayload: vi.fn(),
+			handleRowKeydown: vi.fn(),
+			showUnitMenu: vi.fn(),
+			openModuleContentsModal: vi.fn(),
+			openRef: vi.fn(),
+			renderFoldableChildren: vi.fn(async () => {}),
+			computeEffectiveCollapsed: vi.fn(async () => false),
+			renderSortIndicator: vi.fn(),
+		} as unknown as Record<string, unknown>;
+		for (const name of PRESENCE_REAL) explorer[name] = (proto as unknown as Record<string, (...a: unknown[]) => unknown>)[name].bind(explorer);
+		return explorer;
+	}
+
+	/** Mirrors `AtlasExplorerView.render`'s unit lookup, then renders `node` with the real `renderNode`. */
+	async function renderNode(b: Built, node: ViewNode, opts: { explorer?: Record<string, unknown>; ancestors?: ViewNode[] } = {}): Promise<HTMLElement> {
+		const explorer = opts.explorer ?? explorerFor(b);
+		explorer.unitsByRefKey = new Map(b.unitIndex.getUnits().map((u) => [unitRefKey(unitToRef(u)), u]));
+		const container = document.createElement("div");
+		// A Folder row is only a header here (its children are the foldable list); render the leaf
+		// unit rows it holds, which is what the user sees under "FDE Play".
+		const leaves = node.type === "meta" ? node.children : [node];
+		for (const leaf of leaves) {
+			await (explorer.renderNode as (n: ViewNode, c: HTMLElement, v: View, d: number, a: unknown[]) => Promise<void>)(leaf, container, b.views.getViews()[0], 0, opts.ancestors ?? []);
+		}
+		return container;
+	}
+
+	const rowsOf = (c: HTMLElement) => Array.from(c.querySelectorAll<HTMLElement>(".atlas-row-unit"));
+	const textOf = (row: HTMLElement) => row.querySelector(".atlas-row-text")?.textContent;
+	const nodeAt = (b: Built, id: string) => b.views.getNode("actionable", id)!;
+
+	/** The Dan scenario up to the move: a root-level unit placed under FDE Play, then renamed into `FDE Play/`. */
+	async function danScenario() {
+		const b = build({ files: ["Responsibilities.md", "Other.md"], folders: ["FDE Play"], view: actionableView([unitNode("resp", { kind: "file", path: "Responsibilities.md" })]) });
+		return b;
+	}
+	const moveIntoFolder = async (b: Built) => b.app.vault.rename(b.app.vault.getAbstractFileByPath("Responsibilities.md")!, MOVED);
+	const REFS = (b: Built) => b.unitIndex.getUnits().map((u) => unitRefKey(unitToRef(u)));
+
+	it("GP1/GP2: the move rewrites the ref and the node keeps its id and position; GP3: the row is a normal file row", async () => {
+		const b = await danScenario();
+		expect(REFS(b)).toContain("file:Responsibilities.md");
+		const before = nodeAt(b, "resp");
+		const parent = nodeAt(b, "fde");
+		await moveIntoFolder(b);
+
+		expect(REFS(b)).not.toContain(`file:${MOVED}`); // no backlink: no longer a unit
+		const after = nodeAt(b, "resp");
+		expect(after).toBe(before);
+		expect(after.ref).toEqual({ kind: "file", path: MOVED });
+		expect(parent.children.map((n) => n.id)).toEqual(["resp"]);
+
+		const row = rowsOf(await renderNode(b, parent))[0];
+		expect(textOf(row)).toBe("Responsibilities");
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(row.textContent).not.toContain("(missing)");
+		expect(row.querySelector(".atlas-row-action")).toBeNull();
+		expect(row.querySelector(".atlas-badge")).toBeNull(); // no promoted/added pill on a bucket row
+		expect(row.getAttribute("draggable")).toBe("true");
+	});
+
+	it("GP5: re-rendering from the persisted tree (a plugin reload) gives the same row", async () => {
+		const b = await danScenario();
+		await moveIntoFolder(b);
+		const first = await renderNode(b, nodeAt(b, "fde"));
+
+		const persisted = JSON.parse(JSON.stringify(b.views.getViews())) as View[];
+		const reloaded = new ViewsManager(b.app as unknown as App, persisted, "actionable", vi.fn());
+		const index2 = new UnitIndex(b.app as unknown as App, b.settings, [], {}, [], []);
+		index2.rebuild(); // "Atlas: Rebuild index"
+		const b2: Built = { ...b, views: reloaded, unitIndex: index2 };
+		const second = await renderNode(b2, reloaded.getNode("actionable", "fde")!);
+
+		expect(second.innerHTML).toBe(first.innerHTML);
+		expect(textOf(rowsOf(second)[0])).toBe("Responsibilities");
+	});
+
+	it("F1/F2/F5: rendering writes nothing, creates no promotion, and the file is not in the inbox", async () => {
+		const b = await danScenario();
+		await moveIntoFolder(b);
+		b.persist.mockClear();
+		const dataBefore = JSON.stringify(b.views.getViews());
+		const unitsBefore = JSON.stringify(b.unitIndex.getUnits());
+		const callsBefore = [...b.app.vault.calls];
+		const changes = vi.fn();
+		b.views.onChange(changes);
+
+		await renderNode(b, nodeAt(b, "fde"));
+		await renderNode(b, nodeAt(b, "fde"));
+
+		expect(b.persist).not.toHaveBeenCalled();
+		expect(changes).not.toHaveBeenCalled();
+		expect(JSON.stringify(b.views.getViews())).toBe(dataBefore);
+		expect(JSON.stringify(b.unitIndex.getUnits())).toBe(unitsBefore);
+		expect(b.app.vault.calls).toEqual(callsBefore);
+		const inbox = b.views.getInboxUnits(b.unitIndex.getUnits(), "actionable", "view", b.unitIndex);
+		expect(inbox.map((u) => u.path)).not.toContain(MOVED);
+		expect(b.views.getInboxUnits(b.unitIndex.getUnits(), "actionable", "global", b.unitIndex).map((u) => u.path)).not.toContain(MOVED);
+	});
+
+	it("GP7/F3: after the note is deleted the row is greyed '(missing)' with Remove, and the node is never auto-removed", async () => {
+		const b = await danScenario();
+		await moveIntoFolder(b);
+		await b.app.vault.delete(b.app.vault.getAbstractFileByPath(MOVED)!);
+
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(row.classList.contains("atlas-missing")).toBe(true);
+		expect(row.querySelector(".atlas-row-secondary")?.textContent).toBe("(missing)");
+		expect(row.querySelector(".atlas-row-action")).not.toBeNull();
+		expect(nodeAt(b, "resp")).toBeDefined();
+		expect(nodeAt(b, "fde").children.map((n) => n.id)).toEqual(["resp"]);
+	});
+
+	it("E4: delete then recreate at the same path flips the row missing -> normal", async () => {
+		const b = await danScenario();
+		await moveIntoFolder(b);
+		await b.app.vault.delete(b.app.vault.getAbstractFileByPath(MOVED)!);
+		expect(rowsOf(await renderNode(b, nodeAt(b, "fde")))[0].classList.contains("atlas-missing")).toBe(true);
+		await b.app.vault.create(MOVED, "");
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(textOf(row)).toBe("Responsibilities");
+	});
+
+	it("E3: a placed unit that loses its last backlink stays a normal row (no flicker to missing)", async () => {
+		const b = build({ files: ["Alpha/Doc.md", "Alpha/Alpha.md"], folders: ["Alpha"], view: actionableView([unitNode("doc", { kind: "file", path: "Alpha/Doc.md" })]) });
+		b.unitIndex.addManualPromotion({ kind: "file", path: "Alpha/Doc.md" });
+		b.unitIndex.rebuild();
+		expect(REFS(b)).toContain("file:Alpha/Doc.md");
+		expect(rowsOf(await renderNode(b, nodeAt(b, "fde")))[0].classList.contains("atlas-missing")).toBe(false);
+		// The promotion (standing in for a live backlink) goes away: no longer a unit, still there.
+		(b.unitIndex as unknown as { manualPromotions: UnitRef[] }).manualPromotions = [];
+		b.unitIndex.rebuild();
+		expect(REFS(b)).not.toContain("file:Alpha/Doc.md");
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(textOf(row)).toBe("Doc");
+	});
+
+	it("E5: the same file placed twice in one view renders both rows normally", async () => {
+		const ref: UnitRef = { kind: "file", path: MOVED };
+		const b = build({
+			files: [MOVED],
+			folders: ["FDE Play"],
+			view: actionableView([unitNode("a", ref), unitNode("b", ref)]),
+		});
+		const rows = rowsOf(await renderNode(b, nodeAt(b, "fde")));
+		expect(rows).toHaveLength(2);
+		for (const row of rows) {
+			expect(row.classList.contains("atlas-missing")).toBe(false);
+			expect(textOf(row)).toBe("Responsibilities");
+		}
+	});
+
+	it("E6: a file inside an excluded folder: existence alone decides", async () => {
+		const b = build({
+			files: [MOVED, "Gone-excl/Real.md"],
+			folders: ["FDE Play", "Gone-excl"],
+			excludedFolders: ["FDE Play"],
+			view: actionableView([unitNode("a", { kind: "file", path: MOVED }), unitNode("b", { kind: "file", path: "FDE Play/Deleted.md" })]),
+		});
+		const rows = rowsOf(await renderNode(b, nodeAt(b, "fde")));
+		expect(rows[0].classList.contains("atlas-missing")).toBe(false);
+		expect(rows[1].classList.contains("atlas-missing")).toBe(true);
+	});
+
+	it("E2: a placed folder that exists and is no longer promoted is a normal module row (folder icon, folder name)", async () => {
+		const b = build({
+			files: ["Areas/Deep/Deep.md", "Areas/Deep/x.md"],
+			folders: ["Areas", "Areas/Deep"],
+			view: actionableView([unitNode("deep", { kind: "folder", path: "Areas/Deep" })]),
+		});
+		expect(REFS(b)).not.toContain("folder:Areas/Deep");
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(textOf(row)).toBe("Deep");
+		expect(row.querySelector(".atlas-row-action")).toBeNull();
+		const wire = vi.spyOn(proto as unknown as Record<string, () => void>, "wireModuleRow");
+		await renderNode(b, nodeAt(b, "fde"));
+		expect(wire).toHaveBeenCalledTimes(1);
+		wire.mockRestore();
+	});
+
+	it("E9: a file ref that is a folder, and a folder ref that is a file, render greyed missing", async () => {
+		const b = build({
+			files: ["Notes/a.md"],
+			folders: ["Notes"],
+			view: actionableView([unitNode("f", { kind: "file", path: "Notes" }), unitNode("d", { kind: "folder", path: "Notes/a.md" })]),
+		});
+		const rows = rowsOf(await renderNode(b, nodeAt(b, "fde")));
+		expect(rows).toHaveLength(2);
+		for (const row of rows) expect(row.classList.contains("atlas-missing")).toBe(true);
+	});
+
+	it("E11: a non-markdown file that is not a unit is a present row", async () => {
+		const b = build({ files: ["FDE Play/scan.pdf"], folders: ["FDE Play"], view: actionableView([unitNode("p", { kind: "file", path: "FDE Play/scan.pdf" })]) });
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(textOf(row)).toBe("scan");
+	});
+
+	it("a non-unit block ref and an empty path still render missing", async () => {
+		const b = build({
+			files: [MOVED],
+			folders: ["FDE Play"],
+			view: actionableView([unitNode("blk", { kind: "block", path: MOVED, subpath: "^abc" }), unitNode("empty", { kind: "file", path: "" })]),
+		});
+		const rows = rowsOf(await renderNode(b, nodeAt(b, "fde")));
+		expect(rows).toHaveLength(2);
+		for (const row of rows) expect(row.classList.contains("atlas-missing")).toBe(true);
+	});
+
+	it("a path that later becomes a unit switches to unit rendering with its promoted flag", async () => {
+		const b = build({ files: [MOVED], folders: ["FDE Play"], view: actionableView([unitNode("r", { kind: "file", path: MOVED })]) });
+		const plain = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(plain.querySelector(".atlas-badge")).toBeNull();
+		b.unitIndex.addManualPromotion({ kind: "file", path: MOVED });
+		b.unitIndex.rebuild();
+		const unitRow = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(unitRow.classList.contains("atlas-missing")).toBe(false);
+		expect(textOf(unitRow)).toBe("Responsibilities");
+	});
+
+	it("E7: Remove from view takes the node away only; the file is not in the inbox; the inbox '+' and Place in view… both accept it again", async () => {
+		const b = await danScenario();
+		await moveIntoFolder(b);
+		const explorer = explorerFor(b);
+		const node = nodeAt(b, "resp");
+
+		await (explorer.removeUnitsFromView as (viewId: string, nodes: ViewNode[]) => Promise<void>)("actionable", [node]);
+		await flushPromises();
+		expect(nodeAt(b, "fde").children).toEqual([]);
+		expect(b.app.vault.getAbstractFileByPath(MOVED)).not.toBeNull(); // nothing on disk changed
+		expect(b.app.vault.calls.filter((c) => c !== "rename")).toEqual([]);
+		const inboxPaths = () => b.views.getInboxUnits(b.unitIndex.getUnits(), "actionable", "view", b.unitIndex).map((u) => u.path);
+		expect(inboxPaths()).not.toContain(MOVED);
+
+		// The inbox "+" offers it (it is no longer placed anywhere) and picking it adds it to the inbox.
+		const placed = b.views.placedRefKeys();
+		const offered = candidateFilesForAdd(b.app.vault.getFiles() as never, b.unitIndex.getUnits(), (ref) => placed.has(unitRefKey(ref))).map((f) => f.path);
+		expect(offered).toContain(MOVED);
+		b.unitIndex.markAdded({ kind: "file", path: MOVED });
+		expect(inboxPaths()).toContain(MOVED);
+		b.unitIndex.removeAdded({ kind: "file", path: MOVED });
+
+		// "Place in view…" ends in placeUnit with the bare ref, which has no unit check.
+		const replaced = b.views.placeUnit("actionable", { kind: "file", path: MOVED }, "fde");
+		expect(replaced).not.toBeNull();
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(textOf(row)).toBe("Responsibilities");
+	});
+
+	/** An explorer whose row icon, open and status handling are the real methods (not stubs), so the
+	 * status dot, click-to-open and middle-click-to-open run the same code a user's click does. The
+	 * workspace records which file each leaf opened and in which tab mode. */
+	function liveExplorerFor(b: Built) {
+		const opened: { path: string; newTab: boolean }[] = [];
+		(b.app as unknown as { workspace: unknown }).workspace = {
+			getLeaf: (newTab: boolean) => ({ openFile: async (f: { path: string }) => void opened.push({ path: f.path, newTab: !!newTab }) }),
+			onLayoutReady: (cb: () => void) => cb(),
+			getLeavesOfType: () => [],
+		};
+		const explorer = explorerFor(b);
+		(explorer.plugin as Record<string, unknown>).statusesManager = makeStatusesManager();
+		for (const name of ["renderRowIcon", "openRef"] as const) explorer[name] = (proto as unknown as Record<string, (...a: unknown[]) => unknown>)[name].bind(explorer);
+		return { explorer, opened };
+	}
+
+	/** Make the "FDE Play" Folder a status governor so rows under it get a status dot. */
+	function governFde(b: Built): ViewNode {
+		const fde = nodeAt(b, "fde");
+		fde.statusEnabled = true;
+		fde.statusSetId = "S";
+		return fde;
+	}
+
+	it("GP4/T1/T6: click and middle-click open the moved note; the status dot changes; nesting works", async () => {
+		const b = await danScenario();
+		await moveIntoFolder(b);
+		const fde = governFde(b);
+		const { explorer, opened } = liveExplorerFor(b);
+		const container = await renderNode(b, fde, { explorer, ancestors: [fde] });
+		const row = rowsOf(container)[0];
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+
+		// Plain click opens FDE Play/Responsibilities.md in the current tab.
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+		await flushPromises();
+		expect(opened).toEqual([{ path: MOVED, newTab: false }]);
+
+		// Middle-click opens it in a new tab.
+		row.querySelector(".atlas-row-text")!.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true }));
+		await flushPromises();
+		expect(opened).toEqual([{ path: MOVED, newTab: false }, { path: MOVED, newTab: true }]);
+
+		// The status dot shows the set default (Todo, #888888); picking Doing changes the explicit status.
+		const dot = row.querySelector<HTMLElement>(".atlas-status-dot-circle")!;
+		expect(dot).not.toBeNull();
+		expect(dot.style.backgroundColor).toBe("rgb(136, 136, 136)");
+		dot.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+		const doing = Array.from(document.body.querySelectorAll<HTMLElement>(".atlas-choice-popup-item")).find((e) => e.textContent === "Doing")!;
+		expect(doing).toBeDefined();
+		doing.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+		expect(nodeAt(b, "resp").explicitStatusId).toBe("doing");
+		expect(opened).toHaveLength(2); // the dot click did not also open the note
+		const after = rowsOf(await renderNode(b, fde, { explorer: liveExplorerFor(b).explorer, ancestors: [fde] }))[0];
+		expect(after.querySelector<HTMLElement>(".atlas-status-dot-circle")!.style.backgroundColor).toBe("rgb(0, 136, 255)");
+
+		// Nesting: another unit can be placed under the moved row.
+		expect(b.views.placeUnit("actionable", { kind: "file", path: "Other.md" }, "resp")).not.toBeNull();
+		expect(nodeAt(b, "resp").children.map((n) => n.ref)).toEqual([{ kind: "file", path: "Other.md" }]);
+	});
+
+	it("GP7/T2: deleting the moved note turns the row greyed '(missing)' with a Remove button that removes only the node", async () => {
+		const b = await danScenario();
+		await moveIntoFolder(b);
+		expect(rowsOf(await renderNode(b, nodeAt(b, "fde")))[0].classList.contains("atlas-missing")).toBe(false);
+		await b.app.vault.delete(b.app.vault.getAbstractFileByPath(MOVED)!);
+
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(row.classList.contains("atlas-missing")).toBe(true);
+		expect(row.querySelector(".atlas-row-secondary")?.textContent).toBe("(missing)");
+		const remove = row.querySelector<HTMLElement>(".atlas-row-action")!;
+		expect(remove).not.toBeNull();
+		remove.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+		await flushPromises();
+		expect(nodeAt(b, "fde").children).toEqual([]);
+	});
+
+	it("E3/T3: a placed file promoted by a real backlink stays a normal row after the backlink is removed", async () => {
+		const b = build({
+			files: ["Linker.md", "Alpha/Doc.md", "Alpha/Alpha.md"],
+			folders: ["Alpha"],
+			view: actionableView([unitNode("doc", { kind: "file", path: "Alpha/Doc.md" })]),
+		});
+		// Linker.md (vault root) links [[Doc]]; Doc.md lives in the Alpha module, so it is promoted by link.
+		let linked = true;
+		const cache = b.app.metadataCache as unknown as { getFileCache: (f: { path: string }) => unknown; getFirstLinkpathDest: (l: string) => unknown };
+		cache.getFileCache = (f) => (f.path === "Linker.md" && linked ? { links: [{ link: "Doc", original: "[[Doc]]" }] } : null);
+		cache.getFirstLinkpathDest = (l) => (l === "Doc" ? b.app.vault.getAbstractFileByPath("Alpha/Doc.md") : null);
+		b.unitIndex.rebuild();
+		expect(b.unitIndex.getUnits().map((u) => `${u.type}:${u.path}`)).toContain("promoted-file:Alpha/Doc.md");
+		const before = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(before.classList.contains("atlas-missing")).toBe(false);
+
+		// The last backlink goes away: Doc.md is no longer a unit, but is still in the vault.
+		linked = false;
+		b.unitIndex.rebuild();
+		expect(b.unitIndex.getUnits().map((u) => u.path)).not.toContain("Alpha/Doc.md");
+		const after = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(after.classList.contains("atlas-missing")).toBe(false);
+		expect(after.querySelector(".atlas-row-action")).toBeNull();
+		expect(textOf(after)).toBe("Doc");
+	});
+
+	it("E7/T4: a present file removed from view leaves the inbox alone, and can be re-placed or added again", async () => {
+		const b = await danScenario();
+		await moveIntoFolder(b);
+		const { explorer } = liveExplorerFor(b);
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde"), { explorer }))[0];
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		b.app.vault.calls.length = 0;
+
+		await (explorer.removeUnitsFromView as (viewId: string, nodes: ViewNode[]) => Promise<void>)("actionable", [nodeAt(b, "resp")]);
+		await flushPromises();
+		expect(nodeAt(b, "fde").children).toEqual([]);
+		expect(b.app.vault.getAbstractFileByPath(MOVED)).not.toBeNull();
+		expect(b.app.vault.calls).toEqual([]);
+		const inboxPaths = () => b.views.getInboxUnits(b.unitIndex.getUnits(), "actionable", "view", b.unitIndex).map((u) => u.path);
+		expect(inboxPaths()).not.toContain(MOVED);
+
+		const placed = b.views.placedRefKeys();
+		expect(candidateFilesForAdd(b.app.vault.getFiles() as never, b.unitIndex.getUnits(), (ref) => placed.has(unitRefKey(ref))).map((f) => f.path)).toContain(MOVED);
+		expect(b.views.placeUnit("actionable", { kind: "file", path: MOVED }, "fde")).not.toBeNull();
+		const replaced = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(replaced.classList.contains("atlas-missing")).toBe(false);
+		expect(textOf(replaced)).toBe("Responsibilities");
+	});
+
+	it("F9/T5: with a real UnitIndex, Create Module is offered on a placed root-level .md unit and not on a nested non-unit file", () => {
+		const b = build({
+			files: ["Root.md", MOVED],
+			folders: ["FDE Play"],
+			view: actionableView([unitNode("root", { kind: "file", path: "Root.md" }), unitNode("nested", { kind: "file", path: MOVED })]),
+		});
+		expect(b.unitIndex.getUnits().map((u) => u.path)).toEqual(expect.arrayContaining(["Root.md"]));
+		expect(b.unitIndex.getUnits().map((u) => u.path)).not.toContain(MOVED);
+		const titlesFor = (id: string): string[] => {
+			const node = nodeAt(b, id);
+			const explorer = explorerFor(b);
+			explorer.startCreateModule = vi.fn();
+			explorer.placeInViewFlow = vi.fn();
+			let built: Menu | undefined;
+			const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+				built = this;
+			});
+			(proto as unknown as Record<string, (...a: unknown[]) => void>).showUnitMenu.call(explorer, new MouseEvent("contextmenu"), node.ref, b.views.getViews()[0], node);
+			show.mockRestore();
+			return (built as unknown as { titles: () => string[] }).titles();
+		};
+		expect(titlesFor("root")).toContain("Create Module");
+		expect(titlesFor("nested")).not.toContain("Create Module");
+		expect(titlesFor("nested")).toEqual(expect.arrayContaining(["Add under…", "Remove from view", "Place in view…"]));
+	});
+
+	it("E2/E7/T7: a placed non-unit folder is a module row; Remove from view takes the node away, the vault is untouched and the inbox gains no entry", async () => {
+		const b = build({
+			files: ["Areas/Deep/Deep.md", "Areas/Deep/x.md"],
+			folders: ["Areas", "Areas/Deep"],
+			view: actionableView([unitNode("deep", { kind: "folder", path: "Areas/Deep" })]),
+		});
+		const inboxPaths = () => b.views.getInboxUnits(b.unitIndex.getUnits(), "actionable", "view", b.unitIndex).map((u) => u.path);
+		const inboxBefore = inboxPaths();
+		const { explorer } = liveExplorerFor(b);
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde"), { explorer }))[0];
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(textOf(row)).toBe("Deep");
+		expect(row.querySelector(".atlas-row-action")).toBeNull();
+		b.app.vault.calls.length = 0;
+
+		await (explorer.removeUnitsFromView as (viewId: string, nodes: ViewNode[]) => Promise<void>)("actionable", [nodeAt(b, "deep")]);
+		await flushPromises();
+		expect(nodeAt(b, "fde").children).toEqual([]);
+		expect(b.app.vault.getAbstractFileByPath("Areas/Deep")).not.toBeNull();
+		expect(b.app.vault.calls).toEqual([]);
+		expect(inboxPaths()).toEqual(inboxBefore);
+		expect(inboxPaths()).not.toContain("Areas/Deep");
+	});
+
+	it("F8: an Outside-Vault-managed row resolves through resolveOutsideManagedRowInfo and never asks the vault about its absolute path", async () => {
+		const abs = "/Users/someone/Jobs/acme.md";
+		const b = build({ files: [], folders: [], view: actionableView([{ ...unitNode("o", { kind: "file", path: abs }), folderSourceManaged: true, folderSourceOwnerId: "fde" }]) });
+		const lookup = vi.spyOn(b.app.vault, "getAbstractFileByPath");
+		const explorer = explorerFor(b);
+		explorer.isOutsideManagedUnit = vi.fn(() => true);
+		const resolveRef = vi.spyOn(explorer as { resolveRef: () => unknown }, "resolveRef");
+		const container = document.createElement("div");
+		await (explorer.renderNode as (n: ViewNode, c: HTMLElement, v: View, d: number, a: unknown[]) => Promise<void>)(nodeAt(b, "o"), container, b.views.getViews()[0], 0, []);
+		const row = rowsOf(container)[0];
+		expect(textOf(row)).toBe("acme.md");
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(resolveRef).not.toHaveBeenCalled();
+		expect(lookup.mock.calls.map((c) => c[0])).not.toContain(abs);
 	});
 });

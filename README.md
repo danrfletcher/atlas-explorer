@@ -39,7 +39,7 @@ Every folder is a unit — a **module** whose **interface** is a note saying wha
 - The interface note is `<Folder>/<Folder>.md` by default. A module without one is still a unit; the explorer offers to create it.
 - Clicking a module's name opens its interface note. Clicking its icon opens a "Module contents" view of its internals instead.
 - A module's properties are its interface note's properties.
-- Atlas never rearranges a module's internal organization on disk — with one deliberate, always-confirmable exception: dragging a file or block directly onto a module's **icon**. Physical moves otherwise stay in Obsidian's native explorer (still available as a tab).
+- Atlas never rearranges a module's internal organization on disk — with one deliberate, always-confirmable exception: dragging a file or block directly onto a module's **icon**. A file that is already placed in a view stays placed where it is (in every view that holds it) after the move; a placed block that is no longer a unit after the move is removed from the views. Physical moves otherwise stay in Obsidian's native explorer (still available as a tab).
 
 ### Views, bucket, inbox
 
@@ -128,6 +128,8 @@ Modified-sort's file-time snapshot only refreshes when the explorer actually has
 Every row in the explorer also has a right-click menu (Open, Open in new tab, Reveal in native explorer, Copy link, Duplicate (Meta), Remove from view, Place in view…), and folders can be renamed or deleted from the same menu. "Duplicate (Meta)" places a second reference to the same item — and, if it's a parent, a copy of everything nested under it — right next to the original, without touching disk; the copy is free to be organized independently from then on. Bucket rows (units and meta folders) also get a **Statuses** option — see the Status settings section above.
 
 **Middle-click** on a bucket or inbox row's label opens that row's note in a new, focused tab — the same as the right-click "Open in new tab", and it never changes the selection. It does nothing on a Folder (meta) row, a module's icon, an API item row, a missing row, a module with no interface note, an Outside-Vault child, or any control inside a row (chevron, status dot, Remove, pills), and it is ignored when Shift, Cmd, Ctrl or Alt is held (Cmd/Ctrl-click and Shift-click stay selection gestures).
+
+**Placed rows stay while the file exists.** A file or folder you placed in a view keeps rendering as a normal row for as long as it exists in the vault, even if it is no longer an Atlas unit (for example a note you moved into a module folder that nothing links to). Only a target that is really gone shows as a greyed "(missing)" row with a Remove button, and it returns to normal if the path reappears. Atlas does not promote, write or move anything to make this happen.
 
 ## Documentation
 

@@ -273,3 +273,55 @@ describe("F7 the 'Open in new tab' menu items still call openRef(ref, true)", ()
 		for (const text of src) expect(text).toMatch(/Open in new tab[\s\S]*?openRef\(ref, true\)/);
 	});
 });
+
+/** Atlas #13 PR-1: the REAL `resolveRef` (nothing stubbed) decides the row, so a placed note that is not
+ * an Atlas unit still renders normally and opens in a new tab on middle-click. */
+describe("Atlas #13 PR-1 — a placed note that is not a unit (Dan's Responsibilities.md in FDE Play)", () => {
+	const moved: UnitRef = { kind: "file", path: "FDE Play/Responsibilities.md" };
+
+	async function realBucketRow(c: Ctx, ref: UnitRef): Promise<HTMLElement> {
+		c.explorer.resolveRef = (proto.resolveRef as (r: UnitRef) => Promise<unknown>).bind(c.explorer);
+		const node = { id: `n${++nodeSeq}`, type: "unit", ref, children: [] } as ViewNode;
+		await (proto.renderNode as unknown as (...a: unknown[]) => Promise<void>).call(c.explorer, node, c.content, view, 0, []);
+		return c.content.lastElementChild as HTMLElement;
+	}
+
+	it("GP3/GP4: reads 'Responsibilities', not missing, and middle-click opens it in a new leaf", async () => {
+		ctx.app.vault.seedFolder("FDE Play");
+		ctx.app.vault.seedFile(moved.path);
+		const row = await realBucketRow(ctx, moved);
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(row.textContent).not.toContain("(missing)");
+		expect(row.querySelector(".atlas-row-action")).toBeNull();
+		expect(label(row).textContent).toBe("Responsibilities");
+		aux(label(row));
+		await settle();
+		expect(ctx.workspace.getLeaf).toHaveBeenCalledExactlyOnceWith(true);
+		expect(ctx.workspace.leaves.filter((l) => l.opened).map((l) => l.opened!.path)).toEqual([moved.path]);
+		expect(ctx.app.vault.calls).toEqual([]);
+	});
+
+	it("a deleted note renders missing and middle-click opens nothing", async () => {
+		ctx.app.vault.seedFolder("FDE Play");
+		ctx.app.vault.seedFile(moved.path);
+		await ctx.app.vault.delete(ctx.app.vault.getAbstractFileByPath(moved.path)!);
+		ctx.app.vault.calls.length = 0;
+		const row = await realBucketRow(ctx, moved);
+		expect(row.classList.contains("atlas-missing")).toBe(true);
+		aux(label(row));
+		await settle();
+		expect(ctx.workspace.getLeaf).not.toHaveBeenCalled();
+		expect(ctx.workspace.openLinkText).not.toHaveBeenCalled();
+		expect(ctx.app.vault.calls).toEqual([]);
+	});
+
+	it("a non-unit folder with no interface note is a normal module row and middle-click does nothing", async () => {
+		const row = await realBucketRow(ctx, noNote);
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(label(row).textContent).toBe("NoNote");
+		aux(label(row));
+		await settle();
+		expect(ctx.workspace.getLeaf).not.toHaveBeenCalled();
+		expect(ctx.app.vault.getAbstractFileByPath("Modules/NoNote/NoNote.md")).toBeNull();
+	});
+});
