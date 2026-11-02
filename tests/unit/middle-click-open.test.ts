@@ -10,6 +10,7 @@ import {
 	type MiddleClickRowState,
 } from "../../src/middle-click-open";
 import { DEFAULT_SETTINGS } from "../../src/settings";
+import { isRefPresent } from "../../src/ref-presence";
 import type { UnitRef } from "../../src/types";
 
 /** Table-driven test of the shared middle-click rules (G1–G12, E2–E4). Plain `HTMLElement` rows, a spy
@@ -232,6 +233,34 @@ describe("refTargetExists (live target check; never creates anything)", () => {
 		const a = app();
 		expect(refTargetExists(a, DEFAULT_SETTINGS, { kind: "file", path: "Modules/NoNote" })).toBe(false);
 		expect(refTargetExists(a, DEFAULT_SETTINGS, { kind: "folder", path: "Projects/Boat.md" })).toBe(false);
+	});
+
+	it("Atlas #13 PR-1: agrees with the shared presence rule for files and folders (a folder also needs an interface note)", () => {
+		const a = app();
+		a.vault.seedFile("Projects/scan.pdf");
+		const refs: UnitRef[] = [
+			file,
+			{ kind: "file", path: "Projects/scan.pdf" },
+			{ kind: "file", path: "Projects/Gone.md" },
+			{ kind: "file", path: "Modules/NoNote" },
+			{ kind: "folder", path: "Modules/WithNote" },
+			{ kind: "folder", path: "Modules/NoNote" },
+			{ kind: "folder", path: "Projects/Boat.md" },
+			{ kind: "folder", path: "Modules/Gone" },
+		];
+		for (const ref of refs) {
+			const present = isRefPresent(a.vault, ref);
+			const expected = ref.kind === "folder" ? present && ref.path === "Modules/WithNote" : present;
+			expect(refTargetExists(a, DEFAULT_SETTINGS, ref), `${ref.kind}:${ref.path}`).toBe(expected);
+		}
+	});
+
+	it("Atlas #13 PR-1: a present file that is not an Atlas unit resolves; a block is judged by its file, as before", () => {
+		const a = app();
+		a.vault.seedFolder("FDE Play");
+		a.vault.seedFile("FDE Play/Responsibilities.md");
+		expect(refTargetExists(a, DEFAULT_SETTINGS, { kind: "file", path: "FDE Play/Responsibilities.md" })).toBe(true);
+		expect(refTargetExists(a, DEFAULT_SETTINGS, { kind: "block", path: "FDE Play/Responsibilities.md", subpath: "^x" })).toBe(true);
 	});
 
 	it("never mutates the vault", () => {

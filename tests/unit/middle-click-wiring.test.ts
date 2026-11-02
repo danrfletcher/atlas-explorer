@@ -437,3 +437,74 @@ describe("inbox row middle-click (G1-G3, G7, G9, G10, GP4, E6, added)", () => {
 		expect(fake.showInboxUnitMenu).toHaveBeenCalledTimes(1);
 	});
 });
+
+/** Atlas #13 PR-1 (GP4): the REAL `resolveRef` feeds the real `renderNode`, so a placed file that is
+ * not a unit (it is in no `unitsByRefKey`) is judged by whether it still exists, and middle-click
+ * follows. `refTargetExists` is checked against the shared presence rule. */
+describe("Atlas #13 PR-1 — middle-click on a placed ref that is not a unit", () => {
+	const moved: UnitRef = { kind: "file", path: "Modules/WithNote/Moved.md" };
+	const pdf: UnitRef = { kind: "file", path: "Modules/WithNote/scan.pdf" };
+
+	async function realBucketRow(ref: UnitRef, opts: { skipSeed?: boolean } = {}) {
+		if (!opts.skipSeed) {
+			app.vault.seedFile(moved.path);
+			app.vault.seedFile(pdf.path);
+		}
+		const fake = makeFake(app);
+		(fake as unknown as Record<string, unknown>).unitsByRefKey = new Map();
+		fake.resolveRef = ((r: UnitRef) => (proto.resolveRef as (r: UnitRef) => Promise<unknown>).call(fake, r)) as never;
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+		const node = { id: "n1", type: "unit", ref, children: [] } as ViewNode;
+		await (proto.renderNode as unknown as (...a: unknown[]) => Promise<void>).call(fake, node, container, view, 0, []);
+		return { fake, row: container.querySelector<HTMLElement>(".atlas-row-unit")! };
+	}
+
+	it("a present non-unit file reads normally and middle-click calls openRef(ref, true)", async () => {
+		const { fake, row } = await realBucketRow(moved);
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(label(row).textContent).toBe("Moved");
+		aux(label(row));
+		expect(fake.openRef).toHaveBeenCalledExactlyOnceWith(moved, true);
+		expectNoSideEffects(fake);
+	});
+
+	it("E11: a present non-unit PDF opens the same way", async () => {
+		const { fake, row } = await realBucketRow(pdf);
+		aux(label(row));
+		expect(fake.openRef).toHaveBeenCalledExactlyOnceWith(pdf, true);
+	});
+
+	it("a file deleted after render does nothing on middle-click", async () => {
+		const { fake, row } = await realBucketRow(moved);
+		await app.vault.delete(app.vault.getAbstractFileByPath(moved.path)!);
+		app.vault.calls.length = 0;
+		aux(label(row));
+		expect(fake.openRef).not.toHaveBeenCalled();
+		expect(app.vault.calls).toEqual([]);
+	});
+
+	it("a target deleted before render renders missing and middle-click does nothing", async () => {
+		app.vault.seedFile(moved.path);
+		await app.vault.delete(app.vault.getAbstractFileByPath(moved.path)!);
+		const fakeNode = await realBucketRow({ kind: "file", path: moved.path }, { skipSeed: true });
+		expect(fakeNode.row.classList.contains("atlas-missing")).toBe(true);
+		aux(label(fakeNode.row));
+		expect(fakeNode.fake.openRef).not.toHaveBeenCalled();
+	});
+
+	it("a present non-unit folder with no interface note: normal module row, middle-click does nothing", async () => {
+		const { fake, row } = await realBucketRow(emptyModule);
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(label(row).textContent).toBe("NoNote");
+		aux(label(row));
+		expect(fake.openRef).not.toHaveBeenCalled();
+		expect(app.vault.getAbstractFileByPath("Modules/NoNote/NoNote.md")).toBeNull();
+	});
+
+	it("a present non-unit folder with an interface note opens it on middle-click", async () => {
+		const { fake, row } = await realBucketRow(module_);
+		aux(label(row));
+		expect(fake.openRef).toHaveBeenCalledExactlyOnceWith(module_, true);
+	});
+});

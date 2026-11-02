@@ -21,6 +21,7 @@ import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { refTargetExists, suppressMiddleButtonAutoscroll, wireMiddleClickOpen } from "./middle-click-open";
 import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
+import { isRefPresent, presentEntryLabel, presentRefEntry } from "./ref-presence";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
 import { AddUnderKind, addAddUnderItem, canAddUnder, startAddUnder } from "./add-under";
 import { AddUnderFolderDeps, startAddUnderFolder } from "./add-under-folder";
@@ -1545,6 +1546,21 @@ export class AtlasExplorerView extends ItemView {
 					added: resolved.added,
 					missing: false,
 				};
+		}
+		// Not a unit (or the unit could not be resolved). A placed file/folder whose target still exists
+		// in the vault renders as a normal row: a note moved into a module folder with no backlink stops
+		// being a unit but is still there. Judged live on every call (no cache) by the shared predicate;
+		// no promoted/added flags, since nothing here is a unit. If the path becomes a unit later, the
+		// lookup above takes over.
+		const present = presentRefEntry(this.plugin.app.vault, ref);
+		if (present) {
+			return {
+				text: presentEntryLabel(present),
+				icon: ref.kind === "folder" ? "folder" : "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			};
 		}
 		// F9: refs are never deleted automatically — render greyed as missing rather than crash.
 		const fallbackText = ref.kind === "block" ? ref.subpath : (ref.path.split("/").pop() ?? ref.path);
@@ -3730,7 +3746,8 @@ export class AtlasExplorerView extends ItemView {
 		// have changed since the row was last drawn (e.g. a data source was just added).
 		if (
 			canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager?.getNode(viewId, nodeId) ?? null }, view.id, node, {
-				missing: !unitForRef(this.plugin.unitIndex.getUnits(), ref),
+				// Missing = neither a unit (covers block units) nor a target still present in the vault.
+				missing: !unitForRef(this.plugin.unitIndex.getUnits(), ref) && !isRefPresent(this.plugin.app.vault, ref),
 				filteredOut: this.plugin.viewsManager?.managedRowFilterState?.(view.id, node) === "filteredOut",
 			})
 		) {

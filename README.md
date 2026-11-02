@@ -129,6 +129,8 @@ Every row in the explorer also has a right-click menu (Open, Open in new tab, Re
 
 **Middle-click** on a bucket or inbox row's label opens that row's note in a new, focused tab — the same as the right-click "Open in new tab", and it never changes the selection. It does nothing on a Folder (meta) row, a module's icon, an API item row, a missing row, a module with no interface note, an Outside-Vault child, or any control inside a row (chevron, status dot, Remove, pills), and it is ignored when Shift, Cmd, Ctrl or Alt is held (Cmd/Ctrl-click and Shift-click stay selection gestures).
 
+**Placed rows stay while the file exists.** A file or folder you placed in a view keeps rendering as a normal row for as long as it exists in the vault, even if it is no longer an Atlas unit (for example a note you moved into a module folder that nothing links to). Only a target that is really gone shows as a greyed "(missing)" row with a Remove button, and it returns to normal if the path reappears. Atlas does not promote, write or move anything to make this happen.
+
 ## Documentation
 
 See [`docs/decisions.md`](docs/decisions.md) for the judgement calls made during the build, the alternatives considered, and why — kept current as the plugin evolves.
