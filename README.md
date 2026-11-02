@@ -49,7 +49,7 @@ Every folder is a unit: a **module** whose **interface** is a note saying what t
 
 - The interface note is `<Folder>/<Folder>.md` by default (optionally also `index.md` / `README.md`). A module without one is still a unit.
 - Clicking a module's name opens its interface note. Clicking its icon opens a **Module contents** view of its internals.
-- Atlas never rearranges a module's insides on disk, with one deliberate, confirmable exception: dragging a file or block directly onto a module's **icon** moves it in.
+- Atlas never rearranges a module's insides on disk, with one deliberate, confirmable exception: dragging a file or block directly onto a module's **icon** moves it in. A file that is already placed in a view stays placed where it is (in every view that holds it) after the move; a placed block that is no longer a unit after the move is removed from the views.
 
 ### Views, bucket, inbox
 
@@ -105,6 +105,8 @@ The **Status** tab holds status sets, the color palette, Glow, Retain icons and 
 ## What Atlas touches on disk
 
 Arranging, sorting, nesting, duplicating, swapping and removing from a view never touch disk, and Atlas never edits the content of your notes. The only things that create or move files are the ones you ask for by name: Add block / file / module, **Add under…**, **Replace with…**, **Create Module**, **Create interface note**, a confirmable single-item drop onto a module's icon, and a free block graduating when you rename it. Data sources only ever read. Details on [Concepts](docs/concepts.md#when-atlas-touches-your-files).
+
+**Placed rows stay while the file exists.** A file or folder you placed in a view keeps rendering as a normal row for as long as it exists in the vault, even if it is no longer an Atlas unit (for example a note you moved into a module folder that nothing links to). Only a target that is really gone shows as a greyed "(missing)" row with a Remove button, and it returns to normal if the path reappears. Atlas does not promote, write or move anything to make this happen.
 
 ## Documentation
 

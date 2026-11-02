@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App, Menu, Notice } from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { ATLAS_SORT_AZ_ICON_ID, activeSortFor } from "../../src/sort";
-import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types";
+import { ApiItemState, StatusGovernance, Unit, UnitRef, View, ViewNode } from "../../src/types";
 import { ViewsManager } from "../../src/views";
 import { flush } from "../helpers";
 import { meta } from "../integration/create-from-meta-fixtures";
@@ -145,7 +145,7 @@ describe("PR-1 G11e — shared source/status menu items on a meta and a unit men
 	const apiSource = { url: "https://x", method: "GET" as const, mapping: { idField: "id", labelField: "name" }, mode: "merge" as const, refreshOnViewLoad: false };
 
 	function fakeFor(): Record<string, unknown> {
-		const plugin = { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } };
+		const plugin = { app: { vault: { getAbstractFileByPath: () => null } }, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } };
 		const target: Record<string, unknown> = { plugin };
 		return new Proxy(target, {
 			get: (t, prop: string) => (prop in t ? t[prop] : vi.fn()),
@@ -211,7 +211,7 @@ describe("PR-2 G1-G4 — Swap menu items", () => {
 
 	function swapFake() {
 		return {
-			plugin: { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } },
+			plugin: { app: { vault: { getAbstractFileByPath: () => null } }, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } },
 			openSwapPicker: vi.fn(),
 			openSwapForFolder: vi.fn(),
 		};
@@ -813,6 +813,7 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 
 	function sortFake(statusGovernor: StatusGovernance | null = null) {
 		const vault = {
+			getAbstractFileByPath: vi.fn(() => null),
 			create: vi.fn(),
 			createFolder: vi.fn(),
 			createBinary: vi.fn(),
@@ -1103,5 +1104,80 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 			expect(chooser.titles()).toContain("Status");
 			expect(chooser.titles()).not.toContain("Status (inherited)");
 		});
+	});
+});
+
+// Atlas #13 PR-1 (GP4/GP7/F9): the row menu judges "missing" by whether the ref's target exists in the
+// vault (the shared presence rule), not by whether it is a unit. Runs the real `showUnitMenu`.
+describe("Atlas #13 PR-1 — row menu for a placed non-unit file (presence, not unit-ness)", () => {
+	const REMOVE_ETC = ["Add under…", "Remove from view", "Place in view…"];
+
+	function menuFor(ref: UnitRef, units: Unit[], app: App) {
+		const fake = {
+			plugin: { app, unitIndex: { getUnits: () => units }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } },
+			startCreateModule: vi.fn(),
+			placeInViewFlow: vi.fn(),
+		};
+		const node: ViewNode = { id: "n1", type: "unit", ref, children: [] };
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		(AtlasExplorerView.prototype as unknown as { showUnitMenu: (...a: unknown[]) => void }).showUnitMenu.call(fake, new MouseEvent("contextmenu"), ref, view, node);
+		show.mockRestore();
+		return { menu: built!, fake };
+	}
+
+	function seeded() {
+		const app = new App();
+		app.vault.seedFolder("FDE Play");
+		app.vault.seedFile("FDE Play/Responsibilities.md");
+		app.vault.seedFolder("Plain");
+		app.vault.seedFile("Root.md");
+		return app;
+	}
+
+	it("GP4/E1: a present non-unit file lists Add under…, Remove from view and Place in view…", () => {
+		const app = seeded();
+		const { menu } = menuFor({ kind: "file", path: "FDE Play/Responsibilities.md" }, [], app);
+		expect(menu.titles()).toEqual(expect.arrayContaining(REMOVE_ETC));
+	});
+
+	it("E2: a present non-unit folder lists Add under…, Remove from view and Place in view…", () => {
+		const { menu } = menuFor({ kind: "folder", path: "Plain" }, [], seeded());
+		expect(menu.titles()).toEqual(expect.arrayContaining(REMOVE_ETC));
+	});
+
+	it("GP7/F3: a ref whose target is gone lists no Add under…, but still Remove from view", () => {
+		const { menu } = menuFor({ kind: "file", path: "FDE Play/Gone.md" }, [], seeded());
+		expect(menu.titles()).not.toContain("Add under…");
+		expect(menu.titles()).toContain("Remove from view");
+	});
+
+	it("E9: a file ref whose path is a folder is missing: no Add under…", () => {
+		const { menu } = menuFor({ kind: "file", path: "Plain" }, [], seeded());
+		expect(menu.titles()).not.toContain("Add under…");
+	});
+
+	it("a non-unit block ref stays missing: no Add under…", () => {
+		const { menu } = menuFor({ kind: "block", path: "Root.md", subpath: "^abc" }, [], seeded());
+		expect(menu.titles()).not.toContain("Add under…");
+	});
+
+	it("F9: Create Module is absent for a nested non-unit file and present for a root unit", () => {
+		const app = seeded();
+		const nested = menuFor({ kind: "file", path: "FDE Play/Responsibilities.md" }, [], app);
+		expect(nested.menu.titles()).not.toContain("Create Module");
+
+		const root = menuFor({ kind: "file", path: "Root.md" }, [{ type: "root-file", path: "Root.md" }], app);
+		expect(root.menu.titles()).toContain("Create Module");
+	});
+
+	it("F2: building the menu records no vault write and no promotion", () => {
+		const app = seeded();
+		const units: Unit[] = [];
+		menuFor({ kind: "file", path: "FDE Play/Responsibilities.md" }, units, app);
+		expect(app.vault.calls).toEqual([]);
+		expect(units).toEqual([]);
 	});
 });

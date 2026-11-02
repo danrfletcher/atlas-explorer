@@ -32,7 +32,8 @@ import { ApiSourceModal } from "../../src/api-source-modal";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { AddUnderFolderDeps, startAddUnderFolder } from "../../src/add-under-folder";
 import { StatusesManager } from "../../src/statuses";
-import { View, ViewNode } from "../../src/types";
+import { Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "../../src/types";
+import { DEFAULT_SETTINGS } from "../../src/settings";
 import { ViewsManager } from "../../src/views";
 import { makeStatusesManager } from "./explorer-view-sort-truncate-helpers";
 import { meta } from "../integration/create-from-meta-fixtures";
@@ -1157,5 +1158,107 @@ describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the rea
 		// (its own `placedAt`, untouched by the move) are preserved too.
 		const movedX = vm.getViews()[0].root.find((n) => n.id === "projects")!.children.find((n) => n.id === "x")!;
 		expect(movedX.children).toEqual([{ id: "x-child", type: "unit", ref: { kind: "file", path: "XChild.md" }, children: [], placedAt: 42 }]);
+	});
+});
+
+/** Atlas #13 PR-1: `resolveRef`'s fallback for a placed ref that is not (or no longer) a unit. The
+ * real `resolveRef` runs against a fake `this` holding a real in-memory vault; only the unit lookup
+ * (`unitsByRefKey`) is staged per case. */
+describe("Atlas #13 PR-1 — resolveRef: a present non-unit target is a normal row, only a gone one is missing", () => {
+	type Info = { text: string; icon: string; promoted: boolean; added: boolean; missing: boolean };
+
+	function resolver(units: Unit[] = []) {
+		const app = new MockApp();
+		app.vault.seedFolder("FDE Play");
+		app.vault.seedFile("FDE Play/Responsibilities.md");
+		app.vault.seedFile("FDE Play/scan.pdf");
+		app.vault.seedFolder("Plain");
+		app.vault.seedFile("Root.md");
+		const fake = {
+			plugin: { app, settings: { ...DEFAULT_SETTINGS }, freeBlockTextCache: undefined },
+			unitsByRefKey: new Map(units.map((u) => [unitRefKey(unitToRef(u)), u])),
+		};
+		const resolve = (ref: UnitRef) =>
+			(AtlasExplorerView.prototype as unknown as { resolveRef: (r: UnitRef) => Promise<Info> }).resolveRef.call(fake, ref);
+		return { app, resolve };
+	}
+
+	it("E1/E8: a present non-unit file reads as its basename with the file icon, not missing, no flags", async () => {
+		const { resolve } = resolver();
+		expect(await resolve({ kind: "file", path: "FDE Play/Responsibilities.md" })).toEqual({
+			text: "Responsibilities",
+			icon: "file",
+			promoted: false,
+			added: false,
+			missing: false,
+		});
+	});
+
+	it("E11: a present non-markdown file is a normal row named without its extension", async () => {
+		const { resolve } = resolver();
+		expect(await resolve({ kind: "file", path: "FDE Play/scan.pdf" })).toMatchObject({ text: "scan", icon: "file", missing: false });
+	});
+
+	it("E2: a present non-unit folder reads as the folder name with the folder icon, not missing", async () => {
+		const { resolve } = resolver();
+		expect(await resolve({ kind: "folder", path: "Plain" })).toEqual({ text: "Plain", icon: "folder", promoted: false, added: false, missing: false });
+	});
+
+	it("F3/GP7: a deleted file keeps the greyed fallback (name with extension, missing)", async () => {
+		const { resolve } = resolver();
+		expect(await resolve({ kind: "file", path: "FDE Play/Gone.md" })).toEqual({ text: "Gone.md", icon: "file", promoted: false, added: false, missing: true });
+	});
+
+	it("F3: a deleted folder keeps the greyed fallback", async () => {
+		const { resolve } = resolver();
+		expect(await resolve({ kind: "folder", path: "Nope" })).toEqual({ text: "Nope", icon: "folder", promoted: false, added: false, missing: true });
+	});
+
+	it("E4: a present file turns missing when deleted and normal again when it reappears", async () => {
+		const { app, resolve } = resolver();
+		const ref: UnitRef = { kind: "file", path: "FDE Play/Responsibilities.md" };
+		expect((await resolve(ref)).missing).toBe(false);
+		await app.vault.delete(app.vault.getAbstractFileByPath(ref.path)!);
+		expect((await resolve(ref)).missing).toBe(true);
+		await app.vault.create(ref.path, "");
+		expect(await resolve(ref)).toMatchObject({ text: "Responsibilities", missing: false });
+	});
+
+	it("E9: a file ref whose path is a folder, and a folder ref whose path is a file, are missing", async () => {
+		const { resolve } = resolver();
+		expect((await resolve({ kind: "file", path: "Plain" })).missing).toBe(true);
+		expect((await resolve({ kind: "folder", path: "Root.md" })).missing).toBe(true);
+	});
+
+	it("a non-unit block ref and an empty path are still missing", async () => {
+		const { resolve } = resolver();
+		expect(await resolve({ kind: "block", path: "Root.md", subpath: "^abc" })).toMatchObject({ text: "^abc", icon: "quote", missing: true });
+		expect((await resolve({ kind: "file", path: "" })).missing).toBe(true);
+	});
+
+	it("a unit resolves exactly as before, with its promoted/added flags", async () => {
+		const { resolve } = resolver([{ type: "promoted-file", path: "FDE Play/Responsibilities.md", topLevelFolder: "FDE Play" }]);
+		expect(await resolve({ kind: "file", path: "FDE Play/Responsibilities.md" })).toMatchObject({ missing: false, promoted: true, added: false });
+	});
+
+	it("a path that later becomes a unit switches from the plain fallback to unit rendering with its flags", async () => {
+		const app = new MockApp();
+		app.vault.seedFolder("FDE Play");
+		app.vault.seedFile("FDE Play/Responsibilities.md");
+		const fake = { plugin: { app, settings: { ...DEFAULT_SETTINGS }, freeBlockTextCache: undefined }, unitsByRefKey: new Map<string, Unit>() };
+		const resolve = (ref: UnitRef) =>
+			(AtlasExplorerView.prototype as unknown as { resolveRef: (r: UnitRef) => Promise<Info> }).resolveRef.call(fake, ref);
+		const ref: UnitRef = { kind: "file", path: "FDE Play/Responsibilities.md" };
+		expect(await resolve(ref)).toMatchObject({ promoted: false, added: false, missing: false });
+		const unit: Unit = { type: "promoted-file", path: ref.path, topLevelFolder: "FDE Play" };
+		fake.unitsByRefKey.set(unitRefKey(ref), unit);
+		expect(await resolve(ref)).toMatchObject({ promoted: true, missing: false });
+	});
+
+	it("F2: resolving makes only vault reads; nothing is created, written or promoted", async () => {
+		const { app, resolve } = resolver();
+		await resolve({ kind: "file", path: "FDE Play/Responsibilities.md" });
+		await resolve({ kind: "folder", path: "Plain" });
+		expect(app.vault.calls).toEqual([]);
 	});
 });

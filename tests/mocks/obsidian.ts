@@ -57,6 +57,9 @@ proto.addClass = function (...cls: string[]) {
 proto.removeClass = function (...cls: string[]) {
 	this.classList.remove(...cls);
 };
+proto.hasClass = function (cls: string) {
+	return this.classList.contains(cls);
+};
 proto.toggleClass = function (cls: string, on: boolean) {
 	this.classList.toggle(cls, on);
 };
@@ -250,6 +253,9 @@ export class MetadataCache {
 	on(name: string, cb: () => void): { name: string; cb: () => void } {
 		if (name === "resolved") this.listeners.add(cb);
 		return { name, cb };
+	}
+	offref(ref: { name: string; cb: () => void }): void {
+		if (ref.name === "resolved") this.listeners.delete(ref.cb);
 	}
 	/** Test helper: what Obsidian does once the link graph has re-resolved. */
 	trigger(name: "resolved"): void {

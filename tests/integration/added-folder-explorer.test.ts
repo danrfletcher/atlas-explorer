@@ -328,3 +328,315 @@ describe("G10 — a deleted added folder shows a greyed '(missing)' row with a r
 		expect(row.querySelector(".atlas-module-icon")).not.toBeNull();
 	});
 });
+
+describe("Atlas #13 PR-2 — module-icon drop keeps a placed file where it was placed; blocks are still un-placed", () => {
+	const CONFIRM_TEXT =
+		'Add "Note" to "Mod"? This moves the file on disk into that folder — Atlas doesn\'t otherwise touch a module\'s internal organization.';
+	const flat = (nodes: ViewNode[]): ViewNode[] => nodes.flatMap((n) => [n, ...flat(n.children)]);
+	const refsOf = (view: View): string[] => flat(view.root).map((n) => unitRefKey(n.ref));
+
+	/** Wires the two events the plugin's own `main.ts` wires, in the same order: the vault `rename`
+	 * event (`unitIndex.onVaultRename`, `viewsManager.onVaultRename`) and the one `metadataCache`
+	 * "resolved" listener that recomputes promotions. It is registered first, as in `onload`, so it
+	 * runs before the one-shot listener `handleAddToModule` adds at drop time. */
+	function makePr2Ctx(files: string[]): Ctx {
+		const ctx = makeCtx(files, ["Mod"]);
+		ctx.app.vault.on("rename", (f: never, oldPath: string) => {
+			ctx.index.onVaultRename(f, oldPath);
+			ctx.views.onVaultRename(oldPath, (f as { path: string }).path);
+		});
+		ctx.app.metadataCache.on("resolved", () => ctx.index.onMetadataResolved());
+		return ctx;
+	}
+
+	/** Drags the placed node `nodeId` of `viewId` onto the real icon of the `Mod` module row. */
+	async function dragNodeOntoMod(ctx: Ctx, viewId: string, nodeId: string): Promise<void> {
+		const row = await renderInbox(ctx, folder("Mod"));
+		ctx.explorer.dragPayload = { kind: "node", nodeIds: [nodeId], viewId };
+		row.querySelector<HTMLElement>(".atlas-icon")!.dispatchEvent(new Event("drop", { bubbles: true }));
+		await flush();
+	}
+
+	const unitKeys = (ctx: Ctx): string[] => ctx.index.getUnits().map((u) => unitRefKey(unitToRef(u)));
+
+	describe("file refs", () => {
+		it("GP6: a placed root note with no backlink keeps its node (same id, same parent) at the new path", async () => {
+			const ctx = makePr2Ctx(["Note.md", "Parent.md"]);
+			ctx.views.placeUnit(ctx.view.id, file("Parent.md"), null);
+			const parent = ctx.views.getViews()[0].root[0];
+			const placed = ctx.views.placeUnit(ctx.view.id, file("Note.md"), parent.id)!;
+
+			await dragNodeOntoMod(ctx, ctx.view.id, placed.id);
+			expect(confirms).toHaveLength(1);
+			confirms[0].onConfirm();
+			await flush();
+			ctx.app.metadataCache.trigger("resolved");
+
+			expect(ctx.app.vault.getAbstractFileByPath("Mod/Note.md")).not.toBeNull();
+			expect(ctx.app.vault.getAbstractFileByPath("Note.md")).toBeNull();
+			const after = ctx.views.getViews()[0];
+			const parentAfter = after.root[0];
+			expect(parentAfter.id).toBe(parent.id);
+			expect(parentAfter.children).toHaveLength(1);
+			expect(parentAfter.children[0].id).toBe(placed.id);
+			expect(parentAfter.children[0].ref).toEqual(file("Mod/Note.md"));
+			// The exact case the old clean-up removed: no longer a unit (no backlink, no manual promotion).
+			expect(unitKeys(ctx)).not.toContain(unitRefKey(file("Mod/Note.md")));
+			expect(ctx.index.getManualPromotions()).toEqual([]);
+		});
+
+		it("GP6: the kept row renders as a normal file row, not atlas-missing", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			const placed = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+
+			await dragNodeOntoMod(ctx, ctx.view.id, placed.id);
+			confirms[0].onConfirm();
+			await flush();
+			ctx.app.metadataCache.trigger("resolved");
+
+			const row = await renderBucketNode(ctx, ctx.views.getViews()[0].root[0]);
+			expect(row.classList.contains("atlas-missing")).toBe(false);
+			expect(row.querySelector(".atlas-row-text")?.textContent).toBe("Note");
+			expect(row.querySelector(".atlas-row-secondary")?.textContent ?? "").not.toContain("missing");
+		});
+
+		it("GP6: placed in two views, every view keeps its node (same ids) at the new path", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			const second = ctx.views.createView("Second")!;
+			const a = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+			const b = ctx.views.placeUnit(second.id, file("Note.md"), null)!;
+
+			await dragNodeOntoMod(ctx, ctx.view.id, a.id);
+			confirms[0].onConfirm();
+			await flush();
+			ctx.app.metadataCache.trigger("resolved");
+
+			const [v1, v2] = ctx.views.getViews();
+			expect(v1.root.map((n) => [n.id, n.ref])).toEqual([[a.id, file("Mod/Note.md")]]);
+			expect(v2.root.map((n) => [n.id, n.ref])).toEqual([[b.id, file("Mod/Note.md")]]);
+		});
+
+		it("GP6: placed twice in one view, neither node is removed", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			const first = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+			const copy = ctx.views.duplicateNode(ctx.view.id, first.id)!;
+			expect(refsOf(ctx.views.getViews()[0])).toEqual(["file:Note.md", "file:Note.md"]);
+
+			await dragNodeOntoMod(ctx, ctx.view.id, first.id);
+			confirms[0].onConfirm();
+			await flush();
+			ctx.app.metadataCache.trigger("resolved");
+
+			const nodes = flat(ctx.views.getViews()[0].root);
+			expect(nodes.map((n) => n.id).sort()).toEqual([first.id, copy.id].sort());
+			expect(nodes.map((n) => n.ref)).toEqual([file("Mod/Note.md"), file("Mod/Note.md")]);
+		});
+
+		it("GP6: skip-confirm path (Module Contents modal drop) behaves the same: no prompt, node kept", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			const second = ctx.views.createView("Second")!;
+			const a = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+			const b = ctx.views.placeUnit(second.id, file("Note.md"), null)!;
+
+			await (ctx.explorer.handleAddToModule as (r: UnitRef, f: string, skip: boolean) => Promise<void>)(file("Note.md"), "Mod", true);
+			ctx.app.metadataCache.trigger("resolved");
+
+			expect(confirms).toHaveLength(0);
+			expect(ctx.app.vault.calls.filter((c) => c === "fileManager.renameFile")).toHaveLength(1);
+			const [v1, v2] = ctx.views.getViews();
+			expect(v1.root.map((n) => [n.id, n.ref])).toEqual([[a.id, file("Mod/Note.md")]]);
+			expect(v2.root.map((n) => [n.id, n.ref])).toEqual([[b.id, file("Mod/Note.md")]]);
+		});
+
+		it("the 'resolved' event never fires: the placement is still intact", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			const placed = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+
+			await dragNodeOntoMod(ctx, ctx.view.id, placed.id);
+			confirms[0].onConfirm();
+			await flush();
+			await flush();
+
+			expect(ctx.views.getViews()[0].root.map((n) => [n.id, n.ref])).toEqual([[placed.id, file("Mod/Note.md")]]);
+		});
+
+		it("a file that keeps a backlink (still a unit after the move) stays placed", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			const placed = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+			ctx.index.addManualPromotion(file("Note.md")); // stands in for a surviving inbound link
+
+			await dragNodeOntoMod(ctx, ctx.view.id, placed.id);
+			confirms[0].onConfirm();
+			await flush();
+			ctx.app.metadataCache.trigger("resolved");
+
+			expect(unitKeys(ctx)).toContain(unitRefKey(file("Mod/Note.md")));
+			expect(ctx.views.getViews()[0].root.map((n) => [n.id, n.ref])).toEqual([[placed.id, file("Mod/Note.md")]]);
+		});
+
+		it("E10: a dragged file that is not placed in any view moves, changes no view and throws nothing", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			ctx.views.createView("Second");
+			const before = JSON.stringify(ctx.views.getViews());
+
+			const row = await renderInbox(ctx, folder("Mod"));
+			ctx.explorer.dragPayload = { kind: "inbox", refs: [file("Note.md")] };
+			expect(() => row.querySelector<HTMLElement>(".atlas-icon")!.dispatchEvent(new Event("drop", { bubbles: true }))).not.toThrow();
+			await flush();
+			confirms[0].onConfirm();
+			await flush();
+			expect(() => ctx.app.metadataCache.trigger("resolved")).not.toThrow();
+
+			expect(ctx.app.vault.getAbstractFileByPath("Mod/Note.md")).not.toBeNull();
+			expect(JSON.stringify(ctx.views.getViews())).toBe(before);
+		});
+
+		it("a name collision in the target folder: uniquePath picks a unique path and the node follows it", async () => {
+			const ctx = makePr2Ctx(["Note.md", "Mod/Note.md"]);
+			const placed = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+
+			await dragNodeOntoMod(ctx, ctx.view.id, placed.id);
+			confirms[0].onConfirm();
+			await flush();
+			ctx.app.metadataCache.trigger("resolved");
+
+			const node = ctx.views.getViews()[0].root[0];
+			expect(node.id).toBe(placed.id);
+			expect(node.ref).toEqual(file("Mod/Note 2.md"));
+			expect(ctx.app.vault.getAbstractFileByPath("Mod/Note 2.md")).not.toBeNull();
+			expect(ctx.app.vault.getAbstractFileByPath("Mod/Note.md")).not.toBeNull();
+		});
+
+		it("the ref does not resolve to a TFile, or the target is not a TFolder: returns early, changes nothing", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			ctx.views.placeUnit(ctx.view.id, file("Gone.md"), null);
+			ctx.views.placeUnit(ctx.view.id, file("Note.md"), null);
+			const before = JSON.stringify(ctx.views.getViews());
+			const handle = ctx.explorer.handleAddToModule as (r: UnitRef, f: string, skip?: boolean) => Promise<void>;
+
+			await handle(file("Gone.md"), "Mod"); // ref missing
+			await handle(file("Note.md"), "Nowhere"); // target missing
+			await handle(file("Note.md"), "Note.md", true); // target is a file, not a folder
+			ctx.app.metadataCache.trigger("resolved");
+
+			expect(confirms).toHaveLength(0);
+			expect(ctx.app.vault.calls).toEqual([]);
+			expect(JSON.stringify(ctx.views.getViews())).toBe(before);
+		});
+	});
+
+	describe("block refs keep the post-move clean-up (F4)", () => {
+		const block: UnitRef = { kind: "block", path: "Note.md", subpath: "^b1" };
+		const moved: UnitRef = { kind: "block", path: "Mod/Note.md", subpath: "^b1" };
+
+		it.each([
+			{ demoted: true, twoViews: false },
+			{ demoted: true, twoViews: true },
+			{ demoted: false, twoViews: false },
+			{ demoted: false, twoViews: true },
+		])("block demoted=$demoted, placed in two views=$twoViews", async ({ demoted, twoViews }) => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			ctx.index.addManualPromotion(block); // the block is a unit before the move
+			ctx.index.onMetadataResolved();
+			const second = twoViews ? ctx.views.createView("Second")! : null;
+			const a = ctx.views.placeUnit(ctx.view.id, block, null)!;
+			const b = second ? ctx.views.placeUnit(second.id, block, null)! : null;
+			const unplace = vi.spyOn(ctx.views, "unplaceUnit");
+			if (demoted) ctx.index.removeManualPromotion(block); // nothing keeps it a unit after the move
+			else expect(unitKeys(ctx)).toContain(unitRefKey(block));
+
+			await dragNodeOntoMod(ctx, ctx.view.id, a.id);
+			confirms[0].onConfirm();
+			await flush();
+			// Before "resolved" fires nothing has been removed yet.
+			expect(refsOf(ctx.views.getViews()[0])).toEqual([unitRefKey(moved)]);
+			ctx.app.metadataCache.trigger("resolved");
+
+			const views = ctx.views.getViews();
+			if (demoted) {
+				for (const v of views) expect(refsOf(v)).toEqual([]);
+				expect(unplace).toHaveBeenCalledTimes(views.length);
+				expect(unplace).toHaveBeenCalledWith(ctx.view.id, moved);
+			} else {
+				expect(unitKeys(ctx)).toContain(unitRefKey(moved));
+				expect(views[0].root.map((n) => [n.id, n.ref])).toEqual([[a.id, moved]]);
+				if (b) expect(views[1].root.map((n) => [n.id, n.ref])).toEqual([[b.id, moved]]);
+				expect(unplace).not.toHaveBeenCalled();
+			}
+		});
+	});
+
+	describe("unchanged behaviour guards (F7)", () => {
+		it("the confirm text and 'Add' label are unchanged, and exactly one fileManager.renameFile (plus its vault rename) is the only write", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			const placed = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+
+			await dragNodeOntoMod(ctx, ctx.view.id, placed.id);
+			expect(confirms).toHaveLength(1);
+			expect(confirms[0].message).toBe(CONFIRM_TEXT);
+			expect(confirms[0].label).toBe("Add");
+			expect(ctx.app.vault.calls).toEqual([]);
+
+			confirms[0].onConfirm();
+			await flush();
+			ctx.app.metadataCache.trigger("resolved");
+
+			expect(ctx.app.vault.calls).toEqual(["fileManager.renameFile", "rename"]);
+		});
+
+		it("confirmAddToModule off skips the prompt, not the move", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			(ctx.explorer.plugin as { settings: { confirmAddToModule: boolean } }).settings.confirmAddToModule = false;
+			const placed = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+
+			await dragNodeOntoMod(ctx, ctx.view.id, placed.id);
+
+			expect(confirms).toHaveLength(0);
+			expect(ctx.app.vault.calls).toEqual(["fileManager.renameFile", "rename"]);
+			expect(ctx.views.getViews()[0].root.map((n) => n.ref)).toEqual([file("Mod/Note.md")]);
+		});
+
+		it("cancelling the confirm modal: no move, no placement change", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			const placed = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+			const before = JSON.stringify(ctx.views.getViews());
+
+			await dragNodeOntoMod(ctx, ctx.view.id, placed.id);
+			ctx.app.metadataCache.trigger("resolved"); // never confirmed
+
+			expect(confirms).toHaveLength(1);
+			expect(ctx.app.vault.calls).toEqual([]);
+			expect(ctx.app.vault.getAbstractFileByPath("Note.md")).not.toBeNull();
+			expect(JSON.stringify(ctx.views.getViews())).toBe(before);
+		});
+
+		it("a multi-item node drag onto the icon is a no-op: no confirm, no move, no placement change", async () => {
+			const ctx = makePr2Ctx(["Note.md", "Other.md"]);
+			const a = ctx.views.placeUnit(ctx.view.id, file("Note.md"), null)!;
+			const b = ctx.views.placeUnit(ctx.view.id, file("Other.md"), null)!;
+			const before = JSON.stringify(ctx.views.getViews());
+
+			const row = await renderInbox(ctx, folder("Mod"));
+			ctx.explorer.dragPayload = { kind: "node", nodeIds: [a.id, b.id], viewId: ctx.view.id };
+			row.querySelector<HTMLElement>(".atlas-icon")!.dispatchEvent(new Event("drop", { bubbles: true }));
+			await flush();
+
+			expect(confirms).toHaveLength(0);
+			expect(ctx.app.vault.calls).toEqual([]);
+			expect(JSON.stringify(ctx.views.getViews())).toBe(before);
+		});
+
+		it("a folder-kind node dropped on the icon is refused", async () => {
+			const ctx = makePr2Ctx(["Note.md"]);
+			ctx.app.vault.seedFolder("Other");
+			ctx.index.rebuild();
+			const placed = ctx.views.placeUnit(ctx.view.id, folder("Other"), null)!;
+
+			await dragNodeOntoMod(ctx, ctx.view.id, placed.id);
+
+			expect(confirms).toHaveLength(0);
+			expect(ctx.app.vault.calls).toEqual([]);
+			expect(ctx.app.vault.getAbstractFileByPath("Other")).not.toBeNull();
+		});
+	});
+});

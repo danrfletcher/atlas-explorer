@@ -193,9 +193,10 @@ function blockSubpathExists(metadataCache: Pick<MetadataCache, "getFileCache">, 
 
 /**
  * R4 review: decides whether a path `add_node` just resolved to `ref` (via `resolveVaultPathToRef`)
- * is actually placeable — "exists on disk" is not the same thing as "is an Atlas unit", and placing
- * the latter renders a permanently-greyed "(missing)" row (`ExplorerView.resolveRef` finds no unit
- * for it) rather than failing up front. Returns whether `ref` still needs promoting (the caller
+ * is actually placeable — "exists on disk" is not the same thing as "is an Atlas unit". A file or
+ * folder that exists but is not a unit still renders as a normal row (`ExplorerView.resolveRef` goes by
+ * presence), but a block ref that is not a unit renders a permanently-greyed "(missing)" row, and this
+ * tool promotes eagerly rather than leave a non-unit ref placed. Returns whether `ref` still needs promoting (the caller
  * promotes it itself, see the R10 note below) — it never promotes anything by itself. Three
  * outcomes:
  *   - `ref` is already a recognised Atlas unit (`UnitIndex.getUnits()`) — returns `false`, nothing

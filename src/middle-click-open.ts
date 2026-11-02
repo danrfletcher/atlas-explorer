@@ -2,6 +2,7 @@ import type { UnitRef } from "./types";
 import { TFile, TFolder } from "obsidian";
 import type { App } from "obsidian";
 import { findInterfaceNote } from "./interface-notes";
+import { presentRefEntry } from "./ref-presence";
 import type { AtlasSettings } from "./settings";
 
 /** Middle-click on a bucket or inbox unit row = "Open in new tab". This module holds the one rule set
@@ -36,12 +37,15 @@ export interface MiddleClickRowState {
 	targetExists: boolean;
 }
 
-/** Live check that the ref has something to open: a file/block ref's file is in the vault, or a
- * module's folder has an interface note. Never creates anything. */
+/** Live check that the ref has something to open: a file ref's file is in the vault (unit or not,
+ * via the shared `presentRefEntry` rule), a block ref's file is in the vault, or a module's folder is
+ * present and has an interface note. Never creates anything. */
 export function refTargetExists(app: App, settings: AtlasSettings, ref: UnitRef): boolean {
-	const entry = app.vault.getAbstractFileByPath(ref.path);
+	// A block is not covered by the presence rule (it renders only as a unit); it opens its file.
+	if (ref.kind === "block") return app.vault.getAbstractFileByPath(ref.path) instanceof TFile;
+	const entry = presentRefEntry(app.vault, ref);
 	if (ref.kind === "folder") return entry instanceof TFolder && findInterfaceNote(app, entry, settings) !== null;
-	return entry instanceof TFile;
+	return entry !== null;
 }
 
 /** `mousedown` guard: button 1 would start the browser's middle-button autoscroll. Buttons 0 and 2
