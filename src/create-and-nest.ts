@@ -20,8 +20,9 @@ export const CREATE_KINDS: ReadonlyArray<{ kind: CreateKind; label: string; icon
 	{ kind: "module", label: "Module", icon: "folder" },
 ];
 
-/** The chosen name with surrounding whitespace dropped. Inner text is kept exactly as typed. */
-function trimmed(name: string): string {
+/** The chosen name with surrounding whitespace dropped. Inner text is kept exactly as typed. Shared
+ * with `create-from-meta.ts` so the two never drift. */
+export function trimmed(name: string): string {
 	return name.trim();
 }
 
@@ -63,7 +64,9 @@ export function freeBlockPath(vault: Pick<App["vault"], "getAbstractFileByPath">
 	return null;
 }
 
-function describe(error: unknown): string {
+/** An error's message, or its string form when it isn't an `Error`. Shared with `create-from-meta.ts`
+ * and the add-under flows. */
+export function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 

@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import { join as joinPath } from "path";
 import { UnitRef } from "./types";
 
 /** Minimal read-only filesystem surface this module needs — kept narrow so path resolution stays
@@ -67,4 +68,31 @@ export function listOutsideChildrenWith(
 
 export function listOutsideChildren(path: string, options: { showFiles: boolean; showFolders: boolean }): UnitRef[] {
 	return listOutsideChildrenWith(fs, path, options);
+}
+
+/** The one extra read `outsideChildMtimeWith` needs on top of `OutsideFsLike`. */
+export interface OutsideStatFsLike {
+	statSync(path: string): { isFile(): boolean; mtimeMs: number };
+}
+
+/** PR-1 R2: the file-modified time (ms) of one Outside-Vault Folder-source child, for the Modified
+ * sort. Mirrors `listOutsideChildrenWith`'s contract: `ref.path` is the entry's name *relative to
+ * the Outside root*, so the real path is `rootPath` + that name — `rootPath` is the device-local
+ * absolute path from `FolderSourcePathStore`, never stored on the node. Files report their own
+ * mtime; a folder child reports `null` ("no time", G9), the same as an Inside-Vault module with no
+ * interface note — an Outside-Vault folder is a plain directory, not a module, and a directory's
+ * own mtime only moves when entries are added or removed in it. Also `null` (never throws) when
+ * the root is blank or the file can't be stat'ed (deleted since the last scan, permission denied). */
+export function outsideChildMtimeWith(fsLike: OutsideStatFsLike, rootPath: string, ref: UnitRef): number | null {
+	if (ref.kind !== "file" || !rootPath.trim()) return null;
+	try {
+		const stat = fsLike.statSync(joinPath(rootPath, ref.path));
+		return stat.isFile() && Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : null;
+	} catch {
+		return null;
+	}
+}
+
+export function outsideChildMtime(rootPath: string, ref: UnitRef): number | null {
+	return outsideChildMtimeWith(fs, rootPath, ref);
 }

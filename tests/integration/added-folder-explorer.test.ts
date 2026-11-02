@@ -41,6 +41,7 @@ const proto = AtlasExplorerView.prototype as unknown as Record<string, Method>;
 const REAL = [
 	"renderNode",
 	"renderConnectionDots",
+	"renderSortIndicator",
 	"renderInboxRow",
 	"resolveRef",
 	"resolveOutsideManagedRowInfo",

@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Notice } from "obsidian";
 import { CreateKind, acquireParentLock, createOnDisk, parentExists } from "../../src/create-and-nest";
-import { startCreateFromMeta } from "../../src/create-from-meta";
+import { createFromMeta, startCreateFromMeta } from "../../src/create-from-meta";
 import { file, folder as folderRef, meta, setup, tMany } from "../integration/create-from-meta-fixtures";
-import { flush, key, modals } from "../helpers";
+import { flush, heldCount, key, modals } from "../helpers";
 
 const notices = () => Notice.instances.map((n) => n.message);
 const KINDS: CreateKind[] = ["block", "file", "module"];
@@ -30,10 +30,10 @@ describe("shared create: createOnDisk", () => {
 		expect(result.path).toBe(result.ref.path);
 
 		// Still held at this point: a redraw reading getUnits right now must not list it as unplaced.
-		expect(s.index.heldCount(result.path)).toBe(1);
+		expect(heldCount(s.index, result.path)).toBe(1);
 		expect(s.index.getUnits().some((u) => u.path === result.path)).toBe(false);
 		result.release();
-		expect(s.index.heldCount(result.path)).toBe(0);
+		expect(heldCount(s.index, result.path)).toBe(0);
 		expect(s.index.getUnits().some((u) => u.path === result.path)).toBe(true);
 
 		const added = s.listing().filter((p) => !before.includes(p));
@@ -83,7 +83,7 @@ describe("rollback: createOnDisk undoes exactly what it made and always releases
 		if (result.ok) throw new Error("unreachable");
 		expect(result.reason).toContain("disk says no");
 		expect(s.listing()).toEqual(before);
-		expect(s.index.heldCount("Field tech.md")).toBe(0);
+		expect(heldCount(s.index, "Field tech.md")).toBe(0);
 	});
 
 	it("module: the folder itself can't be made — nothing written, hold count zero", async () => {
@@ -93,7 +93,7 @@ describe("rollback: createOnDisk undoes exactly what it made and always releases
 		const result = await createOnDisk(s.deps, "module", "Field tech");
 		expect(result.ok).toBe(false);
 		expect(s.listing()).toEqual(before);
-		expect(s.index.heldCount("Field tech")).toBe(0);
+		expect(heldCount(s.index, "Field tech")).toBe(0);
 	});
 
 	it("module: the folder is made, the note throws — the now-empty folder is removed again, hold count zero", async () => {
@@ -104,7 +104,7 @@ describe("rollback: createOnDisk undoes exactly what it made and always releases
 		expect(result.ok).toBe(false);
 		expect(s.listing()).toEqual(before);
 		expect(s.app.vault.getAbstractFileByPath("Field tech")).toBeNull();
-		expect(s.index.heldCount("Field tech")).toBe(0);
+		expect(heldCount(s.index, "Field tech")).toBe(0);
 	});
 
 	it("block: the pool folder can't be made — nothing written, hold count zero", async () => {
@@ -125,7 +125,7 @@ describe("rollback: createOnDisk undoes exactly what it made and always releases
 		expect(result.ok).toBe(false);
 		expect(s.listing()).toEqual(before);
 		expect(s.app.vault.getAbstractFileByPath("Pool2")).toBeNull();
-		expect(s.index.heldCount("Pool2/20260925143012-0000.md")).toBe(0);
+		expect(heldCount(s.index, "Pool2/20260925143012-0000.md")).toBe(0);
 	});
 
 	it.each(KINDS)("nest step fails after a successful %s disk create: the caller's rollback() undoes it and release() clears the hold", async (kind) => {
@@ -140,7 +140,7 @@ describe("rollback: createOnDisk undoes exactly what it made and always releases
 		made.release();
 		expect(leftover).toBe("");
 		expect(s.listing()).toEqual(before);
-		expect(s.index.heldCount(made.path)).toBe(0);
+		expect(heldCount(s.index, made.path)).toBe(0);
 	});
 
 	it("a non-empty module folder left behind after rollback is reported in `leftover`, and the hold still clears", async () => {
@@ -153,7 +153,7 @@ describe("rollback: createOnDisk undoes exactly what it made and always releases
 		made.release();
 		expect(leftover).toContain("isn't empty");
 		expect(s.app.vault.getAbstractFileByPath("Field tech")).not.toBeNull();
-		expect(s.index.heldCount("Field tech")).toBe(0);
+		expect(heldCount(s.index, "Field tech")).toBe(0);
 	});
 });
 
@@ -164,22 +164,16 @@ describe("parent guard: parentExists", () => {
 		expect(parentExists(s.deps, "default", "c-existing")).toBe(true); // unit
 	});
 
-	it("false once gone, for a unit parent and for a Folder parent — gating on it stops placeUnit/addMetaFolder from ever being called", () => {
+	it("false once gone, for a unit parent and for a Folder parent", () => {
 		const s = setup(tMany());
-		const placeSpy = vi.spyOn(s.views, "placeUnit");
-		const addMetaSpy = vi.spyOn(s.views, "addMetaFolder");
-
 		// A Folder parent, deleted.
 		s.views.deleteMetaFolder("default", "c-sub");
 		expect(parentExists(s.deps, "default", "c-sub")).toBe(false);
-		if (parentExists(s.deps, "default", "c-sub")) s.views.addMetaFolder("default", "c-sub", "New");
-		expect(addMetaSpy).not.toHaveBeenCalled();
-
 		// A unit-row parent, removed from the view.
 		s.views.unplaceNode("default", "c-existing");
 		expect(parentExists(s.deps, "default", "c-existing")).toBe(false);
-		if (parentExists(s.deps, "default", "c-existing")) s.views.placeUnit("default", file("New.md"), "c-existing");
-		expect(placeSpy).not.toHaveBeenCalled();
+		// The flow-level proof that every add kind actually calls this guard before nesting (placeUnit,
+		// placeNewUnit and addMetaFolder spied on) lives in add-under-lifecycle.test.ts.
 	});
 
 	it("without the guard, placeUnit/addMetaFolder silently fall back to the view root instead of refusing — exactly the bug the guard exists to prevent", () => {
@@ -197,9 +191,9 @@ describe("parent guard: parentExists", () => {
 });
 
 describe("lock: acquireParentLock, keyed on viewId:parentId, shared by Create and every later add kind", () => {
-	const LABELS = ["block", "file", "module", "folder", "Create"] as const;
-
-	it.each(LABELS)("a second acquire for the same view+parent is refused while the first holds it (as %s would take it); release lets a third run", () => {
+	// Each add kind taking this lock through its own entry point (block/file/module/folder) is covered
+	// in add-under-lifecycle.test.ts; Create's is covered below. These are the lock's own rules.
+	it("a second acquire for the same view+parent is refused while the first holds it; release lets a third run", () => {
 		const release1 = acquireParentLock("default", "ft", false);
 		expect(release1).not.toBeNull();
 		expect(acquireParentLock("default", "ft", false)).toBeNull();
@@ -209,7 +203,7 @@ describe("lock: acquireParentLock, keyed on viewId:parentId, shared by Create an
 		release3!();
 	});
 
-	it.each(LABELS)("the same parent id in a different view is not blocked (%s)", () => {
+	it("the same parent id in a different view is not blocked", () => {
 		const release1 = acquireParentLock("default", "ft", false)!;
 		const releaseOtherView = acquireParentLock("second", "ft", false);
 		expect(releaseOtherView).not.toBeNull();
@@ -217,7 +211,7 @@ describe("lock: acquireParentLock, keyed on viewId:parentId, shared by Create an
 		releaseOtherView!();
 	});
 
-	it.each(LABELS)("a different parent in the same view is not blocked (%s)", () => {
+	it("a different parent in the same view is not blocked", () => {
 		const release1 = acquireParentLock("default", "ft", false)!;
 		const releaseOtherParent = acquireParentLock("default", "other", false);
 		expect(releaseOtherParent).not.toBeNull();
@@ -309,5 +303,68 @@ describe("inbox hold: the shared disk-create helper on a real UnitIndex", () => 
 		expect(s.index.getUnits().some((u) => u.path === made.path)).toBe(true);
 		expect(spy).toHaveBeenCalled();
 		unsub();
+	});
+});
+
+describe("E7: createFromMeta leaves the hold count at zero after every outcome", () => {
+	// The unit's path for each kind: Field tech.md for a file, the folder for a module, and the pool
+	// path (fixed clock and random) for a block.
+	const NOW = new Date(2026, 8, 25, 14, 30, 12);
+	const PATHS: Record<CreateKind, string> = { block: "_pool/20260925143012-0000.md", file: "Field tech.md", module: "Field tech" };
+
+	it.each(KINDS)("%s: success", async (kind) => {
+		const s = setup(tMany());
+		const result = await createFromMeta({ ...s.deps, now: () => NOW, random: () => 0 }, kind, "default", "ft", "Field tech");
+		expect(result.ok).toBe(true);
+		expect(heldCount(s.index, PATHS[kind])).toBe(0);
+	});
+
+	it.each(KINDS)("%s: the folder is gone before the swap — rolled back, hold zero", async (kind) => {
+		const s = setup(tMany());
+		const before = s.listing();
+		const original = s.app.vault.create.bind(s.app.vault);
+		// The meta folder disappears while the disk step runs (a data sync).
+		vi.spyOn(s.app.vault, "create").mockImplementation(async (...args: Parameters<typeof original>) => {
+			s.views.deleteMetaFolder("default", "ft");
+			return original(...args);
+		});
+		const result = await createFromMeta({ ...s.deps, now: () => NOW, random: () => 0 }, kind, "default", "ft", "Field tech");
+		expect(result.ok).toBe(false);
+		expect(s.listing()).toEqual(before);
+		expect(heldCount(s.index, PATHS[kind])).toBe(0);
+		expect(notices().some((m) => m.includes("the folder no longer exists"))).toBe(true);
+	});
+
+	it.each(KINDS)("%s: the swap is refused — rolled back, hold zero", async (kind) => {
+		const s = setup(tMany());
+		const before = s.listing();
+		s.deps.replaceMetaNodeWithUnit = () => false;
+		const result = await createFromMeta({ ...s.deps, now: () => NOW, random: () => 0 }, kind, "default", "ft", "Field tech");
+		expect(result.ok).toBe(false);
+		expect(s.listing()).toEqual(before);
+		expect(heldCount(s.index, PATHS[kind])).toBe(0);
+	});
+
+	it.each(KINDS)("%s: the save fails — the item stays, reported, hold zero (released before the save)", async (kind) => {
+		const s = setup(tMany());
+		s.deps.save = async () => {
+			// Already released by now: release runs before save.
+			expect(heldCount(s.index, PATHS[kind])).toBe(0);
+			throw new Error("disk full");
+		};
+		const result = await createFromMeta({ ...s.deps, now: () => NOW, random: () => 0 }, kind, "default", "ft", "Field tech");
+		expect(result.ok).toBe(true);
+		expect(notices().some((m) => m.includes("saving the views failed: disk full"))).toBe(true);
+		expect(heldCount(s.index, PATHS[kind])).toBe(0);
+		expect(s.views.getNode("default", "ft")!.type).toBe("unit");
+	});
+
+	it.each(KINDS)("%s: the disk create fails — hold zero", async (kind) => {
+		const s = setup(tMany());
+		vi.spyOn(s.app.vault, "create").mockRejectedValue(new Error("disk says no"));
+		vi.spyOn(s.app.vault, "createFolder").mockRejectedValue(new Error("disk says no"));
+		const result = await createFromMeta({ ...s.deps, now: () => NOW, random: () => 0 }, kind, "default", "ft", "Field tech");
+		expect(result.ok).toBe(false);
+		expect(heldCount(s.index, PATHS[kind])).toBe(0);
 	});
 });

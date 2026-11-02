@@ -5,8 +5,9 @@ import { UnitIndex } from "../../src/unit-index";
 import { ViewsManager } from "../../src/views";
 import { UnitRef, ViewNode } from "../../src/types";
 import { AddUnderModuleDeps, startAddUnderModule } from "../../src/add-under-module";
+import { acquireParentLock } from "../../src/create-and-nest";
 import { file, meta, unit } from "../integration/create-from-meta-fixtures";
-import { seedRoot } from "../helpers";
+import { heldCount, seedRoot } from "../helpers";
 
 // PR-3.F3: mirrors add-under-file.test.ts (PR-3.F2) almost exactly — same shared foundation, same
 // name dialog, same mock-driving pattern — but for the Module kind: `<name>/<name>.md` instead of
@@ -114,6 +115,7 @@ describe("startAddUnderModule — G3 happy path", () => {
 		expect(openNameDialog).toHaveBeenCalledWith(s.deps.app, {
 			title: "Add module under quarry-drones",
 			confirmLabel: "Add",
+			mode: "full",
 			initialValue: "",
 			poolFolder: "_pool",
 			excludedFolders: ["_pool"],
@@ -131,7 +133,7 @@ describe("startAddUnderModule — G3 happy path", () => {
 		expect([...s.selection]).toEqual([created!.id]);
 
 		// E7: not left in the Inbox — it was held until nested, and the hold is released right after.
-		expect(s.index.heldCount("Field Ops")).toBe(0);
+		expect(heldCount(s.index, "Field Ops")).toBe(0);
 		const inbox = s.vm.getInboxUnits(s.index.getUnits(), VIEW_ID, "view").map((u) => u.path);
 		expect(inbox).not.toContain("Field Ops");
 		expect(inbox).not.toContain("Field Ops/Field Ops.md");
@@ -377,6 +379,98 @@ describe("startAddUnderModule — G9 failure rolls back", () => {
 		expect(s.app.vault.getAbstractFileByPath("Field Ops/extra.md")).not.toBeNull();
 		expect(Notice.instances).toHaveLength(1);
 		expect(Notice.instances[0].message).toContain("isn't empty");
+	});
+});
+
+/** Every file and folder path in the mock vault, folders suffixed "/", sorted: a full before/after listing. */
+function vaultListing(app: App): string[] {
+	const out: string[] = [];
+	const walk = (folder: { children: unknown[] }) => {
+		for (const child of folder.children) {
+			const c = child as { path: string; children?: unknown[] };
+			out.push(c.children ? `${c.path}/` : c.path);
+			if (c.children) walk(c as { children: unknown[] });
+		}
+	};
+	walk(app.vault.getRoot() as unknown as { children: unknown[] });
+	return out.sort();
+}
+
+// PR-3.F3 R3/R4 (polish): the G9 failure paths asserted in full — the vault is back to its seed (a
+// whole before/after listing, not just "Field Ops is absent"), the inbox hold is released, the lock is
+// released (the same parent can add again right afterwards) and the selection is untouched.
+describe("startAddUnderModule — G9 every failure path restores the seed, releases the hold and the lock", () => {
+	const FAILURES: [string, (s: ReturnType<typeof setup>) => void][] = [
+		["createFolder throws", (s) => void vi.spyOn(s.app.vault, "createFolder").mockRejectedValue(new Error("disk full"))],
+		["the note create throws after the folder was made", (s) => void vi.spyOn(s.app.vault, "create").mockRejectedValue(new Error("note write failed"))],
+		["placeNewUnit returns null", (s) => void s.placeNewUnit.mockImplementation(() => null)],
+		[
+			"placeNewUnit throws",
+			(s) =>
+				void s.placeNewUnit.mockImplementation(() => {
+					throw new Error("nest blew up");
+				}),
+		],
+		[
+			"the parent is removed while the disk step runs",
+			(s) => {
+				const original = s.app.vault.create.bind(s.app.vault);
+				vi.spyOn(s.app.vault, "create").mockImplementation(async (...args: Parameters<typeof original>) => {
+					s.vm.unplaceNode(VIEW_ID, "quarry-drones");
+					return original(...args);
+				});
+			},
+		],
+	];
+
+	it.each(FAILURES)("%s", async (_name, arrange) => {
+		const s = setup();
+		const seed = vaultListing(s.app);
+		const rootBefore = s.vm.getView(VIEW_ID)!.root.map((n) => n.id);
+		arrange(s);
+		dialogMock.impl = async () => "Field Ops";
+
+		const result = await startAddUnderModule(s.deps, VIEW_ID, "quarry-drones");
+
+		expect(result).toBeNull();
+		expect(vaultListing(s.app)).toEqual(seed);
+		expect(heldCount(s.index, "Field Ops")).toBe(0);
+		expect(s.selection.size).toBe(0);
+		expect(s.vm.getView(VIEW_ID)!.root.map((n) => n.id)).toEqual(rootBefore);
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain('module "Field Ops"');
+
+		// The lock is free again: a second add under the very same parent goes through (it needs the
+		// parent back for the case where the failure removed it).
+		vi.restoreAllMocks();
+		if (!s.vm.getNode(VIEW_ID, "quarry-drones")) return;
+		const again = await startAddUnderModule(s.deps, VIEW_ID, "quarry-drones");
+		expect(again).not.toBeNull();
+		expect(heldCount(s.index, "Field Ops")).toBe(0);
+	});
+
+	it("rollback incomplete: a delete throws — the Notice says what was left in place, and the hold and lock still clear", async () => {
+		const s = setup();
+		s.placeNewUnit.mockImplementation(() => null);
+		vi.spyOn(s.app.vault, "delete").mockRejectedValue(new Error("permission denied"));
+		dialogMock.impl = async () => "Field Ops";
+
+		const result = await startAddUnderModule(s.deps, VIEW_ID, "quarry-drones");
+
+		expect(result).toBeNull();
+		// Nothing could be removed, so the folder and its note are still there...
+		expect(s.app.vault.getAbstractFileByPath("Field Ops")).not.toBeNull();
+		expect(s.app.vault.getAbstractFileByPath("Field Ops/Field Ops.md")).not.toBeNull();
+		// ...and the one Notice says so, with the reason the clean-up gave up.
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain('module "Field Ops"');
+		expect(Notice.instances[0].message).toContain("the parent no longer exists");
+		expect(Notice.instances[0].message).toContain("Atlas couldn't clean up what it had made (permission denied)");
+		expect(heldCount(s.index, "Field Ops")).toBe(0);
+		expect(s.vm.getNode(VIEW_ID, "quarry-drones")!.children.map((c) => c.ref)).not.toContainEqual({ kind: "folder", path: "Field Ops" });
+		const lock = acquireParentLock(VIEW_ID, "quarry-drones", false);
+		expect(lock).not.toBeNull();
+		lock!();
 	});
 });
 

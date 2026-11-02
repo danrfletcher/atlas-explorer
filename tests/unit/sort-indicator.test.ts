@@ -62,11 +62,12 @@ describe("PR-2 G13 — the sort indicator's icon and tooltip, per mode and direc
 	});
 
 	it("Status (explicit, own): list-ordered icon, 'Status'/'Status, reversed' tooltip per direction", () => {
-		const forward = render({ sortMode: "status" });
+		const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S" };
+		const forward = render({ sortMode: "status" }, governor);
 		expect(forward.setIconSpy).toHaveBeenCalledWith(forward.el.querySelector(".atlas-sort-indicator"), "list-ordered");
 		expect(forward.setTooltipSpy).toHaveBeenCalledWith(forward.el.querySelector(".atlas-sort-indicator"), "Sorted: Status");
 
-		const reversed = render({ sortMode: "status", sortReverse: true });
+		const reversed = render({ sortMode: "status", sortReverse: true }, governor);
 		expect(reversed.setTooltipSpy).toHaveBeenCalledWith(reversed.el.querySelector(".atlas-sort-indicator"), "Sorted: Status, reversed");
 	});
 
@@ -77,6 +78,11 @@ describe("PR-2 G13 — the sort indicator's icon and tooltip, per mode and direc
 		expect(icon).toBeTruthy();
 		expect(setIconSpy).toHaveBeenCalledWith(icon, "list-ordered");
 		expect(setTooltipSpy).toHaveBeenCalledWith(icon, "Sorted: Status, reversed");
+	});
+
+	it("PR-2 R6: a stale own Status (statuses switched off, so no governor reaches the list) shows no indicator — the render pass leaves those rows in manual order", () => {
+		const { el } = render({ sortMode: "status" }, null);
+		expect(el.querySelector(".atlas-sort-indicator")).toBeNull();
 	});
 
 	it("Manual (explicit): no indicator at all", () => {

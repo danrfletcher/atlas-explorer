@@ -1,5 +1,5 @@
 import { App, MarkdownView, Notice, TFile } from "obsidian";
-import { CreateOnDiskDeps, ParentExistsDeps, acquireParentLock, createOnDisk, parentExists } from "./create-and-nest";
+import { CreateOnDiskDeps, ParentExistsDeps, acquireParentLock, createOnDisk, describe, parentExists } from "./create-and-nest";
 import { UnitRef, ViewNode } from "./types";
 
 const ERROR_NOTICE_MS = 8000;
@@ -88,8 +88,15 @@ export async function startAddUnderBlock(deps: AddUnderBlockDeps, viewId: string
 
 		const file = deps.app.vault.getAbstractFileByPath(made.path);
 		if (file instanceof TFile) {
-			await deps.app.workspace.getLeaf(false).openFile(file);
-			deps.app.workspace.getActiveViewOfType(MarkdownView)?.editor.setCursor({ line: 0, ch: 0 });
+			// The block is already created, nested and selected, so a failure to open it in the
+			// editor is reported and the add still counts: rejecting here would skip the caller's
+			// hidden-row Notice and explicit render for a node that is, in fact, in the tree.
+			try {
+				await deps.app.workspace.getLeaf(false).openFile(file);
+				deps.app.workspace.getActiveViewOfType(MarkdownView)?.editor.setCursor({ line: 0, ch: 0 });
+			} catch (error) {
+				new Notice(`Atlas: the block was added, but opening it failed: ${describe(error)}`, ERROR_NOTICE_MS);
+			}
 		}
 		return node;
 	} finally {

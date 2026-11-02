@@ -41,6 +41,7 @@ function setup(root: ViewNode[] = tree()) {
 	const app = new App();
 	const vm = new ViewsManager(app as unknown as App, [{ id: VIEW_ID, name: "Default", inboxMode: "view", root }], VIEW_ID, () => {});
 	const selection = new Set<string>();
+	const tracked = new Set<{ close(): void }>();
 	const addMetaFolder = vi.fn((viewId: string, parentId: string | null, label: string) => vm.addMetaFolder(viewId, parentId, label));
 	const deps: AddUnderFolderDeps = {
 		app: app as unknown as App,
@@ -51,8 +52,12 @@ function setup(root: ViewNode[] = tree()) {
 			selection.clear();
 			selection.add(nodeId);
 		},
+		trackPrompt: (prompt) => {
+			tracked.add(prompt);
+			return () => void tracked.delete(prompt);
+		},
 	};
-	return { app, vm, deps, selection, addMetaFolder };
+	return { app, vm, deps, selection, addMetaFolder, tracked };
 }
 
 beforeEach(() => {
@@ -132,13 +137,38 @@ describe("startAddUnderFolder — E1 cancel", () => {
 });
 
 describe("startAddUnderFolder — E4 parent-exists checks", () => {
-	it("a parent already gone before the menu choice: Notice, no prompt, no node", async () => {
+	it("a parent that never existed: Notice, no prompt, no node", async () => {
 		const { deps } = setup();
 		const result = await startAddUnderFolder(deps, VIEW_ID, "does-not-exist");
 		expect(result).toBeNull();
 		expect(captured.prompts).toHaveLength(0);
 		expect(Notice.instances).toHaveLength(1);
 		expect(Notice.instances[0].message).toContain("no longer exists");
+	});
+
+	// The real scenario: the row existed when the menu was built (the caller holds its node), and was
+	// removed between that and the choice in the second menu.
+	it.each([
+		["a Folder row", "docs", (vm: ViewsManager) => vm.deleteMetaFolder(VIEW_ID, "docs")],
+		["a unit row", "quarry-drones", (vm: ViewsManager) => vm.unplaceNode(VIEW_ID, "quarry-drones")],
+	])("%s removed after the menu was built, before the choice: Notice, no prompt, no addMetaFolder, nothing planted at the root", async (_name, parentId, remove) => {
+		const { vm, deps, addMetaFolder, selection } = setup();
+		const menuTimeNode = vm.getNode(VIEW_ID, parentId);
+		expect(menuTimeNode).not.toBeNull(); // it was there when the menu was built
+		const rootBefore = vm.getViews()[0].root.map((n) => n.id);
+		const projectsBefore = vm.getNode(VIEW_ID, "projects")!.children.map((c) => c.id);
+
+		remove(vm);
+		const result = await startAddUnderFolder(deps, VIEW_ID, parentId);
+
+		expect(result).toBeNull();
+		expect(captured.prompts).toHaveLength(0);
+		expect(addMetaFolder).not.toHaveBeenCalled();
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("no longer exists");
+		expect(vm.getViews()[0].root.map((n) => n.id)).toEqual(rootBefore);
+		expect(vm.getNode(VIEW_ID, "projects")!.children.map((c) => c.id)).toEqual(projectsBefore.filter((id) => id !== parentId));
+		expect([...selection]).toEqual([]);
 	});
 
 	it("parent removed while the prompt is open: on confirm, Notice, no node, not added at the view root", async () => {
@@ -237,5 +267,39 @@ describe("startAddUnderFolder — G4/GP7 no disk change; F4/F5 no sibling-insert
 		expect(after).toHaveLength(before.length + 1);
 		expect(after.slice(0, before.length).map((c) => c.id)).toEqual(before);
 		expect(after.at(-1)!.id).toBe(created!.id);
+	});
+
+	it("the clicked row's own level and position are unchanged: the new Folder is a child, never a sibling", async () => {
+		const { vm, deps } = setup();
+		const rootBefore = vm.getViews()[0].root.map((n) => n.id);
+		const levelBefore = vm.getNode(VIEW_ID, "projects")!.children.map((c) => c.id);
+		const clickedIndexBefore = levelBefore.indexOf("docs");
+
+		const promise = startAddUnderFolder(deps, VIEW_ID, "docs");
+		captured.prompts[0].onSubmit("Archive");
+		const created = await promise;
+
+		// The root level and the clicked row's own level (its siblings) are exactly as they were...
+		expect(vm.getViews()[0].root.map((n) => n.id)).toEqual(rootBefore);
+		const levelAfter = vm.getNode(VIEW_ID, "projects")!.children.map((c) => c.id);
+		expect(levelAfter).toEqual(levelBefore);
+		expect(levelAfter.indexOf("docs")).toBe(clickedIndexBefore);
+		// ...and the new Folder is nested inside the clicked row, nowhere else.
+		expect(vm.getNode(VIEW_ID, "docs")!.children.map((c) => c.id)).toEqual([created!.id]);
+		expect(vm.getNode(VIEW_ID, "projects")!.children.some((c) => c.id === created!.id)).toBe(false);
+		expect(vm.getViews()[0].root.some((n) => n.id === created!.id)).toBe(false);
+	});
+
+	it("adding under a root-level row leaves the other root rows and its own index alone", async () => {
+		const root: ViewNode[] = [meta("first", "First"), ...tree(), meta("last", "Last")];
+		const { vm, deps } = setup(root);
+		const rootBefore = vm.getViews()[0].root.map((n) => n.id);
+
+		const promise = startAddUnderFolder(deps, VIEW_ID, "projects");
+		captured.prompts[0].onSubmit("Archive");
+		await promise;
+
+		expect(vm.getViews()[0].root.map((n) => n.id)).toEqual(rootBefore);
+		expect(vm.getViews()[0].root.indexOf(vm.getNode(VIEW_ID, "projects")!)).toBe(1);
 	});
 });

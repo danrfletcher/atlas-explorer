@@ -501,7 +501,7 @@ describe("UT-11 menu builder (the real showUnitMenu)", () => {
 	function menuFor(ref: UnitRef, units: Unit[], n: ViewNode = node(ref)) {
 		const startCreate = vi.fn();
 		const fake = {
-			plugin: { app, unitIndex: { getUnits: () => units } },
+			plugin: { app, unitIndex: { getUnits: () => units }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } },
 			startCreateModule: startCreate,
 			openRef: vi.fn(),
 			revealInNativeExplorer: vi.fn(),

@@ -143,7 +143,7 @@ describe("UT-11 the menu builders", () => {
 
 	it("unit rows offer no Create or Replace with… at all", () => {
 		const fake = {
-			plugin: { app: new App(), unitIndex: { getUnits: () => [{ type: "root-file", path: "Existing.md" }] } },
+			plugin: { app: new App(), unitIndex: { getUnits: () => [{ type: "root-file", path: "Existing.md" }] }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } },
 			startCreateModule: vi.fn(),
 			openRef: vi.fn(),
 			revealInNativeExplorer: vi.fn(),

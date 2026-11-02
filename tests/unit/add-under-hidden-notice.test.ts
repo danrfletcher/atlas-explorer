@@ -66,6 +66,18 @@ describe("noticeIfAddedRowHidden — visibility gates the Notice, text follows G
 		expect(Notice.instances).toHaveLength(1);
 		expect(Notice.instances[0].message).toContain("Added Quarry Notes under quarry-drones");
 		expect(Notice.instances[0].message).toContain("(hidden by the current filter)");
+		// The whole string, including the codebase-wide "Atlas: " prefix every other Notice carries.
+		expect(Notice.instances[0].message).toBe("Atlas: Added Quarry Notes under quarry-drones (hidden by the current filter)");
+	});
+
+	it.each([
+		["the current filter", { filterActive: true }],
+		["the current sort or grouping", { filterActive: false, hiddenBySortOrGrouping: true }],
+		['the truncated "Dones" group', { filterActive: false, truncatedGroupLabel: "Dones" }],
+	] as const)("exact G10 text for the reason %s", async (reason, signals) => {
+		await noticeIfAddedRowHidden("new-1", "Archive", "Projects", state({ getBucketListEl: () => document.createElement("div"), ...signals }));
+
+		expect(Notice.instances.map((n) => n.message)).toEqual([`Atlas: Added Archive under Projects (hidden by ${reason})`]);
 	});
 
 	it("row found in the DOM: no Notice at all, even though a cause is also set (G10/E-G10b)", async () => {

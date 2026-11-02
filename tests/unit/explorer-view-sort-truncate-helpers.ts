@@ -66,6 +66,10 @@ export interface FakeExplorer {
 	renderSortIndicator: (...args: unknown[]) => unknown;
 	renderApiItemRow: ((...args: unknown[]) => unknown) | ReturnType<typeof vi.fn>;
 	isOutsideManagedAndUnresolved: ReturnType<typeof vi.fn>;
+	/** PR-1 (R2): real `outsideSortSource`, backed by this stubbable `isOutsideManagedUnit` — `false`
+	 * for every node by default, so a test only opts a row into the Outside-Vault Modified path. */
+	isOutsideManagedUnit: ReturnType<typeof vi.fn>;
+	outsideSortSource: (...args: unknown[]) => unknown;
 	visibleFolderSourceRows: (...args: unknown[]) => unknown;
 	/** PR-1: stands in for the real `modifiedTimeForRef` (file-stat lookups), the same way
 	 * `resolveRef` stands in for display-text resolution — defaults to "no time" (`null`) for
@@ -107,6 +111,8 @@ export function makeFakeExplorer(sm: StatusesManager, overrides: Partial<FakeExp
 			container.createDiv({ cls: "marker-api", attr: { "data-id": item.id } });
 		}),
 		isOutsideManagedAndUnresolved: vi.fn(() => false),
+		isOutsideManagedUnit: vi.fn(() => false),
+		outsideSortSource: proto.outsideSortSource,
 		visibleFolderSourceRows: proto.visibleFolderSourceRows,
 		modifiedTimeForRef: vi.fn(() => null),
 		resolvedMtimeForSort: proto.resolvedMtimeForSort,
@@ -158,6 +164,30 @@ export function callRenderApiItemRow(
 	) => void;
 	method.call(fake, item, container, v, folderNode, depth, ancestors);
 }
+
+/** Swaps the fake's stubbed `renderNode` for the real one, so a test can look for the very
+ * `data-select-key` attribute production tags every rendered row with (and that "Add under…"'s
+ * hidden-row check queries) instead of a marker the fixture invented. Any private method the real
+ * `renderNode` reaches for that isn't on the fake (drop zones, click handlers, tooltips...) is a
+ * no-op stub; the row-building ones (`renderRowIcon`, `renderConnectionDots`, `matchesFilter`) are the
+ * fake's own real ones. Unit rows need a `ref`, and the fake's `resolveRef` must return row info. */
+export function useRealRenderNode(fake: FakeExplorer): void {
+	const extras: Record<string, unknown> = { selectedBucketNodeIds: new Set<string>(), isOutsideManagedUnit: () => false };
+	const host = new Proxy(fake as unknown as Record<string | symbol, unknown>, {
+		get: (target, prop) => (typeof prop === "string" && prop in extras ? extras[prop] : prop in target ? target[prop] : vi.fn()),
+	});
+	const real = proto.renderNode as unknown as (node: ViewNode, container: HTMLElement, v: View, depth: number, ancestors: StatusGovernance[]) => Promise<void>;
+	fake.renderNode = vi.fn((node: ViewNode, container: HTMLElement, v: View, depth: number, ancestors: StatusGovernance[]) => real.call(host, node, container, v, depth, ancestors));
+}
+
+/** `resolveRef` stand-in giving every ref the row text of its file's basename. */
+export const basenameRowInfo = vi.fn(async (ref: { path: string }) => ({
+	text: ref.path.replace(/\.md$/, ""),
+	icon: "file",
+	promoted: false,
+	added: false,
+	missing: false,
+}));
 
 /** Render order as a flat list of marker ids — `"group:<key>"` for a truncation-group header,
  * the node/item id itself for an individual row. */

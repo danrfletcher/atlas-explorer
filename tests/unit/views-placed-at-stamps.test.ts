@@ -34,6 +34,33 @@ describe("PR-1 — placedAt stamping", () => {
 		expect(moved.placedAt).toBe(2_000_000);
 	});
 
+	it("PR-1 R3: placeUnit does NOT restamp when the target is the node's own current parent (root)", () => {
+		views.placeUnit(viewId, { kind: "file", path: "A.md" }, null);
+		vi.setSystemTime(2_000_000);
+		const result = views.placeUnit(viewId, { kind: "file", path: "A.md" }, null);
+		expect(result!.placedAt).toBe(1_000_000);
+		expect(views.getView(viewId)!.root[0].placedAt).toBe(1_000_000);
+	});
+
+	it("PR-1 R3: placeUnit does NOT restamp when the target is the node's own current parent (a Folder)", () => {
+		const folderId = views.addMetaFolder(viewId, null, "Folder")!.id;
+		views.placeUnit(viewId, { kind: "file", path: "A.md" }, folderId);
+		vi.setSystemTime(2_000_000);
+		views.placeUnit(viewId, { kind: "file", path: "A.md" }, folderId);
+		const child = views.getView(viewId)!.root.find((n) => n.id === folderId)!.children[0];
+		expect(child.placedAt).toBe(1_000_000);
+	});
+
+	it("PR-1 R3: a same-parent placeUnit that is not a no-op (explicit position) still leaves the stamp alone", () => {
+		views.placeUnit(viewId, { kind: "file", path: "A.md" }, null);
+		views.placeUnit(viewId, { kind: "file", path: "B.md" }, null);
+		vi.setSystemTime(2_000_000);
+		views.placeUnit(viewId, { kind: "file", path: "B.md" }, null, 0);
+		const root = views.getView(viewId)!.root;
+		expect(root.map((n) => n.ref!.path)).toEqual(["B.md", "A.md"]);
+		expect(root[0].placedAt).toBe(1_000_000);
+	});
+
 	it("addMetaFolder stamps a new Folder with the current time", () => {
 		const node = views.addMetaFolder(viewId, null, "Folder")!;
 		expect(node.placedAt).toBe(1_000_000);

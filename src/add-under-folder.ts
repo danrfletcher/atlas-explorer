@@ -19,6 +19,10 @@ export interface AddUnderFolderDeps extends ParentExistsDeps {
 	expandParent(viewId: string, parentId: string): void;
 	/** Replaces the current bucket selection with exactly the new node's id (E5). */
 	selectOnly(nodeId: string): void;
+	/** Registers the open label prompt with the view, so closing the view can close it (a modal
+	 * belongs to the app, not the leaf). Closing it resolves the flow as a cancel. The returned
+	 * function un-registers it once the prompt has settled. */
+	trackPrompt(prompt: { close(): void }): () => void;
 }
 
 function fail(reason: string): void {
@@ -27,17 +31,26 @@ function fail(reason: string): void {
 
 /** Opens the same label prompt the toolbar's "Add folder" uses, resolving to the typed value on
  * submit (whatever it is, even "" or whitespace-only — `addMetaFolder` owns the "New folder"
- * fallback) or `null` on cancel (Esc, the close button, or Cancel). */
-function promptForLabel(app: App): Promise<string | null> {
+ * fallback) or `null` on cancel (Esc, the close button, Cancel, or the view closing underneath it). */
+function promptForLabel(app: App, trackPrompt: AddUnderFolderDeps["trackPrompt"]): Promise<string | null> {
 	return new Promise((resolve) => {
-		new TextPromptModal(
+		let untrack: () => void = () => {};
+		const prompt = new TextPromptModal(
 			app,
 			"New folder",
 			"New folder",
-			(label) => resolve(label),
+			(label) => {
+				untrack();
+				resolve(label);
+			},
 			"",
-			() => resolve(null)
-		).open();
+			() => {
+				untrack();
+				resolve(null);
+			}
+		);
+		untrack = trackPrompt(prompt);
+		prompt.open();
 	});
 }
 
@@ -55,7 +68,7 @@ export async function startAddUnderFolder(deps: AddUnderFolderDeps, viewId: stri
 			fail("the parent no longer exists");
 			return null;
 		}
-		const label = await promptForLabel(deps.app as App);
+		const label = await promptForLabel(deps.app as App, deps.trackPrompt);
 		if (label === null) return null;
 		if (!parentExists(deps, viewId, parentId)) {
 			fail("the parent no longer exists");
