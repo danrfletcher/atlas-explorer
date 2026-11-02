@@ -39,7 +39,7 @@ Every folder is a unit — a **module** whose **interface** is a note saying wha
 - The interface note is `<Folder>/<Folder>.md` by default. A module without one is still a unit; the explorer offers to create it.
 - Clicking a module's name opens its interface note. Clicking its icon opens a "Module contents" view of its internals instead.
 - A module's properties are its interface note's properties.
-- Atlas never rearranges a module's internal organization on disk — with one deliberate, always-confirmable exception: dragging a file or block directly onto a module's **icon**. Physical moves otherwise stay in Obsidian's native explorer (still available as a tab).
+- Atlas never rearranges a module's internal organization on disk — with one deliberate, always-confirmable exception: dragging a file or block directly onto a module's **icon**. A file that is already placed in a view stays placed where it is (in every view that holds it) after the move; a placed block that is no longer a unit after the move is removed from the views. Physical moves otherwise stay in Obsidian's native explorer (still available as a tab).
 
 ### Views, bucket, inbox
 

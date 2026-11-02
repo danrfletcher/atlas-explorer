@@ -254,6 +254,9 @@ export class MetadataCache {
 		if (name === "resolved") this.listeners.add(cb);
 		return { name, cb };
 	}
+	offref(ref: { name: string; cb: () => void }): void {
+		if (ref.name === "resolved") this.listeners.delete(ref.cb);
+	}
 	/** Test helper: what Obsidian does once the link graph has re-resolved. */
 	trigger(name: "resolved"): void {
 		if (name === "resolved") for (const cb of this.listeners) cb();

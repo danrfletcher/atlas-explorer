@@ -3629,10 +3629,12 @@ export class AtlasExplorerView extends ItemView {
 	 * one directly onto the module is the one deliberate way this explorer lets you physically file
 	 * something into it, since Atlas otherwise never rearranges a module's internal organization.
 	 * Gated by a confirm dialog (toggleable in settings) precisely because it's the one exception.
-	 * Whether the moved file stays visible as its own addressable unit afterward is decided entirely
-	 * by the existing link-graph promotion recompute (does it have a real backlink from outside the
+	 * Whether the moved file shows up as a *new* addressable unit afterward is decided entirely by
+	 * the existing link-graph promotion recompute (does it have a real backlink from outside the
 	 * module?) — this never force-promotes it; a file with no backlinks simply becomes ordinary,
-	 * invisible internals, matching the rest of the model. */
+	 * invisible internals, matching the rest of the model. A file that is already placed in a view
+	 * stays placed in every view, as a normal row at its new path, whether or not it is still a unit. A placed *block* is still un-placed in every view once the link
+	 * graph resolves and it is no longer a unit. */
 	private async handleAddToModule(ref: UnitRef, folderPath: string, skipConfirm = false): Promise<void> {
 		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
 		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
@@ -3646,10 +3648,16 @@ export class AtlasExplorerView extends ItemView {
 			await this.plugin.app.fileManager.renameFile(file, newPath);
 
 			const newRef: UnitRef = ref.kind === "block" ? { kind: "block", path: newPath, subpath: ref.subpath } : { kind: "file", path: newPath };
-			// Promotion status only settles once Obsidian's own link graph re-resolves after the
-			// move (rewritten backlink text elsewhere needs a metadataCache pass) — wait for exactly
-			// that event once, then clean up any now-stale placement rather than leave a "missing"
-			// ghost if it turned out to have no real backlinks and isn't a unit anymore. Cleaned up in
+			// A file that is already placed stays placed where it was, in every view, even if the move
+			// leaves it with no backlinks and so no longer a unit (Atlas #13 reverses the earlier
+			// un-place clean-up): `onVaultRename` has already rewritten each node's ref to `newPath`,
+			// and a present non-unit file renders as a normal row. Nothing waits on "resolved" here.
+			if (ref.kind !== "block") return;
+			// A block cannot render without being a unit, so blocks keep the clean-up. Promotion
+			// status only settles once Obsidian's own link graph re-resolves after the move
+			// (rewritten backlink text elsewhere needs a metadataCache pass) — wait for exactly
+			// that event once, then un-place the block if it turned out to have no real backlinks
+			// and isn't a unit anymore, rather than leave a "missing" ghost. Cleaned up in
 			// *every* view that held it (review, A11), not just the one the drag originated in — the
 			// file moved on disk for the whole vault, not "within" whichever view was on screen, so
 			// losing unit status is a vault-wide fact the same way `onVaultRename`'s own ref-rewriting
