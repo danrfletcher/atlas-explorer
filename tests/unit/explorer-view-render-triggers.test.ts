@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceLeaf } from "obsidian";
 import { makeSectionHarness, SectionHarness } from "../explorer-header-fixtures";
+import { Notice } from "obsidian";
+import { noticeIfAddedRowHidden } from "../../src/add-under-hidden-notice";
+import { bucketRows, drawBucketRows, flush, openExplorer, pointer, PressEnv } from "./explorer-view-press-helpers";
 
 /** PR-1 polish (PR-2 R4/R5/R11): the real `onOpen` listeners and the real `render()` pipeline,
  * driven with real DOM events and fake timers (via the shared header harness). Covers the three
@@ -64,7 +67,8 @@ describe("PR-2 R11 — the focus-regain refresh waits for the pointer gesture", 
 		await open();
 		const render = vi.spyOn(ex, "render");
 		fireLeafChange({}); // the editor was the active pane
-		const row = document.body.appendChild(document.createElement("div"));
+		// The press is inside the Atlas pane: only presses there hold renders.
+		const row = h.panel().appendChild(document.createElement("div"));
 		const onClick = vi.fn();
 		row.addEventListener("click", onClick);
 
@@ -92,7 +96,7 @@ describe("PR-2 R11 — the focus-regain refresh waits for the pointer gesture", 
 		// The event really travels document-capture -> container-capture -> row, so this only passes if
 		// Atlas's own listener is on the document in the capture phase (a bubble-phase or row-level
 		// listener would run after the activation, when the render has already been queued).
-		const container = document.body.appendChild(document.createElement("div"));
+		const container = h.panel().appendChild(document.createElement("div"));
 		const row = container.appendChild(document.createElement("div"));
 		const onClick = vi.fn();
 		row.addEventListener("click", onClick);
@@ -124,7 +128,7 @@ describe("PR-2 R11 — the focus-regain refresh waits for the pointer gesture", 
 		await open();
 		const render = vi.spyOn(ex, "render");
 		fireLeafChange({});
-		document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		h.panel().dispatchEvent(new Event("pointerdown", { bubbles: true }));
 		fireLeafChange(ex.leaf);
 		document.body.dispatchEvent(new Event("dragstart", { bubbles: true }));
 		await vi.advanceTimersByTimeAsync(50);
@@ -139,7 +143,7 @@ describe("PR-2 R11 — the focus-regain refresh waits for the pointer gesture", 
 		await open();
 		const render = vi.spyOn(ex, "render");
 		fireLeafChange({});
-		document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		h.panel().dispatchEvent(new Event("pointerdown", { bubbles: true }));
 		fireLeafChange(ex.leaf);
 		await vi.advanceTimersByTimeAsync(50);
 		expect(render).not.toHaveBeenCalled();
@@ -263,5 +267,279 @@ describe("PR-2 R5 — every render during one native drag defers the refresh", (
 		document.body.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, buttons: 0 }));
 		await ex.render();
 		expect(seen).toEqual([false, true]);
+	});
+});
+
+/** Atlas #16 PR-1: the hold sits at the render entry (`render()` / `queueRender()`), so every route
+ * that ends in a render waits for a press inside an Atlas pane. These drive the real `onOpen`
+ * listeners and the real render pipeline; only the bucket's row content is stubbed (by the harness). */
+describe("Atlas #16 — a press inside an Atlas pane holds every render route until it ends", () => {
+	let env: PressEnv;
+	let rowCount: number;
+
+	beforeEach(async () => {
+		rowCount = 1;
+		env = await openExplorer(h);
+		drawBucketRows(env.ex, () => rowCount);
+		await env.ex.render(); // draws the row a test presses
+		env.renderNow.mockClear();
+	});
+
+	afterEach(() => env.teardown());
+
+	/** One entry per route a render can be requested through. */
+	const routes: [string, (e: PressEnv) => void][] = [
+		["unitIndex.onChange", (e) => e.fireUnitIndexChange()],
+		["viewsManager.onChange (persisted)", (e) => e.fireViewsChange(true)],
+		["viewsManager.onChange (no change)", (e) => e.fireViewsChange(false)],
+		["refresh()", (e) => e.ex.refresh()],
+		[
+			"active-leaf-change",
+			(e) => {
+				e.fireLeafChange({}); // the editor was active
+				e.fireLeafChange(e.ex.leaf);
+			},
+		],
+		["a direct render() call", (e) => void e.ex.render()],
+	];
+
+	for (const [name, request] of routes) {
+		it(`${name}: nothing renders during the press, the pressed row stays attached, and the change shows once after release`, async () => {
+			const row = bucketRows()[0];
+			pointer("pointerdown", row, { buttons: 1 });
+			rowCount = 3; // a change arrives mid-press
+			request(env);
+			await vi.advanceTimersByTimeAsync(50);
+			expect(env.renderNow).not.toHaveBeenCalled();
+			expect(row.isConnected).toBe(true);
+			expect(bucketRows()).toHaveLength(1);
+
+			pointer("pointerup", row);
+			await flush(env);
+			expect(env.renderNow).toHaveBeenCalledTimes(1);
+			expect(bucketRows()).toHaveLength(3); // held, never dropped
+		});
+
+		it(`${name}: without a press it renders exactly as before`, async () => {
+			rowCount = 3;
+			request(env);
+			await flush(env);
+			expect(env.renderNow).toHaveBeenCalledTimes(1);
+			expect(bucketRows()).toHaveLength(3);
+		});
+	}
+
+	it("several renders requested in one press give exactly one render after it", async () => {
+		const row = bucketRows()[0];
+		pointer("pointerdown", row, { buttons: 1 });
+		env.fireUnitIndexChange();
+		env.fireViewsChange(true);
+		env.ex.refresh();
+		void env.ex.render();
+		void env.ex.render();
+		await vi.advanceTimersByTimeAsync(50);
+		expect(env.renderNow).not.toHaveBeenCalled();
+
+		pointer("pointerup", row);
+		await flush(env);
+		expect(env.renderNow).toHaveBeenCalledTimes(1);
+	});
+
+	it("a press with no render requested gives no render, and a press that starts and ends in one tick leaves nothing stuck", async () => {
+		const row = bucketRows()[0];
+		pointer("pointerdown", row, { buttons: 1 });
+		pointer("pointerup", row);
+		await flush(env);
+		expect(env.renderNow).not.toHaveBeenCalled();
+
+		env.ex.refresh(); // not held: the next request renders as usual
+		await flush(env);
+		expect(env.renderNow).toHaveBeenCalledTimes(1);
+	});
+
+	it("Atlas already focused: a plain click costs no extra render and no delay", async () => {
+		const row = bucketRows()[0];
+		const onClick = vi.fn();
+		row.addEventListener("click", onClick);
+		pointer("pointerdown", row, { buttons: 1 });
+		pointer("pointerup", row);
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		expect(onClick).toHaveBeenCalledTimes(1);
+		await flush(env);
+		expect(env.renderNow).not.toHaveBeenCalled();
+	});
+
+	it("a render requested before the press is not held by it (the timer already queued it)", async () => {
+		env.ex.refresh();
+		await flush(env);
+		expect(env.renderNow).toHaveBeenCalledTimes(1);
+	});
+
+	it("a long press (several seconds) while vault events arrive renders nothing until release", async () => {
+		const row = bucketRows()[0];
+		pointer("pointerdown", row, { buttons: 1 });
+		for (let second = 0; second < 6; second++) {
+			rowCount++;
+			env.fireUnitIndexChange();
+			env.fireViewsChange(false);
+			await vi.advanceTimersByTimeAsync(1000);
+		}
+		expect(env.renderNow).not.toHaveBeenCalled();
+		expect(row.isConnected).toBe(true);
+
+		pointer("pointerup", row);
+		await flush(env);
+		expect(env.renderNow).toHaveBeenCalledTimes(1);
+		expect(bucketRows()).toHaveLength(7);
+	});
+
+	it("regression: editor active, press a row, Obsidian activates the leaf and the refresh-on-load callers rebuild — the row is still attached at pointerup and its click fires once", async () => {
+		// Same wiring as `activateLeaf` in Obsidian: a capture listener on the leaf container.
+		env.ex.refreshApiSourcesOnViewLoad = () => {
+			// The folder-source, CSV, Markdown-table and API refreshes each end in `notifyChange()`.
+			for (let i = 0; i < 4; i++) env.fireViewsChange(false);
+		};
+		h.panel().addEventListener(
+			"pointerdown",
+			() => {
+				env.fireLeafChange(env.ex.leaf);
+				env.fireUnitIndexChange();
+			},
+			{ capture: true }
+		);
+		env.fireLeafChange({}); // the editor is the active pane
+
+		const row = bucketRows()[0];
+		const onClick = vi.fn();
+		row.addEventListener("click", onClick);
+		let attachedAtPointerUp = false;
+		let sameNodeAtPointerUp = false;
+		row.addEventListener("pointerup", () => {
+			attachedAtPointerUp = row.isConnected;
+			sameNodeAtPointerUp = bucketRows()[0] === row;
+		});
+
+		pointer("pointerdown", row, { buttons: 1 });
+		await vi.advanceTimersByTimeAsync(150); // about where the live probe saw the row gone
+		pointer("pointerup", row);
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+		expect(attachedAtPointerUp).toBe(true);
+		expect(sameNodeAtPointerUp).toBe(true);
+		expect(onClick).toHaveBeenCalledTimes(1);
+		await flush(env);
+		expect(env.renderNow).toHaveBeenCalledTimes(1); // the refreshes ran once, after the click
+	});
+});
+
+describe("Atlas #16 — the same regression for a windowed inbox row", () => {
+	let env: PressEnv;
+
+	beforeEach(async () => {
+		h.teardown();
+		h = makeSectionHarness({ bucketRows: 1, inboxRows: 60 });
+		env = await openExplorer(h);
+		env.ex.openRef = vi.fn(async () => {});
+		await env.ex.render();
+		env.renderNow.mockClear();
+	});
+
+	afterEach(() => env.teardown());
+
+	it("the pressed row is inside the virtualised window and opens on the first click", async () => {
+		const inboxRows = Array.from(document.querySelectorAll<HTMLElement>(".atlas-inbox .atlas-row-unit"));
+		expect(inboxRows.length).toBeGreaterThan(0);
+		expect(inboxRows.length).toBeLessThan(60); // windowed: most inbox rows are not in the DOM
+		const row = inboxRows[0];
+
+		env.ex.refreshApiSourcesOnViewLoad = () => {
+			for (let i = 0; i < 4; i++) env.fireViewsChange(false);
+		};
+		h.panel().addEventListener(
+			"pointerdown",
+			() => {
+				env.fireLeafChange(env.ex.leaf);
+				env.fireUnitIndexChange();
+			},
+			{ capture: true }
+		);
+		env.fireLeafChange({}); // the editor is the active pane
+
+		let attachedAtPointerUp = false;
+		row.addEventListener("pointerup", () => (attachedAtPointerUp = row.isConnected));
+
+		pointer("pointerdown", row, { buttons: 1 });
+		await vi.advanceTimersByTimeAsync(150);
+		expect(row.isConnected).toBe(true);
+		pointer("pointerup", row);
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+		expect(attachedAtPointerUp).toBe(true);
+		expect(env.ex.openRef).toHaveBeenCalledTimes(1); // the row's real click handler ran
+		await flush(env);
+		expect(env.renderNow).toHaveBeenCalled();
+	});
+});
+
+describe("Atlas #16 (E7) — the add-under flows still finish when their render is held by a press", () => {
+	let env: PressEnv;
+	let withNewRow: boolean;
+	const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+
+	beforeEach(async () => {
+		Notice.reset();
+		// jsdom has no `CSS`; the visibility check in `noticeIfAddedRowHidden` calls `CSS.escape`.
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v) => v };
+		withNewRow = false;
+		env = await openExplorer(h);
+		env.ex.renderNodeList = async (_nodes, container) => {
+			container.createDiv({ cls: "atlas-row atlas-row-unit" });
+			if (withNewRow) container.createDiv({ cls: "atlas-row atlas-row-unit" }).dataset.selectKey = "new-node";
+		};
+		await env.ex.render();
+	});
+
+	afterEach(() => {
+		env.teardown();
+		(globalThis as { CSS?: unknown }).CSS = originalCSS;
+	});
+
+	/** What `runAddUnderFolder` and friends do: kick a render, then wait for it to settle. */
+	function addUnderFlow(filterActive: boolean): Promise<void> {
+		void env.ex.render();
+		return noticeIfAddedRowHidden("new-node", "New folder", "Projects", {
+			render: () => env.ex.awaitRenderSettled(),
+			getBucketListEl: () => env.ex.bucketListEl,
+			filterActive,
+		});
+	}
+
+	it("the flow waits through the press, then finds the row drawn by the held render and shows no notice", async () => {
+		pointer("pointerdown", bucketRows()[0], { buttons: 1 });
+		withNewRow = true;
+		let done = false;
+		const flow = addUnderFlow(true).then(() => (done = true));
+		await vi.advanceTimersByTimeAsync(100);
+		expect(done).toBe(false);
+		expect(Notice.instances).toHaveLength(0);
+
+		pointer("pointerup", bucketRows()[0]);
+		await vi.advanceTimersByTimeAsync(50);
+		await flow;
+		expect(done).toBe(true);
+		expect(Notice.instances).toHaveLength(0); // the row rendered: no "hidden" notice
+	});
+
+	it("a row the held render really leaves out still gets its 'added row hidden' notice, after release", async () => {
+		pointer("pointerdown", bucketRows()[0], { buttons: 1 });
+		let done = false;
+		const flow = addUnderFlow(true).then(() => (done = true));
+		await vi.advanceTimersByTimeAsync(100);
+		expect(done).toBe(false);
+
+		pointer("pointerup", bucketRows()[0]);
+		await vi.advanceTimersByTimeAsync(50);
+		await flow;
+		expect(Notice.instances.some((n) => n.message.includes("hidden by the current filter"))).toBe(true);
 	});
 });
