@@ -58,6 +58,11 @@ import {
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
+/** A press whose target is inside this selector started inside an Atlas pane (any Atlas leaf, not
+ * just this view's own): `.atlas-explorer` is the rendered content (toolbar, filter box, section
+ * headers, rows), the leaf-content attribute covers the rest of the pane. */
+const ATLAS_PANE_SELECTOR = `.atlas-explorer, .workspace-leaf-content[data-type="${ATLAS_VIEW_TYPE}"]`;
+
 /** F11: fixed row height assumed for inbox virtualization (all inbox rows are single-line,
  * `white-space: nowrap` per `.atlas-row` in styles.css, so this holds across Obsidian's own font
  * settings closely enough — a few px of slack either way just means a bit of overscan, not overlap). */
@@ -835,13 +840,22 @@ export class AtlasExplorerView extends ItemView {
 	 * events during a native drag, so one arriving means the drag is over even when `dragend` was
 	 * lost with a detached drag source. */
 	private nativeDragActive = false;
-	/** PR-1 (PR-2 R11): true between a `pointerdown` and the end of that gesture (`pointerup`,
-	 * `dragend`, `contextmenu`). Obsidian activates a leaf from a capture-phase `pointerdown`, so
-	 * `active-leaf-change` fires mid-gesture; rendering then detaches the row under the pointer and
-	 * its click never fires. */
+	/** True between a `pointerdown` inside an Atlas pane and the end of that press (`pointerup`,
+	 * `dragend`, or a `pointermove` with no button held; after a right-click, only once its context
+	 * menu has closed).
+	 * Obsidian activates a leaf from a capture-phase `pointerdown`, and that activation refreshes the
+	 * data sources, which rebuild the list; rendering mid-press detaches the row under the pointer
+	 * and its click never fires. So `render()` and `queueRender()` both hold while this is set. */
 	private pointerGestureActive = false;
-	/** PR-1 (PR-2 R11): a focus-regain refresh that arrived mid-gesture and is waiting for it to end. */
+	/** A render was requested mid-press (through any route) and is waiting for the press to end. */
 	private renderAfterPointerGesture = false;
+	/** The promise `render()` hands back for renders held mid-press, so `awaitRenderSettled()` treats a
+	 * held render as pending. Resolved when the render that runs after the press finishes. */
+	private heldRender: { promise: Promise<void>; settle: () => void } | null = null;
+	/** The current press produced a `contextmenu`: its release waits until the menu has closed. */
+	private contextMenuGesture = false;
+	/** Set by `onClose()`; a closed view holds and runs no renders. */
+	private closed = false;
 	/** The last row clicked (in either scope) — where a following shift-click's range starts from.
 	 * Cleared implicitly by scope: a shift-click only extends a range if the anchor's own scope
 	 * matches the row just clicked, so a stray shift-click in the *other* list can't try to build a
@@ -938,6 +952,7 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	async onOpen(): Promise<void> {
+		this.closed = false;
 		this.unsubscribers.push(this.plugin.unitIndex.onChange(() => this.queueRender()));
 		this.unsubscribers.push(
 			this.plugin.viewsManager.onChange((persisted) => {
@@ -964,13 +979,12 @@ export class AtlasExplorerView extends ItemView {
 						// going to, so the Modified re-sort was deferred to whatever render happened
 						// to come along later (typically the next autosave), which is exactly the
 						// timing G9/E4 forbid. Queue the refresh this trigger itself promised.
-						// PR-1 (PR-2 R11): Obsidian activates a leaf from a capture-phase
-						// `pointerdown`, so when the user clicks a row while another pane was
-						// active this fires *before* the click. Rendering now would detach the
-						// row under the pointer and swallow the click (or the drag), so a refresh
-						// that arrives mid-gesture waits until the gesture ends.
-						if (this.pointerGestureActive) this.renderAfterPointerGesture = true;
-						else this.queueRender();
+						// Obsidian activates a leaf from a capture-phase `pointerdown`, so when
+						// the user clicks a row while another pane was active this fires *before*
+						// the click. `queueRender()` holds while a press is under way inside an
+						// Atlas pane (a render now would detach the row under the pointer and
+						// swallow the click or the drag) and runs once after the press ends.
+						this.queueRender();
 					}
 				} else {
 					this.viewLoadTrigger.deactivate();
@@ -993,19 +1007,24 @@ export class AtlasExplorerView extends ItemView {
 		// unrelated drag hovering a module row within the dwell window could pop the Contents modal
 		// using stale drag data. This window-level backstop clears it (and cancels any pending dwell
 		// timer) whenever a drag ends, regardless of how.
-		// PR-1 (PR-2 R11): tracks whether a pointer gesture is under way, so the focus-regain refresh
-		// can wait for it. Registered on the document in the capture phase: that runs before
-		// Obsidian's own capture-phase `pointerdown` listener on the leaf container (the one that
-		// activates the leaf), so the flag is already set when `active-leaf-change` fires. Browsers
-		// dispatch `pointerup`, `mouseup` and `click` back-to-back from one input event, so the
-		// `setTimeout(0)` render `queueRender` schedules from `pointerup` runs after the click.
+		// Tracks whether a press that started inside an Atlas pane is under way, so `render()` and
+		// `queueRender()` can hold until it ends (every route: the index and views-manager change
+		// callbacks, `refresh()`, the focus-regain refresh, direct `render()` calls). Registered on the
+		// document in the capture phase: that runs before Obsidian's own capture-phase `pointerdown`
+		// listener on the leaf container (the one that activates the leaf), so the flag is already set
+		// when `active-leaf-change` fires. Browsers dispatch `pointerup`, `mouseup` and `click`
+		// back-to-back from one input event, so the `setTimeout(0)` render `queueRender` schedules
+		// from `pointerup` runs after the click. A press anywhere else (editor, another sidebar, a menu)
+		// is not ours to hold for, and ends a press whose release was lost.
 		const doc = document;
 		this.registerDomEvent(
 			doc,
 			"pointerdown",
-			() => {
-				this.pointerGestureActive = true;
+			(evt) => {
 				this.nativeDragActive = false;
+				this.contextMenuGesture = false;
+				if (this.isInsideAtlasPane(evt.target)) this.pointerGestureActive = true;
+				else this.endPointerGesture();
 			},
 			true
 		);
@@ -1014,11 +1033,21 @@ export class AtlasExplorerView extends ItemView {
 			"pointerup",
 			() => {
 				this.nativeDragActive = false;
-				this.endPointerGesture();
+				this.endPointerGestureUnlessMenuOpen();
 			},
 			true
 		);
-		this.registerDomEvent(doc, "contextmenu", () => this.endPointerGesture(), true);
+		// A right-click: the row's own `contextmenu` handler opens the menu right after this capture
+		// listener, so the menu isn't there to see yet. Remember it, and `endPointerGestureUnlessMenuOpen`
+		// keeps the hold until the menu has closed.
+		this.registerDomEvent(doc, "contextmenu", () => {
+			if (this.pointerGestureActive) this.contextMenuGesture = true;
+		}, true);
+		// A touch that turns into a scroll is cancelled without a `pointerup`. A mouse drag also fires
+		// `pointercancel` (at `dragstart`) and must keep the hold, so only touch ends the press here.
+		this.registerDomEvent(doc, "pointercancel", (evt) => {
+			if (evt.pointerType === "touch") this.endPointerGesture();
+		}, true);
 		this.registerDomEvent(window, "dragstart", () => (this.nativeDragActive = true), true);
 		this.registerDomEvent(window, "drop", () => (this.nativeDragActive = false), true);
 		this.registerDomEvent(
@@ -1026,9 +1055,9 @@ export class AtlasExplorerView extends ItemView {
 			"pointermove",
 			(evt) => {
 				this.nativeDragActive = false;
-				// No button held: the gesture is over even though its `pointerup` never reached us
-				// (released over a native menu, say). Don't leave a held-back refresh waiting.
-				if (evt.buttons === 0) this.endPointerGesture();
+				// No button held: the press is over even though its `pointerup` never reached us
+				// (released over a native menu, say). Don't leave a held-back render waiting.
+				if (evt.buttons === 0) this.endPointerGestureUnlessMenuOpen();
 			},
 			true
 		);
@@ -1079,23 +1108,74 @@ export class AtlasExplorerView extends ItemView {
 		for (const modal of [...this.openConfirmDeleteModals]) modal.close();
 		// Same iterate-a-copy rule: closing a prompt settles it, which un-registers it from the set.
 		for (const prompt of [...this.openAddUnderPrompts]) prompt.close();
+		// Nothing may render on, or stay held for, a closed view: drop the press state and settle any
+		// promise a held render handed out so no `awaitRenderSettled()` caller waits on it forever.
+		this.closed = true;
+		this.pointerGestureActive = false;
+		this.contextMenuGesture = false;
+		this.renderAfterPointerGesture = false;
+		this.heldRender?.settle();
+		this.heldRender = null;
 	}
 
-	/** PR-1 (PR-2 R11): ends the current pointer gesture and, if a focus-regain refresh was held back
-	 * for it, queues that render now. */
+	/** True when a press began inside an Atlas pane: the toolbar, filter box, section headers and
+	 * rows of any Atlas leaf, this one or the other. */
+	private isInsideAtlasPane(target: EventTarget | null): boolean {
+		const el = target as Element | null;
+		return !!el && typeof el.closest === "function" && el.closest(ATLAS_PANE_SELECTOR) !== null;
+	}
+
+	/** Obsidian's context menu is a `.menu` element appended straight to `document.body`. */
+	private isContextMenuOpen(): boolean {
+		return document.body.querySelector(":scope > .menu") !== null;
+	}
+
+	/** Ends the current press and, if renders were held for it, queues the one render that covers
+	 * them all (through `queueRender`, so it runs from `setTimeout(0)`, after the click). */
 	private endPointerGesture(): void {
 		this.pointerGestureActive = false;
+		this.contextMenuGesture = false;
 		if (!this.renderAfterPointerGesture) return;
 		this.renderAfterPointerGesture = false;
 		this.queueRender();
 	}
 
-	/** Collapses bursts of index/view change events (a drag can fire several) into one render. */
+	/** The release paths that can arrive while a right-click's menu is still up (`pointerup`, or a
+	 * `pointermove` with no button held): the press stays held until the menu has closed, and the
+	 * next such event after that ends it. Without a context menu this is `endPointerGesture()`. */
+	private endPointerGestureUnlessMenuOpen(): void {
+		if (this.contextMenuGesture && this.isContextMenuOpen()) return;
+		this.endPointerGesture();
+	}
+
+	/** Records that a render was asked for mid-press and returns the promise it will settle, shared
+	 * by every request in the press so they merge into the one render after it. */
+	private holdRender(): Promise<void> {
+		this.renderAfterPointerGesture = true;
+		if (!this.heldRender) {
+			let settle!: () => void;
+			const promise = new Promise<void>((resolve) => (settle = resolve));
+			this.heldRender = { promise, settle };
+		}
+		// `awaitRenderSettled()` follows `latestRenderPromise`: a held render counts as pending.
+		this.latestRenderPromise = this.heldRender.promise;
+		return this.heldRender.promise;
+	}
+
+	/** Collapses bursts of index/view change events (a drag can fire several) into one render. While a
+	 * press is under way inside an Atlas pane the request is held instead, and runs once after it. */
 	private queueRender(): void {
+		// A render must wait while a press that began inside an Atlas pane is under way. The very first
+		// render never waits (there is no row to protect yet, and `onOpen` awaits it).
+		if (this.pointerGestureActive && !this.closed && this.lastRenderedViewId !== null) {
+			void this.holdRender();
+			return;
+		}
 		if (this.renderQueued) return;
 		this.renderQueued = true;
 		window.setTimeout(() => {
 			this.renderQueued = false;
+			if (this.closed) return;
 			void this.render();
 		}, 0);
 	}
@@ -1749,10 +1829,24 @@ export class AtlasExplorerView extends ItemView {
 	/** PR-2.F2 R2: thin wrapper around `renderNow()` so every call site (direct `await`/`void`, and
 	 * `queueRender`'s own deferred call) records its promise in `latestRenderPromise` before
 	 * returning — synchronously, so no macrotask or microtask can slip in between a call starting
-	 * and this being set. See `awaitRenderSettled()`. */
+	 * and this being set. See `awaitRenderSettled()`.
+	 *
+	 * This is also the render entry for the press hold: while a press that began inside an Atlas pane
+	 * is under way, `renderNow()` does not run (it would detach the pressed row, and its click would
+	 * never fire). The request is held and the returned promise settles once the render that runs
+	 * after the press has finished. */
 	private render(): Promise<void> {
+		if (this.pointerGestureActive && !this.closed && this.lastRenderedViewId !== null) return this.holdRender();
 		const promise = this.renderNow();
 		this.latestRenderPromise = promise;
+		const held = this.heldRender;
+		if (held) {
+			// The render that follows a press settles the promise held requests were handed; either
+			// outcome counts, a throw stays with the caller of this render.
+			this.heldRender = null;
+			this.renderAfterPointerGesture = false;
+			void promise.then(held.settle, held.settle);
+		}
 		return promise;
 	}
 

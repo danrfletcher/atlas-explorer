@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import type { App, TAbstractFile, TFile } from "obsidian";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { App, TAbstractFile, TFile, WorkspaceLeaf } from "obsidian";
 import { Menu, Notice } from "obsidian";
 import { App as MockApp } from "../mocks/obsidian";
 import { ViewsManager } from "../../src/views";
@@ -9,6 +9,8 @@ import { AtlasSettingTab, DEFAULT_SETTINGS, AtlasSettings } from "../../src/sett
 import { ATLAS_VIEW_TYPE, AtlasExplorerView, candidateFilesForAdd } from "../../src/explorer-view";
 import AtlasPlugin from "../../src/main";
 import { UnitIndex } from "../../src/unit-index";
+import { makeSectionHarness, SectionHarness } from "../explorer-header-fixtures";
+import { bucketRows, drawBucketRows, openExplorer, pointer, PressEnv, PressInternals } from "../unit/explorer-view-press-helpers";
 import { callRenderApiItemRow, callRenderNodeList, makeFakeExplorer, makeStatusesManager, proto } from "../unit/explorer-view-sort-truncate-helpers";
 
 // R1 (PR-1.F2 review): Obsidian's `Setting` is replaced with a recorder so the "Highlight the open
@@ -1418,5 +1420,97 @@ describe("Atlas #13 PR-1 — a moved note that is no longer a unit stays a norma
 		expect(row.classList.contains("atlas-missing")).toBe(false);
 		expect(resolveRef).not.toHaveBeenCalled();
 		expect(lookup.mock.calls.map((c) => c[0])).not.toContain(abs);
+	});
+});
+
+/** Atlas #16 (E9): with two Atlas leaves open, each view has its own `onOpen` listeners (the hidden
+ * one included). The real `refreshExplorerViews` finds both through `getLeavesOfType`; a press inside
+ * either pane holds both views' renders, and ending it releases both. */
+describe("Atlas #16 — E9: a press in either of two Atlas leaves holds both views", () => {
+	let h: SectionHarness;
+	let first: PressEnv;
+	let second: PressInternals;
+	let secondRenderNow: ReturnType<typeof vi.fn>;
+	let removeSecond: (() => void)[];
+	let secondHost: HTMLElement;
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		h = makeSectionHarness({ bucketRows: 1, inboxRows: 1 });
+		first = await openExplorer(h);
+		drawBucketRows(first.ex, () => 1);
+
+		// The second (hidden) leaf's view: same plugin, its own container, the same stubbed row content.
+		const firstEx = first.ex as unknown as Record<string, unknown>;
+		const view = new AtlasExplorerView({} as WorkspaceLeaf, firstEx.plugin as never);
+		secondHost = document.body.appendChild(document.createElement("div"));
+		secondHost.appendChild(document.createElement("div"));
+		secondHost.appendChild(document.createElement("div"));
+		(view as unknown as { containerEl: HTMLElement }).containerEl = secondHost;
+		for (const key of ["renderToolbar", "renderNodeList", "resolveRef", "matchesFilter", "setPlacementTooltip", "updateActiveHighlight", "syncRefreshTimers", "refreshApiSourcesOnViewLoad"]) {
+			(view as unknown as Record<string, unknown>)[key] = firstEx[key];
+		}
+		second = view as unknown as PressInternals;
+		removeSecond = [];
+		second.leaf = {} as WorkspaceLeaf;
+		second.registerEvent = vi.fn();
+		second.registerDomEvent = (el, type, cb, opts) => {
+			el.addEventListener(type, cb, opts);
+			removeSecond.push(() => el.removeEventListener(type, cb, opts));
+		};
+		await second.onOpen();
+		secondRenderNow = vi.spyOn(second, "renderNow") as unknown as ReturnType<typeof vi.fn>;
+		first.renderNow.mockClear();
+		secondRenderNow.mockClear();
+	});
+
+	afterEach(() => {
+		first.teardown();
+		removeSecond.forEach((remove) => remove());
+		h.teardown();
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	/** The plugin's real `refreshExplorerViews`, looking both views up through `getLeavesOfType`. */
+	function refreshBoth(): void {
+		const plugin = Object.create(AtlasPlugin.prototype) as AtlasPlugin;
+		Object.assign(plugin, {
+			app: {
+				workspace: {
+					getLeavesOfType: (type: string) =>
+						type === ATLAS_VIEW_TYPE ? [{ view: first.ex }, { view: second }] : [],
+				},
+			},
+		});
+		// `instanceof AtlasExplorerView` holds: both are real instances.
+		plugin.refreshExplorerViews();
+	}
+
+	const presses: [string, () => HTMLElement][] = [
+		["the visible leaf", () => bucketRows()[0]],
+		["the other leaf", () => secondHost.children[1] as HTMLElement],
+	];
+	for (const [name, target] of presses) {
+		it(`a press in ${name} holds both views, and releasing it renders each once`, async () => {
+			const node = target();
+			pointer("pointerdown", node, { buttons: 1 });
+			refreshBoth();
+			await vi.advanceTimersByTimeAsync(50);
+			expect(first.renderNow).not.toHaveBeenCalled();
+			expect(secondRenderNow).not.toHaveBeenCalled();
+
+			pointer("pointerup", node);
+			await vi.advanceTimersByTimeAsync(50);
+			expect(first.renderNow).toHaveBeenCalledTimes(1);
+			expect(secondRenderNow).toHaveBeenCalledTimes(1);
+		});
+	}
+
+	it("without a press both views render as before", async () => {
+		refreshBoth();
+		await vi.advanceTimersByTimeAsync(50);
+		expect(first.renderNow).toHaveBeenCalledTimes(1);
+		expect(secondRenderNow).toHaveBeenCalledTimes(1);
 	});
 });

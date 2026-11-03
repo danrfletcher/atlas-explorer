@@ -487,3 +487,30 @@ describe("PR-4 fence F10 — a child of an Outside-Vault source folder stays un-
 		expect(row.getAttribute("draggable")).toBe("true");
 	});
 });
+
+/** Atlas #16 F3: the press hold adds no timer, interval or polling. `queueRender`'s `setTimeout(0)`
+ * and the `pointermove` valve are the only mechanisms; every other `setTimeout` in the file predates
+ * it (section scroll, filter reveal/focus, debounced persist, drop dwell). */
+describe("Atlas #16 F3 — the press hold adds no timer, interval or polling", () => {
+	const code = read("src/explorer-view.ts")
+		.split("\n")
+		.filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+		.join("\n");
+
+	it("explorer-view.ts has no setInterval and the same six window.setTimeout calls as before the hold", () => {
+		expect(code.match(/setInterval\s*\(/g) ?? []).toHaveLength(0);
+		expect(code.match(/\bsetTimeout\s*\(/g) ?? []).toHaveLength(6);
+	});
+
+	it("queueRender holds the one setTimeout(…, 0) of the render path; the hold methods have none", () => {
+		const slice = (start: string, end: string) => {
+			const from = code.indexOf(start);
+			expect(from, `${start} not found`).toBeGreaterThanOrEqual(0);
+			return code.slice(from, code.indexOf(end, from));
+		};
+		expect(slice("private queueRender(): void {", "\n\t}\n").match(/setTimeout\s*\(/g)).toHaveLength(1);
+		const hold = slice("private isInsideAtlasPane(", "private queueRender(): void {");
+		expect(hold).not.toMatch(/setTimeout|setInterval|requestAnimationFrame/);
+		expect(slice("private render(): Promise<void> {", "\n\t}\n")).not.toMatch(/setTimeout|setInterval|requestAnimationFrame/);
+	});
+});
