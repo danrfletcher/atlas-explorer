@@ -101,6 +101,7 @@ The **Status** tab holds status sets, the color palette, Glow, Retain icons and 
 | `Atlas Explorer: Reveal active file in Atlas` | Opens the explorer and says so if the active file isn't placed anywhere. |
 | `Atlas Explorer: New view` | Prompts for a name and creates a new, empty view. |
 | `Atlas Explorer: Rebuild index` | Forces a full re-scan of every unit in the vault. |
+| `Atlas Explorer: Copy render log` | Copies Atlas's log of the last 500 list rebuilds to the clipboard as JSON (what triggered each, when, how long, whether the output changed). It holds no note text or paths and is kept in the plugin folder, not `data.json`. For bug reports. |
 
 ## What Atlas touches on disk
 

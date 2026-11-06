@@ -39,6 +39,7 @@ import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 import { executeApiCommand } from "./api-command-runner";
 import { resolveArgv, tokenizeCommand } from "./command-argv";
+import { RenderTriggerKind, observeRender, renderCauseOr, withRenderCause } from "./render-log";
 import {
 	SortKey,
 	compareSortKeys,
@@ -921,6 +922,16 @@ export class AtlasExplorerView extends ItemView {
 	 * and `render()` a view that is gone. */
 	private openAddUnderPrompts = new Set<{ close(): void }>();
 	private renderQueued = false;
+	/** Render log: the kind of the first trigger that queued the pending `queueRender()` timeout. Later
+	 * requests in the same tick coalesce into it and don't overwrite it. */
+	private queuedRenderKind: RenderTriggerKind | null = null;
+	/** Render log: the kind of the first render request held back mid-press; the one render that runs
+	 * after the press is logged with it. */
+	private heldRenderKind: RenderTriggerKind | null = null;
+	/** Render log: the pane's serialised output at the end of the last render that finished as the
+	 * current one, so the next render can tell whether it changed anything. `last` is null before the
+	 * first render. */
+	private renderOutput: { last: string | null } = { last: null };
 	/** PR-2.F2 R2: every call to `render()` (direct or via `queueRender`'s timeout) overwrites this
 	 * with its own promise before any `await` inside it can yield, so this always names the most
 	 * recently *started* render even if a later call supersedes an earlier one still in flight
@@ -953,7 +964,7 @@ export class AtlasExplorerView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this.closed = false;
-		this.unsubscribers.push(this.plugin.unitIndex.onChange(() => this.queueRender()));
+		this.unsubscribers.push(this.plugin.unitIndex.onChange(() => withRenderCause("unit-index", () => this.queueRender())));
 		this.unsubscribers.push(
 			this.plugin.viewsManager.onChange((persisted) => {
 				// PR-2 (R3/G9): "the tree changes" means a real, persisted structural/sort change —
@@ -964,7 +975,7 @@ export class AtlasExplorerView extends ItemView {
 				// which G9/E4 forbid; `queueRender()` below still runs for both, so a render-only
 				// notification still repaints.
 				if (persisted) this.sortRefreshGate.markDirty();
-				this.queueRender();
+				withRenderCause("views-change", () => this.queueRender());
 			})
 		);
 		this.registerEvent(
@@ -972,7 +983,9 @@ export class AtlasExplorerView extends ItemView {
 				this.updateActiveHighlight();
 				if (leaf === this.leaf) {
 					if (this.viewLoadTrigger.activate()) {
-						this.refreshApiSourcesOnViewLoad();
+						// Render log: the source refreshes below notify inline; the outermost cause wins, so
+						// every render this activation queues is logged as `leaf-activate`.
+						withRenderCause("leaf-activate", () => this.refreshApiSourcesOnViewLoad());
 						this.sortRefreshGate.markDirty(); // PR-2 (G9): "pane regains focus".
 						// PR-2 (R2/G9): marking the gate dirty alone does nothing until some other
 						// trigger renders next — in a view with no data sources nothing else was
@@ -984,7 +997,7 @@ export class AtlasExplorerView extends ItemView {
 						// the click. `queueRender()` holds while a press is under way inside an
 						// Atlas pane (a render now would detach the row under the pointer and
 						// swallow the click or the drag) and runs once after the press ends.
-						this.queueRender();
+						withRenderCause("leaf-activate", () => this.queueRender());
 					}
 				} else {
 					this.viewLoadTrigger.deactivate();
@@ -1091,7 +1104,7 @@ export class AtlasExplorerView extends ItemView {
 			// not what the comment claimed. Fixed for real this time, not just re-worded: `handleDrop`
 			// now calls `queueRender()` too (both of its own call sites), so the flag this relies on is
 			// actually shared and a successful drop really is one render, not two.
-			this.queueRender();
+			withRenderCause("drop", () => this.queueRender());
 		});
 		await this.render();
 	}
@@ -1114,6 +1127,7 @@ export class AtlasExplorerView extends ItemView {
 		this.pointerGestureActive = false;
 		this.contextMenuGesture = false;
 		this.renderAfterPointerGesture = false;
+		this.heldRenderKind = null;
 		this.heldRender?.settle();
 		this.heldRender = null;
 	}
@@ -1137,7 +1151,9 @@ export class AtlasExplorerView extends ItemView {
 		this.contextMenuGesture = false;
 		if (!this.renderAfterPointerGesture) return;
 		this.renderAfterPointerGesture = false;
-		this.queueRender();
+		const kind = this.heldRenderKind ?? "other";
+		this.heldRenderKind = null;
+		withRenderCause(kind, () => this.queueRender());
 	}
 
 	/** The release paths that can arrive while a right-click's menu is still up (`pointerup`, or a
@@ -1152,6 +1168,7 @@ export class AtlasExplorerView extends ItemView {
 	 * by every request in the press so they merge into the one render after it. */
 	private holdRender(): Promise<void> {
 		this.renderAfterPointerGesture = true;
+		this.heldRenderKind ??= renderCauseOr("other");
 		if (!this.heldRender) {
 			let settle!: () => void;
 			const promise = new Promise<void>((resolve) => (settle = resolve));
@@ -1173,10 +1190,14 @@ export class AtlasExplorerView extends ItemView {
 		}
 		if (this.renderQueued) return;
 		this.renderQueued = true;
+		// Render log: the first request in a burst names the render; later ones coalesce into it.
+		this.queuedRenderKind = renderCauseOr("other");
 		window.setTimeout(() => {
 			this.renderQueued = false;
+			const queuedKind = this.queuedRenderKind ?? "other";
+			this.queuedRenderKind = null;
 			if (this.closed) return;
-			void this.render();
+			withRenderCause(queuedKind, () => void this.render());
 		}, 0);
 	}
 
@@ -1187,7 +1208,7 @@ export class AtlasExplorerView extends ItemView {
 	 * happened to re-render. Called by the settings tab right after `saveSettings()` for exactly
 	 * these toggles. */
 	refresh(): void {
-		this.queueRender();
+		withRenderCause("settings", () => this.queueRender());
 	}
 
 	/** PR-7 (G21): called from `main.ts`'s vault `"modify"` listener on every file save — refreshes
@@ -1321,7 +1342,7 @@ export class AtlasExplorerView extends ItemView {
 	refreshApiSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.apiSource || Platform.isMobile) return;
 		const headers = this.plugin.apiHeadersStore.get(node.id);
-		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => this.plugin.viewsManager.notifyExternalMutation(), {
+		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => withRenderCause("folder-source-refresh", () => this.plugin.viewsManager.notifyExternalMutation()), {
 			requestImpl: obsidianRequestImpl,
 			trigger,
 			confirmDelete: (count) =>
@@ -1345,7 +1366,7 @@ export class AtlasExplorerView extends ItemView {
 		// never holds (same reason `apiHeadersStore` lookups live here, not in `ViewsManager`, for API
 		// sources) — looked up fresh on every call so a since-changed path is always current.
 		const outsidePath = node.folderSource?.location === "outside" ? this.plugin.folderSourcePathStore.get(node.id) : undefined;
-		this.plugin.viewsManager.refreshFolderSource(view.id, node.id, outsidePath);
+		withRenderCause("folder-source-refresh", () => this.plugin.viewsManager.refreshFolderSource(view.id, node.id, outsidePath));
 	}
 
 	/** PR-7 (G17-G19/G21-G23): the CSV equivalent of `refreshApiSource` — a vault file read stands in
@@ -1360,7 +1381,7 @@ export class AtlasExplorerView extends ItemView {
 		void this.plugin.csvSourceController.refresh(
 			node,
 			node.csvSource,
-			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange()),
+			(changed) => withRenderCause("folder-source-refresh", () => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange())),
 			{
 				vault: this.plugin.app.vault,
 				trigger,
@@ -1385,7 +1406,7 @@ export class AtlasExplorerView extends ItemView {
 		void this.plugin.markdownTableSourceController.refresh(
 			node,
 			node.markdownTableSource,
-			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange()),
+			(changed) => withRenderCause("folder-source-refresh", () => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange())),
 			{
 				vault: this.plugin.app.vault,
 				trigger,
@@ -1837,7 +1858,25 @@ export class AtlasExplorerView extends ItemView {
 	 * after the press has finished. */
 	private render(): Promise<void> {
 		if (this.pointerGestureActive && !this.closed && this.lastRenderedViewId !== null) return this.holdRender();
-		const promise = this.renderNow();
+		// Render log: a render that follows a held press is logged with the kind of the request held first.
+		const kind = this.heldRenderKind ?? renderCauseOr("other");
+		this.heldRenderKind = null;
+		const log = this.plugin?.renderLog;
+		const startedAt = Date.now();
+		const t0 = performance.now();
+		let promise = this.renderNow();
+		if (log) {
+			// `renderNow` bumps `renderSeq` synchronously before its first await, so this is its own id.
+			const renderId = this.renderSeq;
+			promise = observeRender(log, promise, {
+				kind,
+				at: startedAt,
+				t0,
+				isCurrent: () => renderId === this.renderSeq,
+				readOutput: () => (this.containerEl.children[1] as HTMLElement | undefined)?.innerHTML ?? "",
+				lastOutput: this.renderOutput,
+			});
+		}
 		this.latestRenderPromise = promise;
 		const held = this.heldRender;
 		if (held) {
@@ -2258,7 +2297,7 @@ export class AtlasExplorerView extends ItemView {
 					this.filterText = "";
 					this.restoreFoldStateAfterFilterClear();
 				}
-				void this.render();
+				withRenderCause("filter", () => void this.render());
 			}, COLLAPSE_TRANSITION_MS);
 		});
 
@@ -2280,7 +2319,7 @@ export class AtlasExplorerView extends ItemView {
 			this.filterText = filterInput.value;
 			if (wasActive && !this.filterText.trim()) this.restoreFoldStateAfterFilterClear();
 			this.openModuleModal?.setFilterText(this.filterText);
-			void this.render();
+			withRenderCause("filter", () => void this.render());
 		});
 		if (this.focusFilterOnNextRender) {
 			this.focusFilterOnNextRender = false;
@@ -2698,7 +2737,7 @@ export class AtlasExplorerView extends ItemView {
 				const [lo, hi] = from <= to ? [from, to] : [to, from];
 				for (let i = lo; i <= hi; i++) selection.add(order[i]);
 			}
-			void this.render();
+			withRenderCause("click", () => void this.render());
 			return true;
 		}
 
@@ -2709,7 +2748,7 @@ export class AtlasExplorerView extends ItemView {
 			else selection.add(key);
 			this.selectionAnchor = key;
 			this.selectionAnchorScope = scope;
-			void this.render();
+			withRenderCause("click", () => void this.render());
 			return true;
 		}
 
@@ -2725,7 +2764,7 @@ export class AtlasExplorerView extends ItemView {
 		selection.add(key);
 		this.selectionAnchor = key;
 		this.selectionAnchorScope = scope;
-		void this.render();
+		withRenderCause("click", () => void this.render());
 		return false;
 	}
 
@@ -3618,119 +3657,131 @@ export class AtlasExplorerView extends ItemView {
 	 * another" universal. `moveNode` is the correct operation for an existing node changing parent
 	 * either way — it reparents the real node object in place instead of replacing it. */
 	private handleDrop(target: DropTarget, zone: DropZone = "nest"): void {
-		const payload = this.dragPayload;
-		this.dragPayload = null;
-		if (!payload) return;
+		// Render log: the whole drop runs under the `drop` cause, mutations included. Every
+		// `moveNode`/`placeUnit`/`unplaceNode` saves and notifies listeners inline, which queues the
+		// render, so naming the cause only around the trailing `queueRender()` would be too late.
+		withRenderCause("drop", () => {
+			const payload = this.dragPayload;
+			this.dragPayload = null;
+			if (!payload) return;
 
-		if (target.kind === "inbox-area") {
-			// Only a unit has a disk/ref identity to "return to the inbox" — a meta folder dropped
-			// here is simply not a meaningful gesture, so it's a no-op rather than acting on a
-			// fabricated ref for that one, not the whole drag.
+			if (target.kind === "inbox-area") {
+				// Only a unit has a disk/ref identity to "return to the inbox" — a meta folder dropped
+				// here is simply not a meaningful gesture, so it's a no-op rather than acting on a
+				// fabricated ref for that one, not the whole drag.
+				if (payload.kind === "node") {
+					const draggedView = this.plugin.viewsManager.getView(payload.viewId);
+					if (draggedView) {
+						// PR 13: each dragged instance is removed by its own id, not every duplicate of the same unit.
+						// PR-1 (G15b): a sourced unit in the drag asks once, through the shared removal path.
+						const units = payload.nodeIds
+							.map((nodeId) => this.findNodeAnywhere(draggedView.root, nodeId)?.node)
+							.filter((node): node is ViewNode => node?.type === "unit");
+						// A sourced unit asks first, so the removal can run later from the confirm modal,
+						// outside this call's cause: hand the cause down.
+						this.removeUnitsFromView(
+							payload.viewId,
+							units,
+							() => {
+								this.selectedBucketNodeIds.clear();
+								this.queueRender();
+							},
+							"drop"
+						);
+						return;
+					}
+				}
+				this.selectedBucketNodeIds.clear();
+				this.queueRender();
+				return;
+			}
+
+			const viewId = target.viewId;
+			let parentId: string | null = null;
+			let position: number | undefined; // undefined => append (nest, bucket-root, inbox-area)
+
+			if (target.kind === "node") {
+				const view = this.plugin.viewsManager.getView(viewId);
+				if (view && zone !== "nest") {
+					// G1/G2: an edge drop never nests into the target — it lands as a sibling in the
+					// target's own parent (the bucket root, if the target is top-level), at the slot the
+					// indicator line showed: right before the target ("before") or right after it ("after").
+					//
+					// PR-4 (G4/E13): but only once the target's own parent list's effective sort agrees —
+					// `assessDrop` re-derives the same decision `makeDropZone`'s dragover handler showed,
+					// from the live `payload` (not the batch-representative visual shortcut) so a sorted
+					// list's own child is refused outright here too, whole-batch, with the Notice.
+					const assessment = this.assessDrop(target, zone, payload);
+					if (!assessment) return; // target vanished mid-drag — nothing left to drop onto.
+					if (assessment.decision === "refuse") {
+						if (assessment.effectiveSort) void this.showSortedDropRefusedNotice(view, assessment.parentId, assessment.effectiveSort);
+						return;
+					}
+					parentId = assessment.parentId;
+					position = zone === "after" ? assessment.index + 1 : assessment.index;
+				} else {
+					const found = view && this.findNodeAnywhere(view.root, target.nodeId);
+					if (found) parentId = found.node.id;
+				}
+			}
+
 			if (payload.kind === "node") {
-				const draggedView = this.plugin.viewsManager.getView(payload.viewId);
-				if (draggedView) {
-					// PR 13: each dragged instance is removed by its own id, not every duplicate of the same unit.
-					// PR-1 (G15b): a sourced unit in the drag asks once, through the shared removal path.
-					const units = payload.nodeIds
-						.map((nodeId) => this.findNodeAnywhere(draggedView.root, nodeId)?.node)
-						.filter((node): node is ViewNode => node?.type === "unit");
-					this.removeUnitsFromView(payload.viewId, units, () => {
-						this.selectedBucketNodeIds.clear();
-						this.queueRender();
+				const view = this.plugin.viewsManager.getView(viewId);
+				if (!view) return;
+				// PR 20: a node already nested under *another* node in this same drag batch travels along
+				// with that ancestor's own move automatically — moving it again separately right after
+				// would yank it back out into a sibling of its own ancestor, flattening a relationship the
+				// user very likely meant to keep by dragging them together in the first place.
+				const toMove = payload.nodeIds.filter((id) => {
+					const found = this.findNodeAnywhere(view.root, id);
+					if (!found) return false;
+					return !payload.nodeIds.some((otherId) => {
+						if (otherId === id) return false;
+						const other = this.findNodeAnywhere(view.root, otherId);
+						return !!other && this.nodeContainsDescendant(other.node, id);
 					});
-					return;
-				}
-			}
-			this.selectedBucketNodeIds.clear();
-			this.queueRender();
-			return;
-		}
-
-		const viewId = target.viewId;
-		let parentId: string | null = null;
-		let position: number | undefined; // undefined => append (nest, bucket-root, inbox-area)
-
-		if (target.kind === "node") {
-			const view = this.plugin.viewsManager.getView(viewId);
-			if (view && zone !== "nest") {
-				// G1/G2: an edge drop never nests into the target — it lands as a sibling in the
-				// target's own parent (the bucket root, if the target is top-level), at the slot the
-				// indicator line showed: right before the target ("before") or right after it ("after").
-				//
-				// PR-4 (G4/E13): but only once the target's own parent list's effective sort agrees —
-				// `assessDrop` re-derives the same decision `makeDropZone`'s dragover handler showed,
-				// from the live `payload` (not the batch-representative visual shortcut) so a sorted
-				// list's own child is refused outright here too, whole-batch, with the Notice.
-				const assessment = this.assessDrop(target, zone, payload);
-				if (!assessment) return; // target vanished mid-drag — nothing left to drop onto.
-				if (assessment.decision === "refuse") {
-					if (assessment.effectiveSort) void this.showSortedDropRefusedNotice(view, assessment.parentId, assessment.effectiveSort);
-					return;
-				}
-				parentId = assessment.parentId;
-				position = zone === "after" ? assessment.index + 1 : assessment.index;
-			} else {
-				const found = view && this.findNodeAnywhere(view.root, target.nodeId);
-				if (found) parentId = found.node.id;
-			}
-		}
-
-		if (payload.kind === "node") {
-			const view = this.plugin.viewsManager.getView(viewId);
-			if (!view) return;
-			// PR 20: a node already nested under *another* node in this same drag batch travels along
-			// with that ancestor's own move automatically — moving it again separately right after
-			// would yank it back out into a sibling of its own ancestor, flattening a relationship the
-			// user very likely meant to keep by dragging them together in the first place.
-			const toMove = payload.nodeIds.filter((id) => {
-				const found = this.findNodeAnywhere(view.root, id);
-				if (!found) return false;
-				return !payload.nodeIds.some((otherId) => {
-					if (otherId === id) return false;
-					const other = this.findNodeAnywhere(view.root, otherId);
-					return !!other && this.nodeContainsDescendant(other.node, id);
 				});
-			});
-			// An existing tree node (meta or unit) is being reparented/reordered — `moveNode` operates
-			// on it directly by id, in place, so its own children/collapsed state travels with it.
-			// PR-3 (G3): for an edge drop, `index` starts at the computed sibling position instead of
-			// always the end, so the whole selection lands together at the destination in the same
-			// relative order it was dragged in.
-			//
-			// R1 fix: the next slot is derived from where the *previous* row actually landed, not
-			// from a flat `index++`. `moveNode`'s `index` param is read against the pre-removal array
-			// (see its own doc comment) and adjusted for a same-parent downward move — so once any
-			// moved row came from above the drop point in the same parent, a naive running counter
-			// drifts one slot too high for every row after it (and mis-handles E1 no-ops the same
-			// way). Re-reading each node's real post-move position with `findNodeParent` and chaining
-			// the next index off *that* keeps the batch landing correctly regardless of which parent
-			// each row started in, or whether a given move turned out to be a no-op.
-			let index = position ?? (parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length);
-			for (const nodeId of toMove) {
-				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) {
-					const landed = this.findNodeParent(view.root, nodeId, null);
-					index = landed ? landed.index + 1 : index + 1;
+				// An existing tree node (meta or unit) is being reparented/reordered — `moveNode` operates
+				// on it directly by id, in place, so its own children/collapsed state travels with it.
+				// PR-3 (G3): for an edge drop, `index` starts at the computed sibling position instead of
+				// always the end, so the whole selection lands together at the destination in the same
+				// relative order it was dragged in.
+				//
+				// R1 fix: the next slot is derived from where the *previous* row actually landed, not
+				// from a flat `index++`. `moveNode`'s `index` param is read against the pre-removal array
+				// (see its own doc comment) and adjusted for a same-parent downward move — so once any
+				// moved row came from above the drop point in the same parent, a naive running counter
+				// drifts one slot too high for every row after it (and mis-handles E1 no-ops the same
+				// way). Re-reading each node's real post-move position with `findNodeParent` and chaining
+				// the next index off *that* keeps the batch landing correctly regardless of which parent
+				// each row started in, or whether a given move turned out to be a no-op.
+				let index = position ?? (parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length);
+				for (const nodeId of toMove) {
+					if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) {
+						const landed = this.findNodeParent(view.root, nodeId, null);
+						index = landed ? landed.index + 1 : index + 1;
+					}
+				}
+				this.selectedBucketNodeIds.clear();
+				this.queueRender();
+				return;
+			}
+
+			// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view.
+			// PR-3 (G1): an edge drop places the batch starting at `position`, in drag order; a nest/
+			// append drop (`position` undefined) keeps the pre-PR-3 behaviour of always appending.
+			if (position === undefined) {
+				for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
+			} else {
+				let pos = position;
+				for (const ref of payload.refs) {
+					this.plugin.viewsManager.placeUnit(viewId, ref, parentId, pos);
+					pos++;
 				}
 			}
-			this.selectedBucketNodeIds.clear();
+			this.selectedInboxRefKeys.clear();
 			this.queueRender();
-			return;
-		}
-
-		// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view.
-		// PR-3 (G1): an edge drop places the batch starting at `position`, in drag order; a nest/
-		// append drop (`position` undefined) keeps the pre-PR-3 behaviour of always appending.
-		if (position === undefined) {
-			for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
-		} else {
-			let pos = position;
-			for (const ref of payload.refs) {
-				this.plugin.viewsManager.placeUnit(viewId, ref, parentId, pos);
-				pos++;
-			}
-		}
-		this.selectedInboxRefKeys.clear();
-		this.queueRender();
+		});
 	}
 
 	private nodeContainsDescendant(node: ViewNode, targetId: string): boolean {
@@ -4558,14 +4609,17 @@ export class AtlasExplorerView extends ItemView {
 	 * Units holding a live source get a single confirm for the whole batch; confirming clears each one's
 	 * device-local state, cancelling changes nothing (`after` runs only once removal has happened).
 	 * Units without a live source are removed straight away, as before. */
-	private removeUnitsFromView(viewId: string, units: ViewNode[], after?: () => void): void {
-		const removeAll = () => {
+	private removeUnitsFromView(viewId: string, units: ViewNode[], after?: () => void, cause?: RenderTriggerKind): void {
+		const removeUnits = () => {
 			for (const node of units) {
 				if (this.holdsLiveDataSource(node)) this.forgetDeviceLocalSourceState(node.id);
 				this.plugin.viewsManager.unplaceNode(viewId, node.id);
 			}
 			after?.();
 		};
+		// Render log: `cause` names the gesture behind the removal. The confirm modal runs `removeAll`
+		// later, outside the caller's own `withRenderCause`, so the cause is re-applied here.
+		const removeAll = () => (cause ? withRenderCause(cause, removeUnits) : removeUnits());
 		const sourced = units.filter((node) => this.holdsLiveDataSource(node));
 		if (sourced.length === 0) {
 			removeAll();

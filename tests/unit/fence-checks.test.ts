@@ -200,14 +200,23 @@ describe("PR-2.F3 fence — the G10 helper never writes filterText, sort setting
 
 // PR-1 (R1 fix) — F9: no new command-palette entry and no new keyboard shortcut is registered.
 describe("PR-1 F9 — no new command or keyboard shortcut", () => {
-	it("the registered command id set is exactly the pre-existing seven, with no sort command added", () => {
+	it("the registered command id set is exactly the pre-existing seven plus copy-render-log, with no sort command added", () => {
 		const ids: string[] = [];
 		const fakePlugin = { addCommand: (cmd: { id: string }) => ids.push(cmd.id) } as unknown as Parameters<typeof registerF10Commands>[0];
 		registerF10Commands(fakePlugin);
 		registerAddBlockCommand(fakePlugin);
 
 		expect(ids.sort()).toEqual(
-			["open-explorer", "switch-view", "place-active-file-in-view", "reveal-active-file", "new-view", "rebuild-index", "add-block"].sort()
+			[
+				"open-explorer",
+				"switch-view",
+				"place-active-file-in-view",
+				"reveal-active-file",
+				"new-view",
+				"rebuild-index",
+				"add-block",
+				"copy-render-log", // the render log's one command
+			].sort()
 		);
 	});
 
@@ -217,7 +226,7 @@ describe("PR-1 F9 — no new command or keyboard shortcut", () => {
 		registerF10Commands(fakePlugin);
 		registerAddBlockCommand(fakePlugin);
 
-		expect(cmds.length).toBe(7);
+		expect(cmds.length).toBe(8); // the pre-existing seven plus copy-render-log
 		for (const cmd of cmds) expect(cmd.hotkeys).toBeUndefined();
 	});
 });
@@ -376,7 +385,8 @@ describe("PR-3 fence — an edge drop never touches disk", () => {
 });
 
 // PR-3 (fence): no new command id is registered by this PR's edge-drop/reorder work -- the
-// registered set is still exactly the same seven as PR-1's own F9 check above.
+// registered set is still exactly the same seven as PR-1's own F9 check above, plus the render
+// log's one command (`copy-render-log`).
 describe("PR-3 fence — no new command id from the edge-drop/reorder work", () => {
 	it("the registered command id set still has no sort/reorder/move id of any kind", () => {
 		const ids: string[] = [];
@@ -384,7 +394,8 @@ describe("PR-3 fence — no new command id from the edge-drop/reorder work", () 
 		registerF10Commands(fakePlugin);
 		registerAddBlockCommand(fakePlugin);
 
-		expect(ids).toHaveLength(7);
+		expect(ids).toHaveLength(8);
+		expect(ids).toContain("copy-render-log");
 		for (const id of ids) expect(id.toLowerCase()).not.toMatch(/sort|reorder|move-up|move-down/);
 	});
 });

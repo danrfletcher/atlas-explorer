@@ -1,6 +1,7 @@
 import { App, TFile } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
+import { withRenderCause } from "./render-log";
 import {
 	activeFolderRules,
 	basenameForDeletedRef,
@@ -614,7 +615,13 @@ export class ViewsManager {
 	 * `persisted` defaults to `false` here; only `save()` ever passes `true` (see `onChange`). */
 	notifyChange(persisted = false): void {
 		this.folderSourceOwnersVersion++;
-		for (const cb of this.changeListeners) cb(persisted);
+		// Render log: every render this notification starts is named `views-change`, whichever listener
+		// queues it first. Without this, a listener registered ahead of the explorer's (main.ts's
+		// Folder-source sync, which notifies the unit index inline) would get the render logged as
+		// `unit-index`. The outermost cause still wins, so a drop or a source refresh keeps its own kind.
+		withRenderCause("views-change", () => {
+			for (const cb of this.changeListeners) cb(persisted);
+		});
 	}
 
 	/** PR-1.F2 R2 fix: one id→`FolderSourceConfig` map for `viewId`'s managed-row owners, built with a

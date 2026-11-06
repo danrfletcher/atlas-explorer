@@ -249,3 +249,44 @@ describe("R6/F6 — the MCP bearer token never reaches data.json", () => {
 		expect(JSON.stringify(saved[0])).not.toContain("f6-leak-canary-00112233");
 	});
 });
+
+describe("render log vs data.json", () => {
+	it("persistNow output has no render-log key, and the key set is the pre-render-log one", async () => {
+		const plugin = makePlugin();
+		const app = new App();
+		const unitIndex = new UnitIndex(app, DEFAULT_SETTINGS, [], {}, [], []);
+		const viewsManager = new ViewsManager(app, [], "default", () => {});
+		const statusesManager = new StatusesManager([], [], () => {});
+		const saved: Record<string, unknown>[] = [];
+		Object.assign(plugin, {
+			settings: DEFAULT_SETTINGS,
+			unitIndex,
+			viewsManager,
+			statusesManager,
+			expandedModuleFolders: new Set<string>(),
+			// A plugin that owns a render log with entries in it must still not write them to data.json.
+			renderLog: { entries: () => [{ kind: "other", at: 1, durationMs: 1, changed: true }], serialize: () => "[...]" },
+			saveData: async (data: Record<string, unknown>) => {
+				saved.push(data);
+			},
+		});
+
+		await (plugin as unknown as { persistNow(): Promise<void> }).persistNow();
+
+		expect(Object.keys(saved[0]).sort()).toEqual(
+			[
+				"activeViewId",
+				"addedItems",
+				"colorPalette",
+				"dismissedByView",
+				"dismissedGlobal",
+				"expandedModuleFolders",
+				"manualPromotions",
+				"settings",
+				"statusSets",
+				"views",
+			].sort()
+		);
+		expect(JSON.stringify(saved[0])).not.toMatch(/render|durationMs/i);
+	});
+});
