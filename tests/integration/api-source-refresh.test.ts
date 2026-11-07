@@ -90,6 +90,36 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 		});
 	});
 
+	it("PR-2 (S3): a refresh that fetches the same thing reports changed=false, so nothing is saved or repainted", async () => {
+		const node = makeNode("n1-same");
+		const controller = new ApiSourceController();
+		const changes: boolean[] = [];
+		const refresh = (now: number) =>
+			controller.refresh(node, baseSource(`${base}/ok`), [], (changed) => changes.push(changed), { requestImpl: nodeFetchRequestImpl, now: () => now });
+
+		await refresh(1000);
+		await refresh(2000);
+		await refresh(3000);
+
+		expect(changes).toEqual([true, false, false]); // only the first refresh moves apiCache.ok from undefined to true
+		expect(node.apiCache?.lastSuccessAt).toBe(3000); // the in-memory stamp still moves, it just is not a change
+	});
+
+	it("PR-2 (S3): a refresh whose rows changed, or that now fails, still reports changed=true", async () => {
+		const node = makeNode("n1-diff");
+		const controller = new ApiSourceController();
+		const changes: boolean[] = [];
+		const refresh = (path: string) =>
+			controller.refresh(node, baseSource(`${base}${path}`), [], (changed) => changes.push(changed), { requestImpl: nodeFetchRequestImpl });
+
+		await refresh("/ok");
+		await refresh("/withstale"); // different rows
+		await refresh("/auth401"); // ok -> failed
+		await refresh("/auth401"); // still failing the same way
+
+		expect(changes).toEqual([true, true, true, false]);
+	});
+
 	it("E8: 401 surfaces as auth failed and turns the dot red", async () => {
 		const node = makeNode("n2");
 		const controller = new ApiSourceController();

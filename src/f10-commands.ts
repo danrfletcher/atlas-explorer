@@ -4,6 +4,7 @@ import { UnitRef } from "./types";
 import { flattenMetaFolders } from "./views";
 import { ViewSuggestModal, MetaFolderSuggestModal } from "./explorer-view";
 import { TextPromptModal } from "./modals";
+import { registerRenderLogCommand } from "./render-log-command";
 
 /** F10 — the finalized command list. `Add block` is registered separately (F4 owns it). */
 export function registerF10Commands(plugin: AtlasPlugin): void {
@@ -79,4 +80,6 @@ export function registerF10Commands(plugin: AtlasPlugin): void {
 			new Notice(`Atlas: index rebuilt (${plugin.unitIndex.getUnits().length} units) — see console for timings.`);
 		},
 	});
+
+	registerRenderLogCommand(plugin);
 }

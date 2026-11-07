@@ -4,6 +4,7 @@ import { planApiRefresh } from "./api-refresh-plan";
 import { MergeResult, applyMergeResult, splitFolderSourceDeleted } from "./api-merge";
 import { httpGetJson, HTTP_TIMEOUT_MS, RequestFn, ScheduleTimeout } from "./api-http";
 import { ApiCache, ApiHeader, ApiItemState, ApiSourceConfig, ViewNode } from "./types";
+import { cacheSnapshot } from "./api-cache-snapshot";
 
 /** The outcome of a confirm-delete prompt (G6b(ii)): "confirmed"/"cancelled" are both an *answer* —
  * either button, deliberately clicked; "dismissed" is Escape or the view/modal closing with neither
@@ -54,18 +55,24 @@ function relativeTime(fromMs: number, nowMs: number): string {
 
 /** G11 tooltip: error + time of last success. E2/E4: also surfaces skipped/truncated counts. PR-3:
  * amber takes over the whole tooltip — the cache's own state is moot since nothing from the refresh
- * that triggered it was actually applied. */
-export function dotTooltip(cache: ApiCache | undefined, nowMs: number, awaitingConfirmation?: boolean): string {
+ * that triggered it was actually applied.
+ *
+ * `nowMs: null` gives the time-free form: the same text without the "N m ago" parts. The explorer puts
+ * that form in the pane (so identical output serialises identically however long the pane has been
+ * on screen) and swaps in the timed form while the dot is hovered. */
+export function dotTooltip(cache: ApiCache | undefined, nowMs: number | null, awaitingConfirmation?: boolean): string {
 	if (awaitingConfirmation) return "Waiting for confirmation to delete rows";
 	if (!cache || cache.fetchedAt === null) return "Never refreshed";
 	const parts: string[] = [];
 	if (cache.ok) {
-		parts.push(`Last refresh ok, ${relativeTime(cache.fetchedAt, nowMs)}`);
+		parts.push(nowMs === null ? "Last refresh ok" : `Last refresh ok, ${relativeTime(cache.fetchedAt, nowMs)}`);
 	} else {
 		const lastSuccess =
-			cache.lastSuccessAt !== undefined
-				? `last updated ${relativeTime(cache.lastSuccessAt, nowMs)}`
-				: "never refreshed successfully";
+			cache.lastSuccessAt === undefined
+				? "never refreshed successfully"
+				: nowMs === null
+					? "has refreshed successfully before"
+					: `last updated ${relativeTime(cache.lastSuccessAt, nowMs)}`;
 		parts.push(`${cache.error ?? "unreachable"}, ${lastSuccess}`);
 	}
 	if (cache.skippedCount > 0) parts.push(`${cache.skippedCount} item(s) skipped (missing/duplicate id)`);
@@ -114,7 +121,7 @@ export class ApiSourceController {
 	 * changed one queues exactly one follow-up refresh (with the new config) to run once the in-flight
 	 * one finishes, instead of firing concurrently or being dropped.
 	 */
-	refresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps): Promise<void> {
+	refresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: (changed: boolean) => void, deps: RefreshDeps): Promise<void> {
 		const sourceKey = ApiSourceController.sourceKeyFor(source, headers);
 		const existing = this.inFlight.get(node.id);
 		if (existing) {
@@ -126,7 +133,7 @@ export class ApiSourceController {
 		return this.runRefresh(node, source, headers, persist, deps, sourceKey);
 	}
 
-	private runRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps, sourceKey: string): Promise<void> {
+	private runRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: (changed: boolean) => void, deps: RefreshDeps, sourceKey: string): Promise<void> {
 		const run = this.doRefresh(node, source, headers, persist, deps);
 		this.inFlight.set(node.id, { promise: run, sourceKey });
 		void run.finally(() => {
@@ -139,7 +146,7 @@ export class ApiSourceController {
 		return JSON.stringify({ source, headers });
 	}
 
-	private async doRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps): Promise<void> {
+	private async doRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: (changed: boolean) => void, deps: RefreshDeps): Promise<void> {
 		const now = deps.now ?? (() => Date.now());
 		const trigger = deps.trigger ?? "manual";
 		// R5/R8: `node` is a live reference into the view tree, so another call (Remove data source, a
@@ -166,6 +173,11 @@ export class ApiSourceController {
 			if (node.apiSource === undefined || startingApiSource === undefined) return true;
 			return JSON.stringify(node.apiSource) !== JSON.stringify(startingApiSource);
 		};
+		// PR-2 (S3): same rule the CSV and Markdown-table controllers use. `fetchedAt`/`lastSuccessAt` stamp
+		// every refresh and are left out of the comparison (see `cacheSnapshot`), so a refresh that
+		// fetched the same thing reports `changed: false` and the caller neither saves nor notifies.
+		const before = cacheSnapshot(node);
+		const persistIfChanged = () => persist(cacheSnapshot(node) !== before);
 		try {
 			const headerRecord: Record<string, string> = {};
 			for (const header of headers) if (header.key) headerRecord[header.key] = header.value;
@@ -180,7 +192,7 @@ export class ApiSourceController {
 
 			if (!result.ok) {
 				node.apiCache = emptyCache(node.apiCache, now(), result.error.message);
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -194,7 +206,7 @@ export class ApiSourceController {
 
 			if (isMapError(mapped)) {
 				node.apiCache = emptyCache(node.apiCache, now(), mapped.error);
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -230,7 +242,7 @@ export class ApiSourceController {
 				applyApiMergeResult(node, plan.result, deletedState, deletedOrder);
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -250,7 +262,7 @@ export class ApiSourceController {
 				applyApiMergeResult(node, plan.result, deletedState, deletedOrder);
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -259,14 +271,14 @@ export class ApiSourceController {
 				// — keep every row and all itemState exactly as it was; the fetch itself still succeeded.
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
 			// Dismissed on an automatic trigger: unanswered — keep rows untouched, go amber, and leave
 			// the cache alone (nothing from this refresh was actually applied).
 			node.apiAwaitingConfirmation = true;
-			persist();
+			persistIfChanged();
 		} catch (err) {
 			// R17/E9: `ViewsManager` sanitizes `apiSource`/`apiItemOrder`/`apiItemState` on load, but this
 			// is the last line of defense against any other corrupt/unexpected shape reaching this
@@ -276,7 +288,7 @@ export class ApiSourceController {
 			// a shown error), and — since `refresh()`'s R15 follow-up chains onto this promise with
 			// `.then` — would silently drop any queued follow-up refresh for a newer config too.
 			node.apiCache = emptyCache(node.apiCache, now(), err instanceof Error ? err.message : "Unexpected error");
-			persist();
+			persistIfChanged();
 		}
 	}
 }

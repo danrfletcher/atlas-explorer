@@ -45,9 +45,12 @@ Open the command palette and search for "Atlas Explorer".
 | `Atlas Explorer: Reveal active file in Atlas` | Opens the explorer and, if the active file isn't placed anywhere, says so. |
 | `Atlas Explorer: New view` | Prompts for a name and creates a new, empty view. |
 | `Atlas Explorer: Rebuild index` | Forces a full re-scan of every unit in the vault, and logs timings to the console. |
+| `Atlas Explorer: Copy render log` | Copies the render log to the clipboard as JSON and shows a notice with the entry count (`[]` if it is empty). Each entry has only `kind` (what triggered the rebuild), `at` (epoch ms), `durationMs` and `changed`: no note text, labels or paths. The log keeps the last 500 rebuilds in `render-log.json` in the plugin folder, is always on, and has no setting. |
 
 Everything else is on the explorer's right-click menus; see [Using the explorer](using-the-explorer.md). There are no default hotkeys.
 
 ## Where Atlas keeps its data
 
 In the plugin's `data.json`: your settings, views and their trees, manual promotions, dismissed and added items, status sets and the data-source configuration and cached rows. Two things are deliberately kept on the device only and never synced: **API headers** and **outside-the-vault folder paths** (both can hold things that are specific to one machine or secret), and the MCP port and token.
+
+The render log is separate: `render-log.json` in the plugin folder (see **Copy render log** above), so log writes never rewrite `data.json`.

@@ -6,6 +6,7 @@ import { ExternalMoveDetector } from "../../src/external-move";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import { ViewsManager } from "../../src/views";
 import { FolderSourceConfig, View, ViewNode } from "../../src/types";
+import { openRepaintRig, RepaintRig } from "./repaint-rig";
 
 /** PR-1 (G5, E1, E2, E4-E6): the live trigger for Inside-Vault Folder sources. Drives the real
  * `AtlasPlugin` vault handlers against a real `ViewsManager` and a fake vault, with fake timers only —
@@ -402,5 +403,110 @@ describe("PR-1 (G5): inside-vault live trigger", () => {
 			expect(refreshSpy).toHaveBeenCalledTimes(1);
 			expect(save).not.toHaveBeenCalled();
 		});
+	});
+});
+
+/** PR-2 (GP2, E9): what the pane does for each vault action. The real plugin handlers, the real debounced
+ * folder refresh, the real `ViewsManager` and the real explorer (`queueRender`, the staged compare) are
+ * wired together; a "repaint" is one replacement of the pane's children (see `repaint-rig.ts`). */
+describe("PR-2 (GP2, E9): the pane repaints once per user action, and not at all for an unrelated one", () => {
+	let rig: RepaintRig;
+	const noUnits = {
+		getUnits: () => [],
+		onChange: () => () => {},
+		isDismissed: () => false,
+		isLinkOnlyInNoAutoPromoteFolder: () => false,
+	};
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		rig?.close();
+		vi.useRealTimers();
+	});
+
+	/** A source folder already holding Old.md, with the pane open on it. */
+	async function openOnFolder() {
+		const old = fileAt("Ideas/Old.md");
+		const harness = setup([sourceNode("src", "Ideas")], [folderAt("Ideas", [old])]);
+		harness.viewsManager.refreshFolderSource("v1", "src");
+		rig = await openRepaintRig({ unitIndex: noUnits, viewsManager: harness.viewsManager });
+		expect(rig.bucketRowTexts()).toEqual(["src", "Ideas/Old.md"]);
+		rig.resetPaints();
+		return { ...harness, old };
+	}
+
+	it("GP2: creating a note in the folder shows its row after one repaint; the refresh and the resolves add no second", async () => {
+		const { plugin, vault, viewsManager } = await openOnFolder();
+
+		const created = fileAt("Ideas/Quarry Drones.md");
+		vault.put(created);
+		plugin.onVaultCreateEvent(created);
+		await rig.settle();
+		viewsManager.onMetadataResolved(); // Obsidian's resolve for the new note
+		viewsManager.onMetadataResolved();
+		await rig.settle();
+
+		expect(rig.bucketRowTexts()).toEqual(["src", "Ideas/Old.md", "Ideas/Quarry Drones.md"]);
+		expect(rig.paints()).toBe(1);
+	});
+
+	it("E9: an in-app rename inside the folder repaints once, with the new name", async () => {
+		const { plugin, vault, old } = await openOnFolder();
+
+		const renamed = fileAt("Ideas/New.md");
+		vault.remove(old.path);
+		vault.put(renamed);
+		plugin.onVaultRenameEvent(renamed, old.path);
+		await rig.settle();
+
+		expect(rig.bucketRowTexts()).toEqual(["src", "Ideas/New.md"]);
+		expect(rig.paints()).toBe(1);
+	});
+
+	it("E9: a move into the folder reported as delete then create repaints once", async () => {
+		const { plugin, vault } = await openOnFolder();
+
+		plugin.onVaultDeleteEvent(fileAt("Archive/Moved.md")); // the shell `mv` Obsidian reports as delete + create
+		const created = fileAt("Ideas/Moved.md");
+		vault.put(created);
+		plugin.onVaultCreateEvent(created);
+		await rig.settle();
+
+		expect(rig.bucketRowTexts()).toEqual(["src", "Ideas/Old.md", "Ideas/Moved.md"]);
+		expect(rig.paints()).toBe(1);
+	});
+
+	it("an unrelated modify, and the resolve after it, repaint nothing", async () => {
+		const { plugin, viewsManager } = await openOnFolder();
+
+		plugin.onVaultModifyEvent(fileAt("Ideas/Old.md")); // typing in a note, then the autosave
+		viewsManager.onMetadataResolved();
+		viewsManager.onMetadataResolved();
+		await rig.settle();
+
+		expect(rig.paints()).toBe(0);
+	});
+
+	it("a folder event that finds nothing new (the refresh reads the same listing) repaints nothing", async () => {
+		const { plugin, old } = await openOnFolder();
+
+		plugin.onVaultCreateEvent(old); // the event matches the folder, the listing is unchanged
+		await rig.settle();
+
+		expect(rig.paints()).toBe(0);
+	});
+
+	it("a create elsewhere in the vault repaints nothing", async () => {
+		const { plugin, vault } = await openOnFolder();
+
+		const elsewhere = fileAt("Journal/Today.md");
+		vault.put(elsewhere);
+		plugin.onVaultCreateEvent(elsewhere);
+		await rig.settle();
+
+		expect(rig.paints()).toBe(0);
 	});
 });

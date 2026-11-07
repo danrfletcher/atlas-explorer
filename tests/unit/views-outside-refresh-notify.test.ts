@@ -6,9 +6,10 @@ import * as path from "node:path";
 import { ViewsManager } from "../../src/views";
 import { View, ViewNode } from "../../src/types";
 
-/** PR-1 (R1): an unchanged Outside-Vault refresh must still notify change listeners so the explorer
- * re-renders (unplugged drive, reconnected drive with the same contents), while writing nothing. */
-describe("PR-1 (R1): refreshFolderSource notifies listeners without writing when nothing changed", () => {
+/** PR-2 (S3, narrowing PR-1 R1): an Outside-Vault refresh that finds the same contents and the same
+ * connection state notifies nobody and writes nothing. The one change it notifies for without a write
+ * is the drive being unplugged or reconnected (whether the path resolves), which the explorer shows. */
+describe("PR-2 (S3): refreshFolderSource notifies only when something changed", () => {
 	let dir: string;
 
 	beforeEach(() => {
@@ -45,9 +46,41 @@ describe("PR-1 (R1): refreshFolderSource notifies listeners without writing when
 		expect(listener).toHaveBeenCalledTimes(1);
 	});
 
-	it("a refresh that finds the same contents writes nothing but still notifies", () => {
+	it("a refresh that finds the same contents and the same connection writes nothing and does not notify", () => {
 		const { viewsManager, persist, listener } = setup();
 		viewsManager.refreshFolderSource("v1", "src", dir);
+		persist.mockClear();
+		listener.mockClear();
+
+		viewsManager.refreshFolderSource("v1", "src", dir);
+		viewsManager.refreshFolderSource("v1", "src", dir);
+
+		expect(persist).not.toHaveBeenCalled();
+		expect(listener).not.toHaveBeenCalled();
+	});
+
+	it("an unplugged drive writes nothing but notifies once, so the explorer repaints its connection state", () => {
+		const { viewsManager, persist, listener } = setup();
+		viewsManager.refreshFolderSource("v1", "src", dir);
+		persist.mockClear();
+		listener.mockClear();
+
+		const gone = path.join(dir, "not-plugged-in");
+		viewsManager.refreshFolderSource("v1", "src", gone);
+
+		expect(persist).not.toHaveBeenCalled();
+		expect(listener).toHaveBeenCalledTimes(1);
+		expect(viewsManager.getNode("v1", "src")?.children.map((child) => child.ref?.path)).toEqual(["a.md"]);
+
+		// Still unplugged: nothing about the connection moved, so nobody is told again.
+		viewsManager.refreshFolderSource("v1", "src", gone);
+		expect(listener).toHaveBeenCalledTimes(1);
+	});
+
+	it("a reconnected drive with the same contents notifies once (resolved state flipped back)", () => {
+		const { viewsManager, persist, listener } = setup();
+		viewsManager.refreshFolderSource("v1", "src", dir);
+		viewsManager.refreshFolderSource("v1", "src", path.join(dir, "not-plugged-in"));
 		persist.mockClear();
 		listener.mockClear();
 
@@ -57,16 +90,11 @@ describe("PR-1 (R1): refreshFolderSource notifies listeners without writing when
 		expect(listener).toHaveBeenCalledTimes(1);
 	});
 
-	it("an unplugged drive writes nothing but still notifies, so the explorer re-renders its state", () => {
-		const { viewsManager, persist, listener } = setup();
-		viewsManager.refreshFolderSource("v1", "src", dir);
-		persist.mockClear();
-		listener.mockClear();
-
+	it("a source first seen unplugged notifies once, because the pane has not been told yet", () => {
+		const { viewsManager, listener } = setup();
 		viewsManager.refreshFolderSource("v1", "src", path.join(dir, "not-plugged-in"));
-
-		expect(persist).not.toHaveBeenCalled();
 		expect(listener).toHaveBeenCalledTimes(1);
-		expect(viewsManager.getNode("v1", "src")?.children.map((child) => child.ref?.path)).toEqual(["a.md"]);
+		viewsManager.refreshFolderSource("v1", "src", path.join(dir, "not-plugged-in"));
+		expect(listener).toHaveBeenCalledTimes(1);
 	});
 });

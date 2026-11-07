@@ -21,6 +21,7 @@ declare global {
 		toggleClass(cls: string, on: boolean): void;
 		setAttr(name: string, value: string): void;
 		setCssStyles(styles: Partial<CSSStyleDeclaration>): void;
+		isShown(): boolean;
 	}
 }
 
@@ -65,6 +66,11 @@ proto.toggleClass = function (cls: string, on: boolean) {
 };
 proto.setAttr = function (name: string, value: string) {
 	this.setAttribute(name, value);
+};
+/** Obsidian's `isShown()` is layout-based, which jsdom has none of: a test hides a pane by setting
+ * `data-test-hidden` on it (PR-2). */
+proto.isShown = function () {
+	return !this.hasAttribute("data-test-hidden");
 };
 proto.setCssStyles = function (styles: Partial<CSSStyleDeclaration>) {
 	Object.assign(this.style, styles);
@@ -468,7 +474,11 @@ export class Setting {
 export const Platform = { isMobile: false, isDesktop: true };
 
 export function setIcon(_el: HTMLElement, _icon: string): void {}
-export function setTooltip(_el: HTMLElement, _tip: string): void {}
+/** Like Obsidian's, the tooltip text is stored as the element's `aria-label`, so it is part of any markup
+ * a test serialises or compares. */
+export function setTooltip(el: HTMLElement, tip: string): void {
+	el.setAttribute("aria-label", tip);
+}
 
 /** PR-2 (T12): records every `addIcon()` call so tests can assert the plugin registers its own
  * sort-az icon id at load time. `addIconCalls.length = 0` between tests, not a fresh array —

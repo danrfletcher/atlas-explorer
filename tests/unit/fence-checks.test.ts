@@ -200,14 +200,23 @@ describe("PR-2.F3 fence — the G10 helper never writes filterText, sort setting
 
 // PR-1 (R1 fix) — F9: no new command-palette entry and no new keyboard shortcut is registered.
 describe("PR-1 F9 — no new command or keyboard shortcut", () => {
-	it("the registered command id set is exactly the pre-existing seven, with no sort command added", () => {
+	it("the registered command id set is exactly the pre-existing seven plus copy-render-log, with no sort command added", () => {
 		const ids: string[] = [];
 		const fakePlugin = { addCommand: (cmd: { id: string }) => ids.push(cmd.id) } as unknown as Parameters<typeof registerF10Commands>[0];
 		registerF10Commands(fakePlugin);
 		registerAddBlockCommand(fakePlugin);
 
 		expect(ids.sort()).toEqual(
-			["open-explorer", "switch-view", "place-active-file-in-view", "reveal-active-file", "new-view", "rebuild-index", "add-block"].sort()
+			[
+				"open-explorer",
+				"switch-view",
+				"place-active-file-in-view",
+				"reveal-active-file",
+				"new-view",
+				"rebuild-index",
+				"add-block",
+				"copy-render-log", // the render log's one command
+			].sort()
 		);
 	});
 
@@ -217,7 +226,7 @@ describe("PR-1 F9 — no new command or keyboard shortcut", () => {
 		registerF10Commands(fakePlugin);
 		registerAddBlockCommand(fakePlugin);
 
-		expect(cmds.length).toBe(7);
+		expect(cmds.length).toBe(8); // the pre-existing seven plus copy-render-log
 		for (const cmd of cmds) expect(cmd.hotkeys).toBeUndefined();
 	});
 });
@@ -376,7 +385,8 @@ describe("PR-3 fence — an edge drop never touches disk", () => {
 });
 
 // PR-3 (fence): no new command id is registered by this PR's edge-drop/reorder work -- the
-// registered set is still exactly the same seven as PR-1's own F9 check above.
+// registered set is still exactly the same seven as PR-1's own F9 check above, plus the render
+// log's one command (`copy-render-log`).
 describe("PR-3 fence — no new command id from the edge-drop/reorder work", () => {
 	it("the registered command id set still has no sort/reorder/move id of any kind", () => {
 		const ids: string[] = [];
@@ -384,7 +394,8 @@ describe("PR-3 fence — no new command id from the edge-drop/reorder work", () 
 		registerF10Commands(fakePlugin);
 		registerAddBlockCommand(fakePlugin);
 
-		expect(ids).toHaveLength(7);
+		expect(ids).toHaveLength(8);
+		expect(ids).toContain("copy-render-log");
 		for (const id of ids) expect(id.toLowerCase()).not.toMatch(/sort|reorder|move-up|move-down/);
 	});
 });
@@ -512,5 +523,53 @@ describe("Atlas #16 F3 — the press hold adds no timer, interval or polling", (
 		const hold = slice("private isInsideAtlasPane(", "private queueRender(): void {");
 		expect(hold).not.toMatch(/setTimeout|setInterval|requestAnimationFrame/);
 		expect(slice("private render(): Promise<void> {", "\n\t}\n")).not.toMatch(/setTimeout|setInterval|requestAnimationFrame/);
+	});
+});
+
+/** atlas-15 PR-2 F3: the staged render, the hidden-pane deferral and the notify gating add no polling,
+ * interval, self-scheduling timer or coalescing window. `queueRender`'s one `setTimeout(0)` is the only timer
+ * in the render path, and a hidden pane waits for a shown event instead of retrying. */
+describe("atlas-15 PR-2 F3 — the staged render and the notify gating add no timer, interval or polling", () => {
+	const stripComments = (src: string) =>
+		src
+			.split("\n")
+			.filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+			.join("\n");
+	const slice = (code: string, start: string, end: string) => {
+		const from = code.indexOf(start);
+		expect(from, `${start} not found`).toBeGreaterThanOrEqual(0);
+		const to = code.indexOf(end, from + start.length);
+		expect(to, `${end} not found after ${start}`).toBeGreaterThan(from);
+		return code.slice(from, to);
+	};
+	const TIMER = /\bsetInterval\s*\(|\bsetTimeout\s*\(|requestAnimationFrame\s*\(|\bsetImmediate\s*\(/;
+
+	it("the files this slice changed schedule nothing: no timer, interval or animation frame in the render log, views, unit index or API controller", () => {
+		for (const file of ["src/render-log.ts", "src/views.ts", "src/unit-index.ts", "src/api-source-controller.ts"]) {
+			expect(stripComments(read(file)), file).not.toMatch(TIMER);
+		}
+	});
+
+	it("explorer-view.ts has no setInterval, and the same six setTimeout calls it had before the staged render", () => {
+		const code = stripComments(read("src/explorer-view.ts"));
+		expect(code.match(/setInterval\s*\(/g) ?? []).toHaveLength(0);
+		expect(code.match(/\bsetTimeout\s*\(/g) ?? []).toHaveLength(6);
+	});
+
+	it("render(), the render body, the hidden-pane deferral and the staging compare contain no timer", () => {
+		const code = stripComments(read("src/explorer-view.ts"));
+		expect(slice(code, "private render(): Promise<void> {", "\n\t}\n")).not.toMatch(TIMER);
+		expect(slice(code, "private async renderNow(", "\n\t}\n")).not.toMatch(TIMER);
+		expect(slice(code, "function paneOutput(", "\n}\n")).not.toMatch(TIMER);
+	});
+
+	it("queueRender still holds the one setTimeout of the render path", () => {
+		const code = stripComments(read("src/explorer-view.ts"));
+		expect(slice(code, "private queueRender(): void {", "\n\t}\n").match(/setTimeout\s*\(/g)).toHaveLength(1);
+	});
+
+	it("the connection dot's hover tooltip is built from a mouseover listener, with no timer to keep it fresh", () => {
+		const code = stripComments(read("src/explorer-view.ts"));
+		expect(slice(code, "private renderConnectionDots(", "\n\t}\n")).not.toMatch(TIMER);
 	});
 });

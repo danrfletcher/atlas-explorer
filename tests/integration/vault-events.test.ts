@@ -1,11 +1,12 @@
-import type { App, TAbstractFile } from "obsidian";
-import { describe, expect, it, vi } from "vitest";
+import type { App, TAbstractFile, TFile } from "obsidian";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App as MockApp } from "../mocks/obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
 import { ViewsManager } from "../../src/views";
 import { ApiItemState, PLACEHOLDER_ROW_KIND, UnitRef, View, unitRefKey, unitToRef } from "../../src/types";
+import { openRepaintRig, RepaintRig } from "./repaint-rig";
 
 function item(overrides: Partial<ApiItemState> & { id: string }): ApiItemState {
 	return { label: overrides.id, kind: PLACEHOLDER_ROW_KIND, ...overrides };
@@ -202,5 +203,180 @@ describe("Atlas #13 PR-1 — vault events repaint a placed non-unit file's row",
 		expect(w.views.getViews()[0].root[0].children.map((n) => n.id)).toEqual(["resp"]);
 		expect(w.unitIndex.getUnits().some((u) => u.path === MOVED)).toBe(false); // still no promotion made
 		expect(w.persisted.length).toBeGreaterThan(0); // the existing rewrite saves, as before
+	});
+});
+
+// PR-2 (GP1, GP2, E9): the real index and views manager behind the real explorer (see `repaint-rig.ts`),
+// wired to vault events the way the plugin does it. A repaint is one replacement of the pane's children.
+describe("PR-2 (GP1, GP2, E9) — the pane repaints once per user action, and not at all for a save", () => {
+	let rig: RepaintRig;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		rig?.close();
+		vi.useRealTimers();
+	});
+
+	async function open() {
+		const app = new MockApp();
+		app.vault.seedFile("Alpha.md");
+		app.vault.seedFile("Beta.md");
+		const unitIndex = new UnitIndex(app as unknown as App, { ...DEFAULT_SETTINGS }, [], {}, [], []);
+		unitIndex.rebuild();
+		const views = new ViewsManager(app as unknown as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [] }], "v1", () => {});
+		app.vault.on("create", (f: TAbstractFile) => unitIndex.onVaultCreate(f));
+		app.vault.on("delete", (f: TAbstractFile) => {
+			unitIndex.onVaultDelete(f.path);
+			views.onVaultDelete(f.path);
+		});
+		app.vault.on("rename", (f: TAbstractFile, oldPath: string) => {
+			unitIndex.onVaultRename(f, oldPath);
+			views.onVaultRename(oldPath, f.path);
+		});
+		// What main.ts runs on every metadataCache "resolved".
+		const resolved = () => {
+			views.onMetadataResolved();
+			unitIndex.onMetadataResolved();
+		};
+		rig = await openRepaintRig({ unitIndex, viewsManager: views, realLabels: { app: app as unknown as App, settings: { ...DEFAULT_SETTINGS } } });
+		expect(rig.inboxRowKeys()).toHaveLength(2);
+		rig.resetPaints();
+		return { app, unitIndex, views, resolved };
+	}
+
+	it("GP1: typing in a note and the autosave that follows (modify, then resolves) repaint nothing", async () => {
+		const { app, resolved } = await open();
+		const file = app.vault.getAbstractFileByPath("Alpha.md") as TFile;
+
+		await app.vault.modify(file, "typed");
+		resolved();
+		await rig.settle();
+		await app.vault.modify(file, "typed more");
+		resolved();
+		resolved();
+		await rig.settle();
+
+		expect(rig.paints()).toBe(0);
+	});
+
+	it("GP2: creating a note shows its row after one repaint; the create and the resolves add no second", async () => {
+		const { app, resolved } = await open();
+
+		await app.vault.create("Gamma.md", "");
+		resolved();
+		resolved();
+		await rig.settle();
+
+		expect(rig.inboxRowKeys()).toHaveLength(3);
+		expect(rig.paints()).toBe(1);
+	});
+
+	it("E9: renaming a note repaints once, with the new name", async () => {
+		const { app, resolved } = await open();
+		const before = rig.inboxRowKeys();
+
+		await app.vault.rename(app.vault.getAbstractFileByPath("Beta.md")!, "Beta renamed.md");
+		resolved();
+		await rig.settle();
+
+		const after = rig.inboxRowKeys();
+		expect(after).toHaveLength(2);
+		expect(after).not.toEqual(before);
+		expect(after.some((key) => key.includes("Beta renamed"))).toBe(true);
+		expect(rig.paints()).toBe(1);
+	});
+
+	it("deleting a note and creating it again at the same path ends with the same list, so the pane is not repainted", async () => {
+		const { app, resolved } = await open();
+
+		await app.vault.delete(app.vault.getAbstractFileByPath("Beta.md")!);
+		await app.vault.create("Beta.md", "");
+		resolved();
+		await rig.settle();
+
+		expect(rig.inboxRowKeys()).toHaveLength(2);
+		expect(rig.paints()).toBe(0);
+	});
+
+	/** A vault-root Source.md linking to a block of Target.md, with a link graph the test controls: the
+	 * mock metadata cache answers from `cache`, so adding or removing a link and editing the block's
+	 * text go through the real `computePromotions`, `resolveUnit` and `render()`. */
+	async function openWithBlockLink() {
+		const { app, unitIndex, views, resolved } = await open();
+		const caches = new Map<string, { links?: { link: string }[]; blocks?: Record<string, { position: { start: { line: number } } }> }>();
+		const metadata = app.metadataCache as unknown as {
+			getFileCache: (f: TFile) => unknown;
+			getFirstLinkpathDest: (link: string) => TFile | null;
+		};
+		metadata.getFileCache = (f) => caches.get(f.path) ?? null;
+		metadata.getFirstLinkpathDest = (link) => app.vault.getAbstractFileByPath(`${link}.md`) as TFile | null;
+		await app.vault.modify(app.vault.getAbstractFileByPath("Beta.md") as TFile, "First line\nThe quarry opens at dawn ^q1\n");
+		const link = { link: "Beta#^q1" };
+		caches.set("Beta.md", { blocks: { q1: { position: { start: { line: 1 } } } } });
+		return { app, unitIndex, views, resolved, caches, link };
+	}
+
+	it("GP5: editing the text of a promoted block updates its row label, once", async () => {
+		const { app, resolved, caches, link } = await openWithBlockLink();
+		caches.set("Alpha.md", { links: [link] });
+		resolved();
+		await rig.settle();
+		expect(rig.inboxRowTexts()).toContain("The quarry opens at dawn");
+		rig.resetPaints();
+
+		await app.vault.modify(app.vault.getAbstractFileByPath("Beta.md") as TFile, "First line\nThe quarry closes at dusk ^q1\n");
+		resolved();
+		await rig.settle();
+
+		expect(rig.inboxRowTexts()).toContain("The quarry closes at dusk");
+		expect(rig.inboxRowTexts()).not.toContain("The quarry opens at dawn");
+		expect(rig.paints()).toBe(1);
+
+		resolved(); // the resolve that follows is a no-op
+		await rig.settle();
+		expect(rig.paints()).toBe(1);
+	});
+
+	it("E5: a new link adds the block's row, and a removed link takes it away, one repaint each", async () => {
+		const { resolved, caches, link } = await openWithBlockLink();
+		const rowsBefore = rig.inboxRowKeys().length;
+		rig.resetPaints();
+
+		caches.set("Alpha.md", { links: [link] });
+		resolved();
+		await rig.settle();
+		expect(rig.inboxRowKeys()).toHaveLength(rowsBefore + 1);
+		expect(rig.paints()).toBe(1);
+
+		caches.set("Alpha.md", { links: [] });
+		resolved();
+		await rig.settle();
+		expect(rig.inboxRowKeys()).toHaveLength(rowsBefore);
+		expect(rig.paints()).toBe(2);
+	});
+
+	async function createPoolBlock(app: MockApp, name: string, text: string): Promise<TFile> {
+		app.vault.seedFolder("_pool");
+		return app.vault.create(`_pool/${name}`, text);
+	}
+
+	it("E5: editing a free block's first line updates its row, once", async () => {
+		const { app, resolved } = await open();
+		const block = await createPoolBlock(app, "20260101000000-abcd.md", "Old title\n");
+		resolved();
+		await rig.settle();
+		expect(rig.inboxRowTexts()).toContain("Old title");
+		rig.resetPaints();
+
+		await app.vault.modify(block, "New title\n");
+		resolved();
+		await rig.settle();
+
+		expect(rig.inboxRowTexts()).toContain("New title");
+		expect(rig.inboxRowTexts()).not.toContain("Old title");
+		expect(rig.paints()).toBe(1);
 	});
 });

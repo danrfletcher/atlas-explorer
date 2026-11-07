@@ -39,6 +39,7 @@ import { createAtlasStatusTool } from "./mcp-tools";
 import { McpTool } from "./mcp-protocol";
 import { createGetNodeStatusTool, createListNodesTool, createListStatusSetsTool, createListViewsTool, createSetNodeStatusTool } from "./mcp-status-tools";
 import { createAddNodeTool, createCreateFolderTool, createMoveNodeTool, createRemoveNodeTool, createRenameFolderTool } from "./mcp-arrange-tools";
+import { RENDER_LOG_FILE, RenderLog, withRenderCause } from "./render-log";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -108,10 +109,15 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-1.S1 (F5): only ever constructed on desktop — `null` on mobile, where there is no
 	 * listener, port or token work at all. */
 	mcpServer: McpServer | null = null;
+	/** PR-1 (render log): plugin-wide, so two open Atlas leaves share one log. Backed by
+	 * `<plugin dir>/render-log.json` — never `data.json`. */
+	renderLog: RenderLog;
 
 	async onload() {
 		const data = (await this.loadData()) as AtlasData | null;
 		this.loadFromData(data);
+		this.renderLog = new RenderLog(this.app.vault.adapter, `${this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`}/${RENDER_LOG_FILE}`);
+		await this.renderLog.load();
 
 		this.persistDebounced = debounce(() => void this.persistNow(), 500, true);
 
@@ -380,7 +386,7 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-1 (G5): the debounced refresh itself — always the active view, same as every other source trigger. */
 	private refreshInsideFolderSource(nodeId: string): void {
 		const view = this.viewsManager.getActiveView();
-		this.viewsManager.refreshFolderSource(view.id, nodeId);
+		withRenderCause("folder-source-refresh", () => this.viewsManager.refreshFolderSource(view.id, nodeId));
 	}
 
 	/** PR-2 (G9): keeps the watcher registry in step with the active view's Outside-Vault sources. Mobile
@@ -399,7 +405,7 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-2 (G6): a watcher event's rescan for one source — the same refresh window focus runs, for one node. */
 	private refreshOutsideFolderSource(nodeId: string): void {
 		const view = this.viewsManager.getActiveView();
-		this.viewsManager.refreshFolderSource(view.id, nodeId, this.folderSourcePathStore.get(nodeId));
+		withRenderCause("folder-source-refresh", () => this.viewsManager.refreshFolderSource(view.id, nodeId, this.folderSourcePathStore.get(nodeId)));
 	}
 
 	onunload() {
@@ -411,6 +417,7 @@ export default class AtlasPlugin extends Plugin {
 		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);
 		this.persistDebounced?.run(); // flush any pending save rather than losing up to 500ms of drags
+		void this.renderLog?.dispose(); // render log: write what's pending; a rejected write is swallowed inside
 		console.debug("[Atlas] unloading");
 	}
 
