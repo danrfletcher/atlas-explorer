@@ -4142,8 +4142,9 @@ export class AtlasExplorerView extends ItemView {
 	 * the existing link-graph promotion recompute (does it have a real backlink from outside the
 	 * module?) — this never force-promotes it; a file with no backlinks simply becomes ordinary,
 	 * invisible internals, matching the rest of the model. A file that is already placed in a view
-	 * stays placed in every view, as a normal row at its new path, whether or not it is still a unit. A placed *block* is still un-placed in every view once the link
-	 * graph resolves and it is no longer a unit. */
+	 * stays placed in every view, as a normal row at its new path, whether or not it is still a unit.
+	 * A placed *block* is still un-placed in every view once the link graph resolves and it is no
+	 * longer a unit. */
 	private async handleAddToModule(ref: UnitRef, folderPath: string, skipConfirm = false): Promise<void> {
 		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
 		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
