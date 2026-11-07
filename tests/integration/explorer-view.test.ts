@@ -10,7 +10,7 @@ import { ATLAS_VIEW_TYPE, AtlasExplorerView, candidateFilesForAdd } from "../../
 import AtlasPlugin from "../../src/main";
 import { UnitIndex } from "../../src/unit-index";
 import { makeSectionHarness, SectionHarness } from "../explorer-header-fixtures";
-import { bucketRows, drawBucketRows, openExplorer, pointer, PressEnv, PressInternals } from "../unit/explorer-view-press-helpers";
+import { bucketRows, drawBucketRows, flush, openExplorer, pointer, PressEnv, PressInternals } from "../unit/explorer-view-press-helpers";
 import { callRenderApiItemRow, callRenderNodeList, makeFakeExplorer, makeStatusesManager, proto } from "../unit/explorer-view-sort-truncate-helpers";
 
 // R1 (PR-1.F2 review): Obsidian's `Setting` is replaced with a recorder so the "Highlight the open
@@ -1512,5 +1512,104 @@ describe("Atlas #16 — E9: a press in either of two Atlas leaves holds both vie
 		await vi.advanceTimersByTimeAsync(50);
 		expect(first.renderNow).toHaveBeenCalledTimes(1);
 		expect(secondRenderNow).toHaveBeenCalledTimes(1);
+	});
+});
+
+// --- Atlas #15 PR-3 (GP4): a click on an inbox row repaints the list once ----------------------------
+describe("Atlas #15 PR-3 (GP4) — clicking an inbox row produces one swap, and the focused row is restored", () => {
+	let env: PressEnv;
+	let hh: SectionHarness;
+	const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		// jsdom has no `CSS` global; the focus restore builds its selector with `CSS.escape`.
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		hh = makeSectionHarness({ bucketRows: 1, inboxRows: 40 });
+		env = await openExplorer(hh);
+		env.ex.openRef = vi.fn(async () => {});
+		await env.ex.render();
+	});
+
+	afterEach(() => {
+		env.teardown();
+		hh.teardown();
+		(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it("the click's selection render is exactly one mutation batch, even with a leaf activation in the same burst", async () => {
+		const row = document.querySelector<HTMLElement>(".atlas-inbox .atlas-row-unit")!;
+		const key = row.dataset.selectKey!;
+		const batches: MutationRecord[][] = [];
+		const observer = new MutationObserver((records) => batches.push(records));
+		observer.observe(hh.panel(), { subtree: true, childList: true, attributes: true, characterData: true });
+		const replace = vi.spyOn(hh.panel(), "replaceChildren");
+
+		env.fireLeafChange({}); // the editor was active
+		env.fireLeafChange(env.ex.leaf); // the click activates the Atlas leaf (PR-2 work)
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		await flush(env);
+		observer.disconnect();
+
+		expect(env.ex.openRef).toHaveBeenCalledTimes(1);
+		expect(batches).toHaveLength(1);
+		expect(replace).toHaveBeenCalledTimes(1);
+		expect(batches[0].filter((r) => r.target === hh.panel() && r.type === "childList")).toHaveLength(1);
+		const selected = document.querySelector<HTMLElement>(`.atlas-inbox [data-select-key="${key}"]`)!;
+		expect(selected.classList.contains("is-selected")).toBe(true);
+	});
+
+	it("restores focus to the clicked row's replacement with preventScroll", async () => {
+		const row = document.querySelector<HTMLElement>(".atlas-inbox .atlas-row-unit")!;
+		const key = row.dataset.selectKey!;
+		row.focus();
+		expect(document.activeElement).toBe(row);
+		const focusSpy = vi.spyOn(HTMLElement.prototype, "focus");
+
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		await flush(env);
+
+		const replacement = document.querySelector<HTMLElement>(`.atlas-inbox [data-select-key="${key}"]`)!;
+		expect(replacement).not.toBe(row);
+		expect(row.isConnected).toBe(false);
+		expect(document.activeElement).toBe(replacement);
+		expect(focusSpy.mock.contexts).toContain(replacement);
+		const call = focusSpy.mock.calls[focusSpy.mock.contexts.indexOf(replacement)];
+		expect(call[0]).toEqual({ preventScroll: true });
+	});
+
+	it("the swapped-in rows keep their click, dragstart and keydown listeners", async () => {
+		// Bucket rows (stubbed by the harness) get the three listeners a real bucket row has.
+		const calls = { click: 0, dragstart: 0, keydown: 0 };
+		env.ex.renderNodeList = async (_nodes, container) => {
+			const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
+			row.dataset.selectKey = "bucket-row";
+			row.tabIndex = 0;
+			for (const type of ["click", "dragstart", "keydown"] as const) row.addEventListener(type, () => calls[type]++);
+		};
+		hh.state.units = hh.state.units.slice(0, 39); // a real change, so the pane is swapped
+		await env.ex.render();
+
+		const bucketRow = document.querySelector<HTMLElement>(".atlas-bucket .atlas-row-unit")!;
+		bucketRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		bucketRow.dispatchEvent(new Event("dragstart"));
+		bucketRow.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		expect(calls).toEqual({ click: 1, dragstart: 1, keydown: 1 });
+
+		// The inbox row's real handlers, after the click's own swap.
+		const first = document.querySelector<HTMLElement>(".atlas-inbox .atlas-row-unit")!;
+		const key = first.dataset.selectKey!;
+		first.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		await flush(env);
+		const row = document.querySelector<HTMLElement>(`.atlas-inbox [data-select-key="${key}"]`)!;
+		expect(row).not.toBe(first);
+		(env.ex.openRef as ReturnType<typeof vi.fn>).mockClear();
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		expect(env.ex.openRef).toHaveBeenCalledTimes(1);
+		row.dispatchEvent(new Event("dragstart"));
+		expect(env.ex.dragPayload).not.toBeNull();
+		expect(env.ex.inboxDragRowEl).toBe(row);
 	});
 });

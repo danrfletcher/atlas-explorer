@@ -966,6 +966,10 @@ export class AtlasExplorerView extends ItemView {
 	/** The inbox redraw of the staged pane while it is being built. It moves to `inboxRedraw` only when
 	 * the staged pane goes on screen, so the live pane keeps redrawing on scroll during a build. */
 	private stagedInboxRedraw: (() => void) | null = null;
+	/** Draws the staged inbox window at once (no animation frame). `renderNow()` moves it to
+	 * `inboxDrawNow` with the rest of the staged pane. */
+	private stagedInboxDrawNow: (() => void) | null = null;
+	private inboxDrawNow: (() => void) | null = null;
 	/** PR-2 (R4): the virtualised inbox puts only its visible window of rows in the DOM, so comparing
 	 * markup cannot see a change to a row outside it. This is a signature of every inbox row (key, label,
 	 * icon, badges, hidden and missing state, in order) of the staged pane while it is being built, and of
@@ -1157,6 +1161,13 @@ export class AtlasExplorerView extends ItemView {
 		this.inboxLayoutObserver = null;
 		this.inboxRedraw = null;
 		this.stagedInboxRedraw = null;
+		this.stagedInboxDrawNow = null;
+		this.inboxDrawNow = null;
+		// A render still building when the view closes is superseded: it swaps nothing and registers
+		// no observer. Its `finally` leaves `pendingScrollTop` alone as it does for any superseded
+		// render, so it is cleared here.
+		this.renderSeq++;
+		this.pendingScrollTop = null;
 		this.stopShownWatch();
 		this.hiddenRenderKind = null;
 		// R1: closing each modal fires its own onClose, which reports "dismissed" and (via the callback
@@ -2007,6 +2018,7 @@ export class AtlasExplorerView extends ItemView {
 		this.bucketListEl = pane?.bucketListEl ?? null;
 		this.stickyEls = pane?.stickyEls ?? null;
 		this.stagedInboxRedraw = null;
+		this.stagedInboxDrawNow = null;
 	}
 
 	/** Builds the next pane in a hidden staging sibling, then either throws it away (its output equals
@@ -2174,17 +2186,30 @@ export class AtlasExplorerView extends ItemView {
 			this.inboxLayoutObserver?.disconnect();
 			this.inboxLayoutObserver = null;
 			this.inboxRedraw = this.stagedInboxRedraw;
+			this.inboxDrawNow = this.stagedInboxDrawNow;
 			this.stagedInboxRedraw = null;
+			this.stagedInboxDrawNow = null;
 			this.liveInboxSignature = this.stagedInboxSignature;
 			this.inboxDragRowEl = null;
 			this.bucketDragRowEl = null;
 
-			live.empty();
+			// An input that fired while this render was building but whose render is held (a press in
+			// progress) is not covered by a superseding render yet: the new input must carry what the
+			// user has typed, or that character would be dropped by the swap.
+			if (filterHadFocus && activeEl instanceof HTMLInputElement && this.filterInputEl && this.filterInputEl.value !== activeEl.value) {
+				this.filterInputEl.value = activeEl.value;
+			}
+			// The one DOM operation that puts the new pane on screen: the live children are replaced
+			// by the complete staged ones, so no frame ever shows an emptied or half-built pane.
+			live.replaceChildren(...Array.from(staging.childNodes));
 			if (!live.classList.contains("atlas-explorer")) live.addClass("atlas-explorer");
-			live.append(...Array.from(staging.childNodes));
 			// A body that was detached and re-attached starts at 0 again.
 			scrollBody.scrollTop = restoreScrollTop;
 			committed = true;
+			// The browser clamps the restored scroll to the swapped-in body (a shrunken inbox): draw the
+			// window for the position it really has now, in this same task, so the first frame holds the
+			// right rows. A no-op when the window is the one already drawn while staged.
+			this.inboxDrawNow?.();
 			this.lastRenderPainted = true;
 			this.livePane = { filterInputEl: this.filterInputEl, bucketListEl: this.bucketListEl, stickyEls: this.stickyEls };
 			this.observeInboxLayout(live, scrollBody, bucketWrap ?? bucketEl);
@@ -2252,15 +2277,24 @@ export class AtlasExplorerView extends ItemView {
 	 * font-size or zoom change. Also toggles the short-panel guard class that takes both labels out of
 	 * `position: sticky` when the panel is too short to show both headers plus a row. The actual
 	 * pinning itself is the compositor's job now (CSS `position: sticky`); this only feeds it the one
-	 * value it can't express in pure CSS. */
+	 * value it can't express in pure CSS. Writes nothing when the variable and the class already hold
+	 * the right values (see the comment in the body). */
 	private updateStickyLayout(): void {
 		const s = this.stickyEls;
 		if (!s || !s.body.isConnected) return;
 		const bucketHeaderHeight = s.bucketHeader.getBoundingClientRect().height;
 		const inboxHeaderHeight = s.inboxHeader.getBoundingClientRect().height;
-		s.body.style.setProperty("--atlas-bucket-label-h", `${bucketHeaderHeight}px`);
+		// Both writes are made only when the value really changes: a no-op class or style write still
+		// records an attribute mutation, and a render's swap must show the container's observers one
+		// batch, not a second one for a value the staged pane already carries.
+		const labelHeight = `${bucketHeaderHeight}px`;
+		if (s.body.style.getPropertyValue("--atlas-bucket-label-h") !== labelHeight) {
+			s.body.style.setProperty("--atlas-bucket-label-h", labelHeight);
+		}
 		const fits = s.body.clientHeight >= bucketHeaderHeight + inboxHeaderHeight + INBOX_ROW_HEIGHT;
-		s.body.toggleClass("atlas-sticky-disabled", !fits);
+		if (s.body.classList.contains("atlas-sticky-disabled") === fits) {
+			s.body.toggleClass("atlas-sticky-disabled", !fits);
+		}
 	}
 
 	/** PR-1.F1 (G5): where a section's header belongs once stuck: the bucket at the top, the inbox
@@ -3677,6 +3711,7 @@ export class AtlasExplorerView extends ItemView {
 
 		// Lives in `stagedInboxRedraw` until the pane it draws into goes on screen (`renderNow` moves it).
 		this.stagedInboxRedraw = scheduleDraw;
+		this.stagedInboxDrawNow = drawWindow;
 		drawWindow();
 		scrollBody.addEventListener("scroll", scheduleDraw);
 	}

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceLeaf } from "obsidian";
 import { makeSectionHarness, SectionHarness } from "../explorer-header-fixtures";
 import { AtlasExplorerView } from "../../src/explorer-view";
-import { FakeResizeObserver } from "./explorer-view-scroll-helpers";
+import { FakeResizeObserver, fileUnits } from "./explorer-view-scroll-helpers";
 import { RenderLog } from "../../src/render-log";
 import { Notice } from "obsidian";
 import { noticeIfAddedRowHidden } from "../../src/add-under-hidden-notice";
@@ -594,8 +594,8 @@ describe("PR-2 (S3) — leaf activation and a metadata resolve do not repaint an
 		await vi.advanceTimersByTimeAsync(50);
 
 		const records = watcher.stop();
-		// One replacement of the pane's children: a single `childList` batch on the pane itself.
-		expect(records.filter((r) => r.target === h.panel() && r.type === "childList")).toHaveLength(2); // removal + insertion of one swap
+		// One replacement of the pane's children: `replaceChildren` is a single `childList` record on the pane itself.
+		expect(records.filter((r) => r.target === h.panel() && r.type === "childList")).toHaveLength(1);
 		expect(h.panel().textContent).toContain("Renamed in the burst");
 	});
 });
@@ -706,5 +706,84 @@ describe("PR-2 (S3/E6) — a pane that is not shown records the request and rend
 		await vi.advanceTimersByTimeAsync(50);
 
 		expect(secondPanel().textContent).toContain("Seen by both");
+	});
+});
+
+describe("PR-3 (E3) — the atomic swap and a drag in progress", () => {
+	type DragState = {
+		nativeDragActive: boolean;
+		dragPayload: unknown;
+		inboxDragRowEl: HTMLElement | null;
+		bucketDragRowEl: HTMLElement | null;
+		cancelActiveDwell: (() => void) | null;
+	};
+	const drag = () => h.explorer as unknown as DragState;
+
+	/** Starts a native drag from an inbox row and a bucket row, the state the row `dragstart` handlers leave. */
+	async function startDrag(): Promise<{ inboxRow: HTMLElement; bucketRow: HTMLElement; dwell: ReturnType<typeof vi.fn>; payload: object }> {
+		await open();
+		const inboxRow = h.panel().querySelector<HTMLElement>(".atlas-inbox .atlas-row-virtual")!;
+		const bucketRow = h.panel().querySelector<HTMLElement>(".atlas-bucket .atlas-row-unit")!;
+		window.dispatchEvent(new Event("dragstart")); // nativeDragActive
+		const payload = { kind: "node", nodeId: "n1", viewId: "v1" };
+		drag().dragPayload = payload;
+		drag().inboxDragRowEl = inboxRow;
+		drag().bucketDragRowEl = bucketRow;
+		const dwell = vi.fn();
+		drag().cancelActiveDwell = dwell;
+		return { inboxRow, bucketRow, dwell, payload };
+	}
+
+	it("a real change during a drag clears the payload and the drag rows and cancels the dwell, in one swap", async () => {
+		const { inboxRow, dwell } = await startDrag();
+		const replace = vi.spyOn(h.panel(), "replaceChildren");
+
+		h.state.units = fileUnits(3);
+		await ex.render();
+
+		expect(replace).toHaveBeenCalledTimes(1);
+		expect(inboxRow.isConnected).toBe(false);
+		expect(drag().dragPayload).toBeNull();
+		expect(drag().inboxDragRowEl).toBeNull();
+		expect(drag().bucketDragRowEl).toBeNull();
+		expect(dwell).toHaveBeenCalledTimes(1);
+		expect(drag().nativeDragActive).toBe(true); // only dragend / drop / a pointer event ends the native drag
+	});
+
+	it("an identical render during a drag is skipped and touches no part of the drag", async () => {
+		const { inboxRow, bucketRow, dwell, payload } = await startDrag();
+		const replace = vi.spyOn(h.panel(), "replaceChildren");
+		const watcher = new MutationObserver(() => {});
+		watcher.observe(h.panel(), { subtree: true, childList: true, attributes: true, characterData: true });
+
+		await ex.render();
+
+		expect(watcher.takeRecords()).toHaveLength(0);
+		watcher.disconnect();
+		expect(replace).not.toHaveBeenCalled();
+		expect(drag().dragPayload).toBe(payload);
+		expect(drag().inboxDragRowEl).toBe(inboxRow);
+		expect(drag().bucketDragRowEl).toBe(bucketRow);
+		expect(inboxRow.isConnected).toBe(true);
+		expect(dwell).not.toHaveBeenCalled();
+		expect(drag().nativeDragActive).toBe(true);
+	});
+
+	it("the sort-refresh deferral during a drag is unchanged: a swapped render does not refresh, the first one after the drag does", async () => {
+		await startDrag();
+		(ex as unknown as { sortRefreshGate: { markDirty: () => void } }).sortRefreshGate.markDirty();
+		const seen: boolean[] = [];
+		ex.renderNodeList = async () => {
+			seen.push(ex.sortRefreshAllowedForThisRender);
+		};
+
+		h.state.units = fileUnits(3);
+		await ex.render(); // a real change: swapped in, the refresh still waits
+		await ex.render(); // identical: skipped, still waiting
+		expect(seen).toEqual([false, false]);
+
+		window.dispatchEvent(new Event("dragend"));
+		await vi.advanceTimersByTimeAsync(10);
+		expect(seen).toEqual([false, false, true]);
 	});
 });

@@ -100,7 +100,7 @@ describe("PR-1.S1 — G9/E3: restore before the first inbox draw", () => {
 		await render(h.explorer);
 		scrollTo(h, 1400);
 
-		// Each render empties the container and builds a fresh body before its first await, so the
+		// Each render builds a fresh body in a staging pane before its first await, so the
 		// later renders must take the target from the in-flight render, not from the new body's 0.
 		await Promise.all([render(h.explorer), render(h.explorer), render(h.explorer)]);
 
@@ -532,5 +532,90 @@ describe("PR-1.S1 — G11/E8: a dragged inbox row survives virtual redraws", () 
 
 		window.dispatchEvent(new Event("dragend"));
 		expect(row.isConnected).toBe(false);
+	});
+});
+
+describe("PR-3 (E4): scroll position and the drawn rows survive the atomic swap", () => {
+	/** Animation frames are queued, never run: the first frame after the swap must already hold the
+	 * right rows, so nothing here may depend on a redraw that waits for the next frame. */
+	function holdFrames(): void {
+		const saved = window.requestAnimationFrame;
+		window.requestAnimationFrame = () => 0;
+		cleanups.push(() => (window.requestAnimationFrame = saved));
+	}
+
+	const positions: [string, number][] = [
+		["top", 0],
+		["middle", 2500],
+		["end", 5000 - 10],
+	];
+	it.each(positions)("a changed render keeps scroll at the %s of a 5,000-row inbox", async (_name, row) => {
+		const units = fileUnits(5000);
+		const h = setup(units);
+		await render(h.explorer);
+		scrollTo(h, ROW * row);
+		const replace = vi.spyOn(h.panel(), "replaceChildren");
+		holdFrames();
+
+		const grown = fileUnits(5001);
+		h.setUnits(grown);
+		await render(h.explorer);
+
+		expect(replace).toHaveBeenCalledTimes(1);
+		expect(h.scrollBody().scrollTop).toBe(ROW * row);
+		expect(h.inboxRowKeys()).toContain(keyAt(grown, row));
+		expect(h.inboxRowKeys().length).toBeLessThanOrEqual(Math.ceil(280 / ROW) + OVER * 2 + 1);
+	});
+
+	it("a swap into a shrunken inbox clamps scrollTop and draws the rows for it before any frame", async () => {
+		const h = setup(fileUnits(2000));
+		await render(h.explorer);
+		scrollTo(h, ROW * 1500);
+		holdFrames();
+
+		const small = fileUnits(20);
+		h.setUnits(small);
+		await render(h.explorer);
+
+		expect(h.scrollBody().scrollTop).toBe(20 * ROW - 280);
+		expect(h.inboxRowKeys()).toContain(keyAt(small, 19));
+		expect(h.inboxRowKeys()).not.toContain(keyAt(fileUnits(2000), 1500));
+	});
+
+	it("the window is laid out while staged and again against the swapped-in pane, in the same task", async () => {
+		const units = fileUnits(2000);
+		const h = setup(units);
+		await render(h.explorer);
+		scrollTo(h, ROW * 500);
+		holdFrames();
+
+		// The live pane turns out taller than the staged one measured: it grows during the build.
+		const inner = h.explorer as unknown as { renderInboxSection: (...a: unknown[]) => Promise<void> };
+		const original = inner.renderInboxSection;
+		inner.renderInboxSection = async (...args: unknown[]) => {
+			await original.apply(h.explorer, args);
+			h.layout.viewportHeight = 560;
+		};
+		h.setUnits(fileUnits(2001));
+		await render(h.explorer);
+
+		// 560px of rows plus overscan are in the DOM straight after the swap, no frame needed.
+		expect(h.inboxRowKeys().length).toBeGreaterThanOrEqual(Math.ceil(560 / ROW));
+		expect(h.inboxRowKeys()).toContain(keyAt(units, 500 + 19));
+	});
+
+	it("a view switch still resets scroll to the top and a plain re-render keeps it", async () => {
+		const units = fileUnits(2000);
+		const h = setup(units);
+		await render(h.explorer);
+		scrollTo(h, ROW * 700);
+
+		h.setUnits(fileUnits(2001));
+		await render(h.explorer);
+		expect(h.scrollBody().scrollTop).toBe(ROW * 700);
+
+		h.setActiveView(otherView);
+		await render(h.explorer);
+		expect(h.scrollBody().scrollTop).toBe(0);
 	});
 });
