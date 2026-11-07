@@ -1290,6 +1290,27 @@ describe("Atlas #13 PR-1 — a moved note that is no longer a unit stays a norma
 		expect(nodeAt(b, "resp").children.map((n) => n.ref)).toEqual([{ kind: "file", path: "Other.md" }]);
 	});
 
+	it("a stale kind:file ref to an existing module interface note (Foo/Foo.md) is not a unit but renders as a normal row named 'Foo' and opens the note", async () => {
+		const IFACE = "Foo/Foo.md";
+		const b = build({ files: [IFACE], folders: ["Foo", "FDE Play"], view: actionableView([unitNode("iface", { kind: "file", path: IFACE })]) });
+		// Pins the AGENTS.md rule: a bare interface note is never a unit (the index and add_node refuse it)...
+		expect(REFS(b)).not.toContain(`file:${IFACE}`);
+		// ...but a ref that is already placed is present in the vault, so it is not shown as missing.
+		const { explorer, opened } = liveExplorerFor(b);
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde"), { explorer }))[0];
+		expect(textOf(row)).toBe("Foo");
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(row.textContent).not.toContain("(missing)");
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+		await flushPromises();
+		expect(opened).toEqual([{ path: IFACE, newTab: false }]);
+
+		// Once the note is really gone, it is missing like any other stale ref.
+		await b.app.vault.delete(b.app.vault.getAbstractFileByPath(IFACE)!);
+		const gone = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(gone.classList.contains("atlas-missing")).toBe(true);
+	});
+
 	it("GP7/T2: deleting the moved note turns the row greyed '(missing)' with a Remove button that removes only the node", async () => {
 		const b = await danScenario();
 		await moveIntoFolder(b);
