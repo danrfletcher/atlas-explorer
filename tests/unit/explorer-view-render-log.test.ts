@@ -349,6 +349,26 @@ describe("the changed flag", () => {
 		expect(log.entries()[5].changed).toBe(false);
 	});
 
+	it("a skipped render stays unchanged after the live pane was touched outside render() (open-note highlight)", async () => {
+		// The GP1 sequence: click into a note (active-leaf-change re-highlights the live rows without a
+		// render), type, autosave. The render that follows finds identical output and paints nothing.
+		let activeRows = 0;
+		(ex as unknown as { updateActiveHighlight: (root?: HTMLElement) => void }).updateActiveHighlight = (root?: HTMLElement) => {
+			const pane = root ?? h.panel();
+			pane.querySelectorAll(".atlas-row-unit").forEach((row, i) => row.classList.toggle("is-active", i < activeRows));
+		};
+		await ex.render();
+		const before = log.entries().length;
+
+		activeRows = 1;
+		(ex as unknown as { updateActiveHighlight: () => void }).updateActiveHighlight(); // outside any render
+		const pane = h.panel().innerHTML;
+		await ex.render();
+
+		expect(h.panel().innerHTML).toBe(pane); // nothing was repainted ...
+		expect(log.entries().slice(before)).toEqual([expect.objectContaining({ changed: false })]); // ... and the log says so
+	});
+
 	it("an unrelated change in the inbox set also counts as a change", async () => {
 		await ex.render();
 		expect(log.entries()[1].changed).toBe(false);

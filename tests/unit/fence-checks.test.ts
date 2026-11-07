@@ -525,3 +525,51 @@ describe("Atlas #16 F3 — the press hold adds no timer, interval or polling", (
 		expect(slice("private render(): Promise<void> {", "\n\t}\n")).not.toMatch(/setTimeout|setInterval|requestAnimationFrame/);
 	});
 });
+
+/** atlas-15 PR-2 F3: the staged render, the hidden-pane deferral and the notify gating add no polling,
+ * interval, self-scheduling timer or coalescing window. `queueRender`'s one `setTimeout(0)` is the only timer
+ * in the render path, and a hidden pane waits for a shown event instead of retrying. */
+describe("atlas-15 PR-2 F3 — the staged render and the notify gating add no timer, interval or polling", () => {
+	const stripComments = (src: string) =>
+		src
+			.split("\n")
+			.filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+			.join("\n");
+	const slice = (code: string, start: string, end: string) => {
+		const from = code.indexOf(start);
+		expect(from, `${start} not found`).toBeGreaterThanOrEqual(0);
+		const to = code.indexOf(end, from + start.length);
+		expect(to, `${end} not found after ${start}`).toBeGreaterThan(from);
+		return code.slice(from, to);
+	};
+	const TIMER = /\bsetInterval\s*\(|\bsetTimeout\s*\(|requestAnimationFrame\s*\(|\bsetImmediate\s*\(/;
+
+	it("the files this slice changed schedule nothing: no timer, interval or animation frame in the render log, views, unit index or API controller", () => {
+		for (const file of ["src/render-log.ts", "src/views.ts", "src/unit-index.ts", "src/api-source-controller.ts"]) {
+			expect(stripComments(read(file)), file).not.toMatch(TIMER);
+		}
+	});
+
+	it("explorer-view.ts has no setInterval, and the same six setTimeout calls it had before the staged render", () => {
+		const code = stripComments(read("src/explorer-view.ts"));
+		expect(code.match(/setInterval\s*\(/g) ?? []).toHaveLength(0);
+		expect(code.match(/\bsetTimeout\s*\(/g) ?? []).toHaveLength(6);
+	});
+
+	it("render(), the render body, the hidden-pane deferral and the staging compare contain no timer", () => {
+		const code = stripComments(read("src/explorer-view.ts"));
+		expect(slice(code, "private render(): Promise<void> {", "\n\t}\n")).not.toMatch(TIMER);
+		expect(slice(code, "private async renderNow(", "\n\t}\n")).not.toMatch(TIMER);
+		expect(slice(code, "function paneOutput(", "\n}\n")).not.toMatch(TIMER);
+	});
+
+	it("queueRender still holds the one setTimeout of the render path", () => {
+		const code = stripComments(read("src/explorer-view.ts"));
+		expect(slice(code, "private queueRender(): void {", "\n\t}\n").match(/setTimeout\s*\(/g)).toHaveLength(1);
+	});
+
+	it("the connection dot's hover tooltip is built from a mouseover listener, with no timer to keep it fresh", () => {
+		const code = stripComments(read("src/explorer-view.ts"));
+		expect(slice(code, "private renderConnectionDots(", "\n\t}\n")).not.toMatch(TIMER);
+	});
+});

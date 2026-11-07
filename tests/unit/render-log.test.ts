@@ -299,31 +299,30 @@ describe("observeRender", () => {
 		at: 1000,
 		t0: performance.now(),
 		isCurrent: () => true,
-		readOutput: () => "<div>a</div>",
-		lastOutput: { last: null as string | null },
+		painted: () => true as boolean | null,
 		...over,
 	});
 
-	it("logs the first render as changed and remembers its output", async () => {
-		const obs = observation();
-		await observeRender(log, Promise.resolve(), obs);
+	it("logs a render that put a new pane on screen as changed", async () => {
+		await observeRender(log, Promise.resolve(), observation());
 		expect(log.entries()).toEqual([{ kind: "click", at: 1000, durationMs: expect.any(Number), changed: true }]);
-		expect(obs.lastOutput.last).toBe("<div>a</div>");
 	});
 
-	it("logs a repeat render with identical output as unchanged", async () => {
-		const lastOutput = { last: null as string | null };
-		await observeRender(log, Promise.resolve(), observation({ lastOutput }));
-		await observeRender(log, Promise.resolve(), observation({ lastOutput }));
-		expect(log.entries().map((e) => e.changed)).toEqual([true, false]);
+	it("logs a render that left the live pane alone as unchanged, whatever else touched the pane since", async () => {
+		// The verdict is the render's own: nothing about the live pane's current markup is read.
+		await observeRender(log, Promise.resolve(), observation({ painted: () => false }));
+		expect(log.entries().map((e) => e.changed)).toEqual([false]);
 	});
 
-	it("logs a superseded render once, as unchanged, without touching the remembered output", async () => {
-		const lastOutput = { last: "<div>old</div>" as string | null };
-		await observeRender(log, Promise.resolve(), observation({ lastOutput, isCurrent: () => false, readOutput: () => "<div>new</div>" }));
+	it("logs a superseded render once, as unchanged, even if it reports a paint", async () => {
+		await observeRender(log, Promise.resolve(), observation({ isCurrent: () => false, painted: () => true }));
 		expect(log.entries()).toHaveLength(1);
 		expect(log.entries()[0].changed).toBe(false);
-		expect(lastOutput.last).toBe("<div>old</div>");
+	});
+
+	it("logs a render with no verdict (it threw before deciding) as unchanged", async () => {
+		await observeRender(log, Promise.resolve(), observation({ painted: () => null }));
+		expect(log.entries()[0].changed).toBe(false);
 	});
 
 	it("logs a throwing render once and rethrows that same error", async () => {
@@ -333,13 +332,13 @@ describe("observeRender", () => {
 	});
 
 	it("a failure while logging never replaces the render's result or error", async () => {
-		const readOutput = () => {
-			throw new Error("serialisation failed");
+		const painted = () => {
+			throw new Error("verdict unavailable");
 		};
-		await expect(observeRender(log, Promise.resolve(), observation({ readOutput }))).resolves.toBeUndefined();
+		await expect(observeRender(log, Promise.resolve(), observation({ painted }))).resolves.toBeUndefined();
 
 		const boom = new Error("render failed");
-		await expect(observeRender(log, Promise.reject(boom), observation({ readOutput }))).rejects.toBe(boom);
+		await expect(observeRender(log, Promise.reject(boom), observation({ painted }))).rejects.toBe(boom);
 	});
 });
 

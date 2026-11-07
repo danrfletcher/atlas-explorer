@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { openRepaintRig } from "../integration/repaint-rig";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { App } from "obsidian";
@@ -213,6 +214,55 @@ describe("highlightOpenNote persistence (PR-1.F2, F3)", () => {
 		// addedItems, defaulted here since the fixture predates them) — PR-1.F2 adds none of its own.
 		const topLevelKeys = Object.keys(persisted).sort();
 		expect(topLevelKeys).toEqual(
+			["settings", "manualPromotions", "views", "activeViewId", "expandedModuleFolders", "statusSets", "colorPalette", "dismissedByView", "dismissedGlobal", "addedItems"].sort()
+		);
+	});
+
+	it("atlas-15 PR-2 F1: after the explorer has rendered, skipped and re-rendered, the saved views, promotions, status sets and palette are byte-identical to the v0.2.1 fixture", async () => {
+		// The staged render and the notify gating read the stored data and must never write to it: load the
+		// fixture, drive real renders over it (first paint, then identical ones that are skipped), persist, compare.
+		const fixture = JSON.parse(readFileSync(join(__dirname, "../fixtures/data-v0.2.1.json"), "utf8"));
+		const plugin = makePlugin();
+		(plugin as unknown as { loadFromData(d: unknown): void }).loadFromData(fixture);
+		const loaded = plugin as unknown as {
+			settings: AtlasSettings;
+			manualPromotions: UnitRef[];
+			dismissedByView: Record<string, UnitRef[]>;
+			dismissedGlobal: UnitRef[];
+			addedItems: AddedItem[];
+		};
+		const app = new App();
+		const saved: Record<string, unknown>[] = [];
+		const viewsManager = new ViewsManager(app, fixture.views ?? [], fixture.activeViewId ?? "", () => {});
+		const unitIndex = new UnitIndex(app, loaded.settings, loaded.manualPromotions, loaded.dismissedByView, loaded.dismissedGlobal, loaded.addedItems);
+		Object.assign(plugin, {
+			unitIndex,
+			viewsManager,
+			statusesManager: new StatusesManager(fixture.statusSets ?? [], fixture.colorPalette ?? [], () => {}),
+			saveData: async (data: Record<string, unknown>) => {
+				saved.push(data);
+			},
+		});
+
+		vi.useFakeTimers();
+		const rig = await openRepaintRig({ unitIndex, viewsManager });
+		try {
+			unitIndex.onMetadataResolved(); // notifies; the render it queues finds identical output
+			viewsManager.onMetadataResolved();
+			await rig.settle();
+			unitIndex.onMetadataResolved();
+			await rig.settle();
+		} finally {
+			rig.close();
+			vi.useRealTimers();
+		}
+		await (plugin as unknown as { persistNow(): Promise<void> }).persistNow();
+
+		const persisted = saved[0];
+		for (const key of ["views", "manualPromotions", "statusSets", "colorPalette", "activeViewId"] as const) {
+			expect(JSON.stringify(persisted[key]), key).toBe(JSON.stringify(fixture[key] ?? (key === "activeViewId" ? "" : [])));
+		}
+		expect(Object.keys(persisted).sort()).toEqual(
 			["settings", "manualPromotions", "views", "activeViewId", "expandedModuleFolders", "statusSets", "colorPalette", "dismissedByView", "dismissedGlobal", "addedItems"].sort()
 		);
 	});

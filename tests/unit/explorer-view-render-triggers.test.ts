@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceLeaf } from "obsidian";
 import { makeSectionHarness, SectionHarness } from "../explorer-header-fixtures";
+import { AtlasExplorerView } from "../../src/explorer-view";
+import { FakeResizeObserver } from "./explorer-view-scroll-helpers";
+import { RenderLog } from "../../src/render-log";
 import { Notice } from "obsidian";
 import { noticeIfAddedRowHidden } from "../../src/add-under-hidden-notice";
 import { bucketRows, drawBucketRows, flush, openExplorer, pointer, PressEnv } from "./explorer-view-press-helpers";
@@ -541,5 +544,167 @@ describe("Atlas #16 (E7) — the add-under flows still finish when their render 
 		await vi.advanceTimersByTimeAsync(50);
 		await flow;
 		expect(Notice.instances.some((n) => n.message.includes("hidden by the current filter"))).toBe(true);
+	});
+});
+
+/** PR-2 (S2/S3): the render triggers that used to flash the list now end in no change on screen when the
+ * output is identical, and a pane that is not shown waits to be shown. Real `onOpen` listeners, real
+ * `render()`; the harness records what the pane's mutation observer sees. */
+describe("PR-2 (S3) — leaf activation and a metadata resolve do not repaint an unchanged list", () => {
+	type Plugin = { unitIndex: { onChange: ReturnType<typeof vi.fn> }; renderLog?: RenderLog };
+	const plugin = () => (h.explorer as unknown as { plugin: Plugin }).plugin;
+	const fireUnitIndexChange = () => (plugin().unitIndex.onChange.mock.calls[0][0] as () => void)();
+
+	function watchPane(): { stop: () => MutationRecord[] } {
+		const records: MutationRecord[] = [];
+		const observer = new MutationObserver((batch) => records.push(...batch));
+		observer.observe(h.panel(), { subtree: true, childList: true, attributes: true, characterData: true });
+		return {
+			stop: () => {
+				records.push(...observer.takeRecords());
+				observer.disconnect();
+				return records;
+			},
+		};
+	}
+
+	it("a leaf activation plus a resolve in one burst gives one render and no mutation when the output is identical", async () => {
+		await open();
+		const render = vi.spyOn(ex, "render");
+		const watcher = watchPane();
+
+		fireLeafChange({}); // the editor was the active pane
+		fireLeafChange(ex.leaf); // focus regained: source refresh + the render it promised
+		fireUnitIndexChange(); // the metadata resolve / index change in the same burst
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(render).toHaveBeenCalledTimes(1); // coalesced by queueRender
+		expect((ex as unknown as { lastRenderPainted: boolean }).lastRenderPainted).toBe(false);
+		expect(watcher.stop()).toHaveLength(0);
+	});
+
+	it("the same burst gives exactly one repaint when a visible row changed", async () => {
+		await open();
+		const watcher = watchPane();
+		h.state.labels.set(h.state.units[0].path, "Renamed in the burst");
+
+		fireLeafChange({});
+		fireLeafChange(ex.leaf);
+		fireUnitIndexChange();
+		await vi.advanceTimersByTimeAsync(50);
+
+		const records = watcher.stop();
+		// One replacement of the pane's children: a single `childList` batch on the pane itself.
+		expect(records.filter((r) => r.target === h.panel() && r.type === "childList")).toHaveLength(2); // removal + insertion of one swap
+		expect(h.panel().textContent).toContain("Renamed in the burst");
+	});
+});
+
+describe("PR-2 (S3/E6) — a pane that is not shown records the request and renders when shown", () => {
+	type Plugin = { unitIndex: { onChange: ReturnType<typeof vi.fn> }; renderLog?: RenderLog };
+	const plugin = () => (h.explorer as unknown as { plugin: Plugin }).plugin;
+	const fireUnitIndexChange = () => (plugin().unitIndex.onChange.mock.calls[0][0] as () => void)();
+	const adapter = { read: async () => "[]", write: async () => {}, exists: async () => false };
+
+	beforeEach(() => {
+		plugin().renderLog = new RenderLog(adapter, "render-log.json");
+	});
+
+	it("defers while hidden, logs the request with its trigger kind, and paints once when shown", async () => {
+		await open();
+		const render = vi.spyOn(ex as unknown as { renderNodeList: () => Promise<void> }, "renderNodeList");
+		const logged = plugin().renderLog!;
+		const before = logged.entries().length;
+
+		h.setShown(false);
+		h.state.labels.set(h.state.units[0].path, "Changed while hidden");
+		fireUnitIndexChange();
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(render).not.toHaveBeenCalled(); // nothing was built
+		expect(h.panel().textContent).not.toContain("Changed while hidden");
+		expect(logged.entries().slice(before)).toEqual([expect.objectContaining({ kind: "unit-index", changed: false, durationMs: 0 })]);
+
+		// A second request while hidden is still just recorded, and only one wait is armed.
+		fireUnitIndexChange();
+		await vi.advanceTimersByTimeAsync(50);
+		expect(render).not.toHaveBeenCalled();
+		expect(FakeResizeObserver.instances.filter((o) => o.observed.has(h.host))).toHaveLength(1);
+
+		h.setShown(true);
+		h.fireResize();
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(h.panel().textContent).toContain("Changed while hidden");
+		const after = logged.entries().slice(before);
+		expect(after[after.length - 1]).toEqual(expect.objectContaining({ kind: "unit-index", changed: true }));
+		expect(FakeResizeObserver.instances.filter((o) => o.observed.has(h.host))).toHaveLength(0); // the wait is over
+
+		// Nothing else is armed: showing again renders nothing new.
+		const count = logged.entries().length;
+		h.fireResize();
+		await vi.advanceTimersByTimeAsync(50);
+		expect(logged.entries()).toHaveLength(count);
+	});
+
+	it("a resize while still hidden does not render", async () => {
+		await open();
+		h.setShown(false);
+		h.state.labels.set(h.state.units[0].path, "Still hidden");
+		fireUnitIndexChange();
+		await vi.advanceTimersByTimeAsync(50);
+
+		h.fireResize();
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(h.panel().textContent).not.toContain("Still hidden");
+	});
+
+	it("closing a view that is waiting to be shown disconnects the wait", async () => {
+		await open();
+		h.setShown(false);
+		fireUnitIndexChange();
+		await vi.advanceTimersByTimeAsync(50);
+		const watcher = FakeResizeObserver.instances.find((o) => o.observed.has(h.host))!;
+
+		await (ex as unknown as { onClose: () => Promise<void> }).onClose();
+
+		expect(watcher.disconnect).toHaveBeenCalled();
+	});
+
+	it("two Atlas leaves, one hidden: a change repaints the visible one now and the hidden one when shown", async () => {
+		await open();
+		const second = new AtlasExplorerView({} as WorkspaceLeaf, (h.explorer as unknown as { plugin: never }).plugin);
+		const secondHost = document.createElement("div");
+		secondHost.append(document.createElement("div"), document.createElement("div"));
+		document.body.appendChild(secondHost);
+		Object.assign(second, {
+			containerEl: secondHost,
+			renderToolbar: (container: HTMLElement) => container.createDiv({ cls: "atlas-toolbar" }),
+			renderNodeList: async () => {},
+			resolveRef: async (ref: { path: string }) => ({ text: h.state.labels.get(ref.path) ?? ref.path, icon: "file" }),
+			matchesFilter: () => true,
+			setPlacementTooltip: vi.fn(),
+			updateActiveHighlight: vi.fn(),
+			syncRefreshTimers: vi.fn(),
+			refreshApiSourcesOnViewLoad: vi.fn(),
+		});
+		const secondPanel = () => secondHost.children[1] as HTMLElement;
+		await (second as unknown as { render: () => Promise<void> }).render();
+		secondHost.setAttribute("data-test-hidden", "");
+
+		h.state.labels.set(h.state.units[0].path, "Seen by both");
+		fireUnitIndexChange(); // the visible leaf's own listener (only it called onOpen in this harness)
+		await (second as unknown as { render: () => Promise<void> }).render(); // what the hidden leaf's own listener would ask for
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(h.panel().textContent).toContain("Seen by both"); // the visible one repainted now
+		expect(secondPanel().textContent).not.toContain("Seen by both"); // the hidden one did not
+
+		secondHost.removeAttribute("data-test-hidden");
+		for (const observer of FakeResizeObserver.instances) observer.fire();
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(secondPanel().textContent).toContain("Seen by both");
 	});
 });

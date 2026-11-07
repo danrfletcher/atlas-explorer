@@ -167,29 +167,26 @@ export interface RenderObservation {
 	t0: number;
 	/** False once a newer render has superseded this one. */
 	isCurrent(): boolean;
-	/** The pane's output as it stands now. */
-	readOutput(): string;
-	/** The view's remembered output of its last finished render; updated in place. */
-	lastOutput: { last: string | null };
+	/** Whether this render put a new pane on screen (true) or found its output identical and left the
+	 * live pane untouched (false); null when it did neither (superseded, or it threw). Read once, after
+	 * the render settled. This is the render's own verdict, not a diff of the live pane against an
+	 * earlier snapshot: the live pane also changes outside `render()` (the open-note highlight, the
+	 * virtualised inbox redrawing on scroll), and that must not make a skipped render look changed. */
+	painted(): boolean | null;
 }
 
 /** Records exactly one log entry for `rendering` once it settles — finished, superseded by a newer
  * render, or thrown — and returns a promise that settles the same way `rendering` did. The log is
  * observation only: a failure while logging is swallowed and never replaces the render's result or
- * error. A superseded render logs `changed: false` and leaves the remembered output alone, since the
- * pane then belongs to the newer render. */
+ * error. A superseded render, or one that threw,
+ * logs `changed: false`: it has no pane of its own to report. */
 export async function observeRender(log: RenderLog, rendering: Promise<void>, obs: RenderObservation): Promise<void> {
 	try {
 		await rendering;
 	} finally {
 		try {
 			const durationMs = Math.max(0, Math.round(performance.now() - obs.t0));
-			let changed = false;
-			if (obs.isCurrent()) {
-				const output = obs.readOutput();
-				changed = output !== obs.lastOutput.last;
-				obs.lastOutput.last = output;
-			}
+			const changed = obs.isCurrent() && obs.painted() === true;
 			log.record({ kind: obs.kind, at: obs.at, durationMs, changed });
 		} catch {
 			// Logging must never turn a render result or error into a different one.

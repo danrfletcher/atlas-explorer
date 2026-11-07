@@ -458,7 +458,10 @@ describe("PR-1.S1 — G11/E8: a dragged inbox row survives virtual redraws", () 
 
 		// A render while the drag is still active (an index refresh, say) tears the source row out
 		// from under the drag; the window `dragend` backstop may never fire for it, so render() must
-		// clear the stale drag state itself instead of leaving it to dangle.
+		// clear the stale drag state itself instead of leaving it to dangle. (PR-2: a render whose output
+		// matches the pane on screen is skipped and tears nothing down — see explorer-view-render-skip —
+		// so the units change here to make this a render that really replaces the pane.)
+		h.setUnits(fileUnits(2001));
 		await render(h.explorer);
 		expect(explorer.dragPayload).toBeNull();
 	});
@@ -496,6 +499,8 @@ describe("PR-1.S1 — G11/E8: a dragged inbox row survives virtual redraws", () 
 		const dwell = vi.fn();
 		explorer.cancelActiveDwell = dwell;
 
+		// PR-2: a changed unit set, so the render replaces the pane (an identical one is skipped).
+		h.setUnits(fileUnits(2001));
 		await render(h.explorer);
 		expect(explorer.dragPayload).toBeNull();
 		expect(explorer.bucketDragRowEl).toBeNull();

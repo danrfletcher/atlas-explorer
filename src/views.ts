@@ -586,6 +586,9 @@ export class ViewsManager {
 	 * future direct mutation of `node.folderSource` that skips both would leave the cache stale. */
 	private folderSourceOwnersVersion = 0;
 	private folderSourceOwnersCache: { viewId: string; version: number; owners: Map<string, FolderSourceConfig> } | null = null;
+	/** PR-2 (S3): per Outside-Vault source node, whether its path resolved at the last refresh. A flip
+	 * (drive unplugged or reconnected) is the one change `refreshFolderSource` notifies for without a save. */
+	private outsideConnection = new Map<string, boolean>();
 
 	constructor(private app: App, initialViews: View[], initialActiveViewId: string, private persist: () => void) {
 		sanitizeViewsApiFields(initialViews);
@@ -1647,16 +1650,27 @@ export class ViewsManager {
 			outsidePath
 		);
 		this.sweepFolderSourceDeletedPlaceholders(found.node);
+		// PR-1.S1 R1 -> PR-2 (S3): an Outside-Vault drive being unplugged or reconnected changes what the
+		// explorer shows without changing any stored data, so a flip in whether the path resolves counts
+		// as a change. A refresh that finds the same contents and the same connection state is not one.
+		const resolvedNow = found.node.folderSource.location === "outside" && outsidePath ? !!resolveOutsidePath(outsidePath) : null;
+		let connectionChanged = false;
+		if (resolvedNow !== null) {
+			const was = this.outsideConnection.get(ownerId);
+			// First sight of an unresolved path counts: the pane has not been told it is unplugged yet.
+			connectionChanged = was === undefined ? !resolvedNow : was !== resolvedNow;
+			this.outsideConnection.set(ownerId, resolvedNow);
+		}
 		// PR-1.F2 (G6): unflag this owner's rows that match the rules again before deciding whether to save.
 		const unflagged = this.clearMatchedHiddenAtSave([view], ownerId);
 		// PR-1 (F2): a refresh that finds nothing new writes nothing — every view load and every live
 		// folder event runs through here, so an unchanged source must not cost a `data.json` write.
-		// PR-1 (R1): but it still re-renders, because an unchanged Outside-Vault source can change what
-		// the explorer shows (unplugged or reconnected drive) without any stored data changing.
+		// PR-2 (S3): and it does not notify either, unless the Outside-Vault connection state flipped
+		// (above): the explorer repaints only when something it shows could have changed.
 		const changed = unflagged || JSON.stringify(view.root) !== before;
 		if (opts?.deferSave) return changed;
 		if (changed) this.save();
-		else this.notifyChange();
+		else if (connectionChanged) this.notifyChange();
 		return changed;
 	}
 

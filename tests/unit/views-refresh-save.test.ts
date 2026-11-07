@@ -42,8 +42,8 @@ describe("refreshFolderSource saves only on a real change (F2)", () => {
 		vm.refreshFolderSource("v1", "owner", dir);
 		vm.refreshFolderSource("v1", "owner", dir);
 		expect(persist).not.toHaveBeenCalled();
-		// Still re-renders on every refresh, so an unchanged source is never stale on screen.
-		expect(onChange).toHaveBeenCalledTimes(2);
+		// PR-2 (S3): an unchanged refresh tells nobody, so it cannot cause a repaint.
+		expect(onChange).not.toHaveBeenCalled();
 	});
 
 	it("a new file saves once", () => {
