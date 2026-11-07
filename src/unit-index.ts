@@ -173,8 +173,21 @@ export class UnitIndex {
 				next.set(`block:${ref.path}#${ref.subpath}`, { type: "promoted-block", path: ref.path, subpath: ref.subpath });
 			}
 		}
+		// PR-2 (S3): the same refs again change nothing a listener could show, so nobody is told. A ref
+		// whose unit changed (e.g. its top-level folder) or a ref added or dropped is a change.
+		const prev = this.folderSourceUnits;
+		let same = prev.size === next.size;
+		if (same) {
+			for (const [key, unit] of next) {
+				const old = prev.get(key);
+				if (!old || JSON.stringify(old) !== JSON.stringify(unit)) {
+					same = false;
+					break;
+				}
+			}
+		}
 		this.folderSourceUnits = next;
-		this.notifyChange();
+		if (!same) this.notifyChange();
 	}
 
 	/** Keeps the unit at `path` out of `getUnits` until the returned release is called (once; extra

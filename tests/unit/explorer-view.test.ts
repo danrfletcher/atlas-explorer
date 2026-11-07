@@ -340,6 +340,74 @@ describe("PR-2.F2 R2 — render()/awaitRenderSettled track the truly latest rend
 	});
 });
 
+// Atlas #16 (E7): a render held at the entry because a press is under way counts as pending, so a
+// flow awaiting the render to settle waits for the press to end instead of hanging or giving up.
+describe("Atlas #16 E7 — a held render keeps awaitRenderSettled() pending until the press ends", () => {
+	type FakeThis = Record<string, unknown> & { pointerGestureActive: boolean };
+
+	function pressedView(): { fakeThis: FakeThis; renderNow: ReturnType<typeof vi.fn> } {
+		const proto = AtlasExplorerView.prototype as unknown as Record<string, unknown>;
+		const renderNow = vi.fn(() => Promise.resolve());
+		const fakeThis: FakeThis = {
+			pointerGestureActive: true,
+			renderAfterPointerGesture: false,
+			contextMenuGesture: false,
+			closed: false,
+			lastRenderedViewId: "v1",
+			heldRender: null,
+			latestRenderPromise: null,
+			renderQueued: false,
+			renderNow,
+		};
+		for (const name of ["render", "queueRender", "holdRender", "endPointerGesture", "awaitRenderSettled"]) fakeThis[name] = proto[name];
+		return { fakeThis, renderNow };
+	}
+
+	it("a direct render() during the press does not run renderNow; awaitRenderSettled() stays pending; both resolve after release", async () => {
+		const { fakeThis, renderNow } = pressedView();
+		const pending = (fakeThis.render as () => Promise<void>).call(fakeThis);
+		let settled = false;
+		void (fakeThis.awaitRenderSettled as () => Promise<void>).call(fakeThis).then(() => (settled = true));
+		let rendered = false;
+		void pending.then(() => (rendered = true));
+
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(renderNow).not.toHaveBeenCalled();
+		expect(settled).toBe(false);
+		expect(rendered).toBe(false);
+
+		(fakeThis.endPointerGesture as () => void).call(fakeThis); // pointerup
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(renderNow).toHaveBeenCalledTimes(1);
+		expect(settled).toBe(true);
+		expect(rendered).toBe(true);
+	});
+
+	it("a queueRender() during the press is pending too, and a render requested after release is not held", async () => {
+		const { fakeThis, renderNow } = pressedView();
+		(fakeThis.queueRender as () => void).call(fakeThis);
+		let settled = false;
+		void (fakeThis.awaitRenderSettled as () => Promise<void>).call(fakeThis).then(() => (settled = true));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(settled).toBe(false);
+
+		(fakeThis.endPointerGesture as () => void).call(fakeThis);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(settled).toBe(true);
+		expect(renderNow).toHaveBeenCalledTimes(1);
+
+		await (fakeThis.render as () => Promise<void>).call(fakeThis); // press over: runs straight away
+		expect(renderNow).toHaveBeenCalledTimes(2);
+	});
+
+	it("no press, nothing queued: awaitRenderSettled() resolves at once", async () => {
+		const { fakeThis, renderNow } = pressedView();
+		fakeThis.pointerGestureActive = false;
+		await (fakeThis.awaitRenderSettled as () => Promise<void>).call(fakeThis);
+		expect(renderNow).not.toHaveBeenCalled();
+	});
+});
+
 // PR-2.F2 R2: `startAddUnderFolder` itself is mocked (see the top of this file) so this test can
 // stage the exact overlapping-render race against the real `addUnderFolderDeps()`, `render()`,
 // `awaitRenderSettled()` and `queueRender()` — only `ViewsManager.addMetaFolder`/`setNodeCollapsed`

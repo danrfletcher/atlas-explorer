@@ -50,7 +50,7 @@ Every folder is a unit: a **module** whose **interface** is a note saying what t
 
 ## Missing and renamed things
 
-When a file or folder is renamed or moved in Obsidian, Atlas rewrites every reference to it (in every view, in manual promotions, in fold state and in dismissed or added state). The row keeps its identity and position. When something is deleted, rows are never removed for you: they stay as a greyed **(missing)** row with a remove button.
+When a file or folder is renamed or moved in Obsidian, Atlas rewrites every reference to it (in every view, in manual promotions, in fold state and in dismissed or added state). The row keeps its identity and position. A placed file or folder also stays a normal row for as long as it exists in the vault, even if the move leaves it no longer an Atlas unit (for example a note moved into a module folder that nothing links to); it never turns *(missing)* just because it moved. When something is deleted, rows are never removed for you: they stay as a greyed **(missing)** row with a remove button.
 
 ## When Atlas touches your files
 

@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import type { App, TAbstractFile, TFile } from "obsidian";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { App, TAbstractFile, TFile, WorkspaceLeaf } from "obsidian";
 import { Menu, Notice } from "obsidian";
 import { App as MockApp } from "../mocks/obsidian";
 import { ViewsManager } from "../../src/views";
@@ -9,6 +9,8 @@ import { AtlasSettingTab, DEFAULT_SETTINGS, AtlasSettings } from "../../src/sett
 import { ATLAS_VIEW_TYPE, AtlasExplorerView, candidateFilesForAdd } from "../../src/explorer-view";
 import AtlasPlugin from "../../src/main";
 import { UnitIndex } from "../../src/unit-index";
+import { makeSectionHarness, SectionHarness } from "../explorer-header-fixtures";
+import { bucketRows, drawBucketRows, flush, openExplorer, pointer, PressEnv, PressInternals } from "../unit/explorer-view-press-helpers";
 import { callRenderApiItemRow, callRenderNodeList, makeFakeExplorer, makeStatusesManager, proto } from "../unit/explorer-view-sort-truncate-helpers";
 
 // R1 (PR-1.F2 review): Obsidian's `Setting` is replaced with a recorder so the "Highlight the open
@@ -1288,6 +1290,27 @@ describe("Atlas #13 PR-1 — a moved note that is no longer a unit stays a norma
 		expect(nodeAt(b, "resp").children.map((n) => n.ref)).toEqual([{ kind: "file", path: "Other.md" }]);
 	});
 
+	it("a stale kind:file ref to an existing module interface note (Foo/Foo.md) is not a unit but renders as a normal row named 'Foo' and opens the note", async () => {
+		const IFACE = "Foo/Foo.md";
+		const b = build({ files: [IFACE], folders: ["Foo", "FDE Play"], view: actionableView([unitNode("iface", { kind: "file", path: IFACE })]) });
+		// Pins the AGENTS.md rule: a bare interface note is never a unit (the index and add_node refuse it)...
+		expect(REFS(b)).not.toContain(`file:${IFACE}`);
+		// ...but a ref that is already placed is present in the vault, so it is not shown as missing.
+		const { explorer, opened } = liveExplorerFor(b);
+		const row = rowsOf(await renderNode(b, nodeAt(b, "fde"), { explorer }))[0];
+		expect(textOf(row)).toBe("Foo");
+		expect(row.classList.contains("atlas-missing")).toBe(false);
+		expect(row.textContent).not.toContain("(missing)");
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+		await flushPromises();
+		expect(opened).toEqual([{ path: IFACE, newTab: false }]);
+
+		// Once the note is really gone, it is missing like any other stale ref.
+		await b.app.vault.delete(b.app.vault.getAbstractFileByPath(IFACE)!);
+		const gone = rowsOf(await renderNode(b, nodeAt(b, "fde")))[0];
+		expect(gone.classList.contains("atlas-missing")).toBe(true);
+	});
+
 	it("GP7/T2: deleting the moved note turns the row greyed '(missing)' with a Remove button that removes only the node", async () => {
 		const b = await danScenario();
 		await moveIntoFolder(b);
@@ -1418,5 +1441,196 @@ describe("Atlas #13 PR-1 — a moved note that is no longer a unit stays a norma
 		expect(row.classList.contains("atlas-missing")).toBe(false);
 		expect(resolveRef).not.toHaveBeenCalled();
 		expect(lookup.mock.calls.map((c) => c[0])).not.toContain(abs);
+	});
+});
+
+/** Atlas #16 (E9): with two Atlas leaves open, each view has its own `onOpen` listeners (the hidden
+ * one included). The real `refreshExplorerViews` finds both through `getLeavesOfType`; a press inside
+ * either pane holds both views' renders, and ending it releases both. */
+describe("Atlas #16 — E9: a press in either of two Atlas leaves holds both views", () => {
+	let h: SectionHarness;
+	let first: PressEnv;
+	let second: PressInternals;
+	let secondRenderNow: ReturnType<typeof vi.fn>;
+	let removeSecond: (() => void)[];
+	let secondHost: HTMLElement;
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		h = makeSectionHarness({ bucketRows: 1, inboxRows: 1 });
+		first = await openExplorer(h);
+		drawBucketRows(first.ex, () => 1);
+
+		// The second (hidden) leaf's view: same plugin, its own container, the same stubbed row content.
+		const firstEx = first.ex as unknown as Record<string, unknown>;
+		const view = new AtlasExplorerView({} as WorkspaceLeaf, firstEx.plugin as never);
+		secondHost = document.body.appendChild(document.createElement("div"));
+		secondHost.appendChild(document.createElement("div"));
+		secondHost.appendChild(document.createElement("div"));
+		(view as unknown as { containerEl: HTMLElement }).containerEl = secondHost;
+		for (const key of ["renderToolbar", "renderNodeList", "resolveRef", "matchesFilter", "setPlacementTooltip", "updateActiveHighlight", "syncRefreshTimers", "refreshApiSourcesOnViewLoad"]) {
+			(view as unknown as Record<string, unknown>)[key] = firstEx[key];
+		}
+		second = view as unknown as PressInternals;
+		removeSecond = [];
+		second.leaf = {} as WorkspaceLeaf;
+		second.registerEvent = vi.fn();
+		second.registerDomEvent = (el, type, cb, opts) => {
+			el.addEventListener(type, cb, opts);
+			removeSecond.push(() => el.removeEventListener(type, cb, opts));
+		};
+		await second.onOpen();
+		secondRenderNow = vi.spyOn(second, "renderNow") as unknown as ReturnType<typeof vi.fn>;
+		first.renderNow.mockClear();
+		secondRenderNow.mockClear();
+	});
+
+	afterEach(() => {
+		first.teardown();
+		removeSecond.forEach((remove) => remove());
+		h.teardown();
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	/** The plugin's real `refreshExplorerViews`, looking both views up through `getLeavesOfType`. */
+	function refreshBoth(): void {
+		const plugin = Object.create(AtlasPlugin.prototype) as AtlasPlugin;
+		Object.assign(plugin, {
+			app: {
+				workspace: {
+					getLeavesOfType: (type: string) =>
+						type === ATLAS_VIEW_TYPE ? [{ view: first.ex }, { view: second }] : [],
+				},
+			},
+		});
+		// `instanceof AtlasExplorerView` holds: both are real instances.
+		plugin.refreshExplorerViews();
+	}
+
+	const presses: [string, () => HTMLElement][] = [
+		["the visible leaf", () => bucketRows()[0]],
+		["the other leaf", () => secondHost.children[1] as HTMLElement],
+	];
+	for (const [name, target] of presses) {
+		it(`a press in ${name} holds both views, and releasing it renders each once`, async () => {
+			const node = target();
+			pointer("pointerdown", node, { buttons: 1 });
+			refreshBoth();
+			await vi.advanceTimersByTimeAsync(50);
+			expect(first.renderNow).not.toHaveBeenCalled();
+			expect(secondRenderNow).not.toHaveBeenCalled();
+
+			pointer("pointerup", node);
+			await vi.advanceTimersByTimeAsync(50);
+			expect(first.renderNow).toHaveBeenCalledTimes(1);
+			expect(secondRenderNow).toHaveBeenCalledTimes(1);
+		});
+	}
+
+	it("without a press both views render as before", async () => {
+		refreshBoth();
+		await vi.advanceTimersByTimeAsync(50);
+		expect(first.renderNow).toHaveBeenCalledTimes(1);
+		expect(secondRenderNow).toHaveBeenCalledTimes(1);
+	});
+});
+
+// --- Atlas #15 PR-3 (GP4): a click on an inbox row repaints the list once ----------------------------
+describe("Atlas #15 PR-3 (GP4) — clicking an inbox row produces one swap, and the focused row is restored", () => {
+	let env: PressEnv;
+	let hh: SectionHarness;
+	const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		// jsdom has no `CSS` global; the focus restore builds its selector with `CSS.escape`.
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		hh = makeSectionHarness({ bucketRows: 1, inboxRows: 40 });
+		env = await openExplorer(hh);
+		env.ex.openRef = vi.fn(async () => {});
+		await env.ex.render();
+	});
+
+	afterEach(() => {
+		env.teardown();
+		hh.teardown();
+		(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it("the click's selection render is exactly one mutation batch, even with a leaf activation in the same burst", async () => {
+		const row = document.querySelector<HTMLElement>(".atlas-inbox .atlas-row-unit")!;
+		const key = row.dataset.selectKey!;
+		const batches: MutationRecord[][] = [];
+		const observer = new MutationObserver((records) => batches.push(records));
+		observer.observe(hh.panel(), { subtree: true, childList: true, attributes: true, characterData: true });
+		const replace = vi.spyOn(hh.panel(), "replaceChildren");
+
+		env.fireLeafChange({}); // the editor was active
+		env.fireLeafChange(env.ex.leaf); // the click activates the Atlas leaf (PR-2 work)
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		await flush(env);
+		observer.disconnect();
+
+		expect(env.ex.openRef).toHaveBeenCalledTimes(1);
+		expect(batches).toHaveLength(1);
+		expect(replace).toHaveBeenCalledTimes(1);
+		expect(batches[0].filter((r) => r.target === hh.panel() && r.type === "childList")).toHaveLength(1);
+		const selected = document.querySelector<HTMLElement>(`.atlas-inbox [data-select-key="${key}"]`)!;
+		expect(selected.classList.contains("is-selected")).toBe(true);
+	});
+
+	it("restores focus to the clicked row's replacement with preventScroll", async () => {
+		const row = document.querySelector<HTMLElement>(".atlas-inbox .atlas-row-unit")!;
+		const key = row.dataset.selectKey!;
+		row.focus();
+		expect(document.activeElement).toBe(row);
+		const focusSpy = vi.spyOn(HTMLElement.prototype, "focus");
+
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		await flush(env);
+
+		const replacement = document.querySelector<HTMLElement>(`.atlas-inbox [data-select-key="${key}"]`)!;
+		expect(replacement).not.toBe(row);
+		expect(row.isConnected).toBe(false);
+		expect(document.activeElement).toBe(replacement);
+		expect(focusSpy.mock.contexts).toContain(replacement);
+		const call = focusSpy.mock.calls[focusSpy.mock.contexts.indexOf(replacement)];
+		expect(call[0]).toEqual({ preventScroll: true });
+	});
+
+	it("the swapped-in rows keep their click, dragstart and keydown listeners", async () => {
+		// Bucket rows (stubbed by the harness) get the three listeners a real bucket row has.
+		const calls = { click: 0, dragstart: 0, keydown: 0 };
+		env.ex.renderNodeList = async (_nodes, container) => {
+			const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
+			row.dataset.selectKey = "bucket-row";
+			row.tabIndex = 0;
+			for (const type of ["click", "dragstart", "keydown"] as const) row.addEventListener(type, () => calls[type]++);
+		};
+		hh.state.units = hh.state.units.slice(0, 39); // a real change, so the pane is swapped
+		await env.ex.render();
+
+		const bucketRow = document.querySelector<HTMLElement>(".atlas-bucket .atlas-row-unit")!;
+		bucketRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		bucketRow.dispatchEvent(new Event("dragstart"));
+		bucketRow.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		expect(calls).toEqual({ click: 1, dragstart: 1, keydown: 1 });
+
+		// The inbox row's real handlers, after the click's own swap.
+		const first = document.querySelector<HTMLElement>(".atlas-inbox .atlas-row-unit")!;
+		const key = first.dataset.selectKey!;
+		first.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		await flush(env);
+		const row = document.querySelector<HTMLElement>(`.atlas-inbox [data-select-key="${key}"]`)!;
+		expect(row).not.toBe(first);
+		(env.ex.openRef as ReturnType<typeof vi.fn>).mockClear();
+		row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		expect(env.ex.openRef).toHaveBeenCalledTimes(1);
+		row.dispatchEvent(new Event("dragstart"));
+		expect(env.ex.dragPayload).not.toBeNull();
+		expect(env.ex.inboxDragRowEl).toBe(row);
 	});
 });

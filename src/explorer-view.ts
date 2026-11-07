@@ -39,6 +39,7 @@ import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 import { executeApiCommand } from "./api-command-runner";
 import { resolveArgv, tokenizeCommand } from "./command-argv";
+import { RenderTriggerKind, observeRender, renderCauseOr, withRenderCause } from "./render-log";
 import {
 	SortKey,
 	compareSortKeys,
@@ -57,6 +58,11 @@ import {
 } from "./sort";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
+
+/** A press whose target is inside this selector started inside an Atlas pane (any Atlas leaf, not
+ * just this view's own): `.atlas-explorer` is the rendered content (toolbar, filter box, section
+ * headers, rows), the leaf-content attribute covers the rest of the pane. */
+const ATLAS_PANE_SELECTOR = `.atlas-explorer, .workspace-leaf-content[data-type="${ATLAS_VIEW_TYPE}"]`;
 
 /** F11: fixed row height assumed for inbox virtualization (all inbox rows are single-line,
  * `white-space: nowrap` per `.atlas-row` in styles.css, so this holds across Obsidian's own font
@@ -712,6 +718,24 @@ function addSourceAndStatusItems(
 	}
 }
 
+/** True when a view's pane is not on screen (a background tab, a collapsed sidebar). Obsidian adds
+ * `isShown()` to every element; where it is missing (a bare DOM, no element at all) the pane counts as shown. */
+function isPaneHidden(el: (HTMLElement & { isShown?: () => boolean }) | undefined): boolean {
+	return !!el && typeof el.isShown === "function" && !el.isShown();
+}
+
+/** A pane's output as compared for "did anything visible change". It is the pane's markup, except that a
+ * connection dot's hover tooltip (`aria-label` on an element carrying `data-atlas-tip`) is left out: it
+ * holds clock-dependent text while hovered, and the time-free `data-atlas-tip` copy already says
+ * everything that can change without the clock. */
+function paneOutput(pane: HTMLElement): string {
+	const tipped = pane.querySelectorAll("[data-atlas-tip]");
+	if (tipped.length === 0) return pane.innerHTML;
+	const copy = pane.cloneNode(true) as HTMLElement;
+	copy.querySelectorAll("[data-atlas-tip]").forEach((el) => el.removeAttribute("aria-label"));
+	return copy.innerHTML;
+}
+
 export class AtlasExplorerView extends ItemView {
 	private filterText = "";
 	private sortMode: "manual" | "alphabetical" = "manual";
@@ -835,13 +859,22 @@ export class AtlasExplorerView extends ItemView {
 	 * events during a native drag, so one arriving means the drag is over even when `dragend` was
 	 * lost with a detached drag source. */
 	private nativeDragActive = false;
-	/** PR-1 (PR-2 R11): true between a `pointerdown` and the end of that gesture (`pointerup`,
-	 * `dragend`, `contextmenu`). Obsidian activates a leaf from a capture-phase `pointerdown`, so
-	 * `active-leaf-change` fires mid-gesture; rendering then detaches the row under the pointer and
-	 * its click never fires. */
+	/** True between a `pointerdown` inside an Atlas pane and the end of that press (`pointerup`,
+	 * `dragend`, or a `pointermove` with no button held; after a right-click, only once its context
+	 * menu has closed).
+	 * Obsidian activates a leaf from a capture-phase `pointerdown`, and that activation refreshes the
+	 * data sources, which rebuild the list; rendering mid-press detaches the row under the pointer
+	 * and its click never fires. So `render()` and `queueRender()` both hold while this is set. */
 	private pointerGestureActive = false;
-	/** PR-1 (PR-2 R11): a focus-regain refresh that arrived mid-gesture and is waiting for it to end. */
+	/** A render was requested mid-press (through any route) and is waiting for the press to end. */
 	private renderAfterPointerGesture = false;
+	/** The promise `render()` hands back for renders held mid-press, so `awaitRenderSettled()` treats a
+	 * held render as pending. Resolved when the render that runs after the press finishes. */
+	private heldRender: { promise: Promise<void>; settle: () => void } | null = null;
+	/** The current press produced a `contextmenu`: its release waits until the menu has closed. */
+	private contextMenuGesture = false;
+	/** Set by `onClose()`; a closed view holds and runs no renders. */
+	private closed = false;
 	/** The last row clicked (in either scope) — where a following shift-click's range starts from.
 	 * Cleared implicitly by scope: a shift-click only extends a range if the anchor's own scope
 	 * matches the row just clicked, so a stray shift-click in the *other* list can't try to build a
@@ -907,6 +940,43 @@ export class AtlasExplorerView extends ItemView {
 	 * and `render()` a view that is gone. */
 	private openAddUnderPrompts = new Set<{ close(): void }>();
 	private renderQueued = false;
+	/** Render log: the kind of the first trigger that queued the pending `queueRender()` timeout. Later
+	 * requests in the same tick coalesce into it and don't overwrite it. */
+	private queuedRenderKind: RenderTriggerKind | null = null;
+	/** Render log: the kind of the first render request held back mid-press; the one render that runs
+	 * after the press is logged with it. */
+	private heldRenderKind: RenderTriggerKind | null = null;
+	/** Whether the latest render that finished as the current one put a new pane on screen (true) or
+	 * found its output identical to the live pane and threw the staged pane away (false). Null while
+	 * a render is in flight, and after one that was superseded or threw. Read by the render log. */
+	private lastRenderPainted: boolean | null = null;
+	/** The kind of the first render request made while this pane was hidden (a background tab, a
+	 * collapsed sidebar). It is rendered when the pane is shown, and logged with this kind. */
+	private hiddenRenderKind: RenderTriggerKind | null = null;
+	/** Watches the pane's size while a render waits for it to be shown (a hidden element has no size).
+	 * Not a timer: it fires once, when Obsidian shows the pane. */
+	private shownWatcher: ResizeObserver | null = null;
+	/** What the pane now on screen owns, kept so a staged build that never goes on screen can put the
+	 * live references back (see `restoreLivePaneRefs`). Null before the first paint. */
+	private livePane: {
+		filterInputEl: HTMLInputElement | null;
+		bucketListEl: HTMLElement | null;
+		stickyEls: AtlasExplorerView["stickyEls"];
+	} | null = null;
+	/** The inbox redraw of the staged pane while it is being built. It moves to `inboxRedraw` only when
+	 * the staged pane goes on screen, so the live pane keeps redrawing on scroll during a build. */
+	private stagedInboxRedraw: (() => void) | null = null;
+	/** Draws the staged inbox window at once (no animation frame). `renderNow()` moves it to
+	 * `inboxDrawNow` with the rest of the staged pane. */
+	private stagedInboxDrawNow: (() => void) | null = null;
+	private inboxDrawNow: (() => void) | null = null;
+	/** PR-2 (R4): the virtualised inbox puts only its visible window of rows in the DOM, so comparing
+	 * markup cannot see a change to a row outside it. This is a signature of every inbox row (key, label,
+	 * icon, badges, hidden and missing state, in order) of the staged pane while it is being built, and of
+	 * the pane on screen. A render is skipped only when both the markup and this signature are equal.
+	 * The staged one moves to the live one when the staged pane goes on screen. Null before the first build. */
+	private stagedInboxSignature: string | null = null;
+	private liveInboxSignature: string | null = null;
 	/** PR-2.F2 R2: every call to `render()` (direct or via `queueRender`'s timeout) overwrites this
 	 * with its own promise before any `await` inside it can yield, so this always names the most
 	 * recently *started* render even if a later call supersedes an earlier one still in flight
@@ -938,7 +1008,8 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	async onOpen(): Promise<void> {
-		this.unsubscribers.push(this.plugin.unitIndex.onChange(() => this.queueRender()));
+		this.closed = false;
+		this.unsubscribers.push(this.plugin.unitIndex.onChange(() => withRenderCause("unit-index", () => this.queueRender())));
 		this.unsubscribers.push(
 			this.plugin.viewsManager.onChange((persisted) => {
 				// PR-2 (R3/G9): "the tree changes" means a real, persisted structural/sort change —
@@ -949,7 +1020,7 @@ export class AtlasExplorerView extends ItemView {
 				// which G9/E4 forbid; `queueRender()` below still runs for both, so a render-only
 				// notification still repaints.
 				if (persisted) this.sortRefreshGate.markDirty();
-				this.queueRender();
+				withRenderCause("views-change", () => this.queueRender());
 			})
 		);
 		this.registerEvent(
@@ -957,20 +1028,21 @@ export class AtlasExplorerView extends ItemView {
 				this.updateActiveHighlight();
 				if (leaf === this.leaf) {
 					if (this.viewLoadTrigger.activate()) {
-						this.refreshApiSourcesOnViewLoad();
+						// Render log: the source refreshes below notify inline; the outermost cause wins, so
+						// every render this activation queues is logged as `leaf-activate`.
+						withRenderCause("leaf-activate", () => this.refreshApiSourcesOnViewLoad());
 						this.sortRefreshGate.markDirty(); // PR-2 (G9): "pane regains focus".
 						// PR-2 (R2/G9): marking the gate dirty alone does nothing until some other
 						// trigger renders next — in a view with no data sources nothing else was
 						// going to, so the Modified re-sort was deferred to whatever render happened
 						// to come along later (typically the next autosave), which is exactly the
 						// timing G9/E4 forbid. Queue the refresh this trigger itself promised.
-						// PR-1 (PR-2 R11): Obsidian activates a leaf from a capture-phase
-						// `pointerdown`, so when the user clicks a row while another pane was
-						// active this fires *before* the click. Rendering now would detach the
-						// row under the pointer and swallow the click (or the drag), so a refresh
-						// that arrives mid-gesture waits until the gesture ends.
-						if (this.pointerGestureActive) this.renderAfterPointerGesture = true;
-						else this.queueRender();
+						// Obsidian activates a leaf from a capture-phase `pointerdown`, so when
+						// the user clicks a row while another pane was active this fires *before*
+						// the click. `queueRender()` holds while a press is under way inside an
+						// Atlas pane (a render now would detach the row under the pointer and
+						// swallow the click or the drag) and runs once after the press ends.
+						withRenderCause("leaf-activate", () => this.queueRender());
 					}
 				} else {
 					this.viewLoadTrigger.deactivate();
@@ -993,19 +1065,24 @@ export class AtlasExplorerView extends ItemView {
 		// unrelated drag hovering a module row within the dwell window could pop the Contents modal
 		// using stale drag data. This window-level backstop clears it (and cancels any pending dwell
 		// timer) whenever a drag ends, regardless of how.
-		// PR-1 (PR-2 R11): tracks whether a pointer gesture is under way, so the focus-regain refresh
-		// can wait for it. Registered on the document in the capture phase: that runs before
-		// Obsidian's own capture-phase `pointerdown` listener on the leaf container (the one that
-		// activates the leaf), so the flag is already set when `active-leaf-change` fires. Browsers
-		// dispatch `pointerup`, `mouseup` and `click` back-to-back from one input event, so the
-		// `setTimeout(0)` render `queueRender` schedules from `pointerup` runs after the click.
+		// Tracks whether a press that started inside an Atlas pane is under way, so `render()` and
+		// `queueRender()` can hold until it ends (every route: the index and views-manager change
+		// callbacks, `refresh()`, the focus-regain refresh, direct `render()` calls). Registered on the
+		// document in the capture phase: that runs before Obsidian's own capture-phase `pointerdown`
+		// listener on the leaf container (the one that activates the leaf), so the flag is already set
+		// when `active-leaf-change` fires. Browsers dispatch `pointerup`, `mouseup` and `click`
+		// back-to-back from one input event, so the `setTimeout(0)` render `queueRender` schedules
+		// from `pointerup` runs after the click. A press anywhere else (editor, another sidebar, a menu)
+		// is not ours to hold for, and ends a press whose release was lost.
 		const doc = document;
 		this.registerDomEvent(
 			doc,
 			"pointerdown",
-			() => {
-				this.pointerGestureActive = true;
+			(evt) => {
 				this.nativeDragActive = false;
+				this.contextMenuGesture = false;
+				if (this.isInsideAtlasPane(evt.target)) this.pointerGestureActive = true;
+				else this.endPointerGesture();
 			},
 			true
 		);
@@ -1014,11 +1091,21 @@ export class AtlasExplorerView extends ItemView {
 			"pointerup",
 			() => {
 				this.nativeDragActive = false;
-				this.endPointerGesture();
+				this.endPointerGestureUnlessMenuOpen();
 			},
 			true
 		);
-		this.registerDomEvent(doc, "contextmenu", () => this.endPointerGesture(), true);
+		// A right-click: the row's own `contextmenu` handler opens the menu right after this capture
+		// listener, so the menu isn't there to see yet. Remember it, and `endPointerGestureUnlessMenuOpen`
+		// keeps the hold until the menu has closed.
+		this.registerDomEvent(doc, "contextmenu", () => {
+			if (this.pointerGestureActive) this.contextMenuGesture = true;
+		}, true);
+		// A touch that turns into a scroll is cancelled without a `pointerup`. A mouse drag also fires
+		// `pointercancel` (at `dragstart`) and must keep the hold, so only touch ends the press here.
+		this.registerDomEvent(doc, "pointercancel", (evt) => {
+			if (evt.pointerType === "touch") this.endPointerGesture();
+		}, true);
 		this.registerDomEvent(window, "dragstart", () => (this.nativeDragActive = true), true);
 		this.registerDomEvent(window, "drop", () => (this.nativeDragActive = false), true);
 		this.registerDomEvent(
@@ -1026,9 +1113,9 @@ export class AtlasExplorerView extends ItemView {
 			"pointermove",
 			(evt) => {
 				this.nativeDragActive = false;
-				// No button held: the gesture is over even though its `pointerup` never reached us
-				// (released over a native menu, say). Don't leave a held-back refresh waiting.
-				if (evt.buttons === 0) this.endPointerGesture();
+				// No button held: the press is over even though its `pointerup` never reached us
+				// (released over a native menu, say). Don't leave a held-back render waiting.
+				if (evt.buttons === 0) this.endPointerGestureUnlessMenuOpen();
 			},
 			true
 		);
@@ -1062,7 +1149,7 @@ export class AtlasExplorerView extends ItemView {
 			// not what the comment claimed. Fixed for real this time, not just re-worded: `handleDrop`
 			// now calls `queueRender()` too (both of its own call sites), so the flag this relies on is
 			// actually shared and a successful drop really is one render, not two.
-			this.queueRender();
+			withRenderCause("drop", () => this.queueRender());
 		});
 		await this.render();
 	}
@@ -1073,30 +1160,99 @@ export class AtlasExplorerView extends ItemView {
 		this.inboxLayoutObserver?.disconnect();
 		this.inboxLayoutObserver = null;
 		this.inboxRedraw = null;
+		this.stagedInboxRedraw = null;
+		this.stagedInboxDrawNow = null;
+		this.inboxDrawNow = null;
+		// A render still building when the view closes is superseded: it swaps nothing and registers
+		// no observer. Its `finally` leaves `pendingScrollTop` alone as it does for any superseded
+		// render, so it is cleared here.
+		this.renderSeq++;
+		this.pendingScrollTop = null;
+		this.stopShownWatch();
+		this.hiddenRenderKind = null;
 		// R1: closing each modal fires its own onClose, which reports "dismissed" and (via the callback
 		// wired in refreshApiSource) removes itself from this array — iterate a copy so that in-loop
 		// mutation of the live array never skips an entry.
 		for (const modal of [...this.openConfirmDeleteModals]) modal.close();
 		// Same iterate-a-copy rule: closing a prompt settles it, which un-registers it from the set.
 		for (const prompt of [...this.openAddUnderPrompts]) prompt.close();
+		// Nothing may render on, or stay held for, a closed view: drop the press state and settle any
+		// promise a held render handed out so no `awaitRenderSettled()` caller waits on it forever.
+		this.closed = true;
+		this.pointerGestureActive = false;
+		this.contextMenuGesture = false;
+		this.renderAfterPointerGesture = false;
+		this.heldRenderKind = null;
+		this.heldRender?.settle();
+		this.heldRender = null;
 	}
 
-	/** PR-1 (PR-2 R11): ends the current pointer gesture and, if a focus-regain refresh was held back
-	 * for it, queues that render now. */
+	/** True when a press began inside an Atlas pane: the toolbar, filter box, section headers and
+	 * rows of any Atlas leaf, this one or the other. */
+	private isInsideAtlasPane(target: EventTarget | null): boolean {
+		const el = target as Element | null;
+		return !!el && typeof el.closest === "function" && el.closest(ATLAS_PANE_SELECTOR) !== null;
+	}
+
+	/** Obsidian's context menu is a `.menu` element appended straight to `document.body`. */
+	private isContextMenuOpen(): boolean {
+		return document.body.querySelector(":scope > .menu") !== null;
+	}
+
+	/** Ends the current press and, if renders were held for it, queues the one render that covers
+	 * them all (through `queueRender`, so it runs from `setTimeout(0)`, after the click). */
 	private endPointerGesture(): void {
 		this.pointerGestureActive = false;
+		this.contextMenuGesture = false;
 		if (!this.renderAfterPointerGesture) return;
 		this.renderAfterPointerGesture = false;
-		this.queueRender();
+		const kind = this.heldRenderKind ?? "other";
+		this.heldRenderKind = null;
+		withRenderCause(kind, () => this.queueRender());
 	}
 
-	/** Collapses bursts of index/view change events (a drag can fire several) into one render. */
+	/** The release paths that can arrive while a right-click's menu is still up (`pointerup`, or a
+	 * `pointermove` with no button held): the press stays held until the menu has closed, and the
+	 * next such event after that ends it. Without a context menu this is `endPointerGesture()`. */
+	private endPointerGestureUnlessMenuOpen(): void {
+		if (this.contextMenuGesture && this.isContextMenuOpen()) return;
+		this.endPointerGesture();
+	}
+
+	/** Records that a render was asked for mid-press and returns the promise it will settle, shared
+	 * by every request in the press so they merge into the one render after it. */
+	private holdRender(): Promise<void> {
+		this.renderAfterPointerGesture = true;
+		this.heldRenderKind ??= renderCauseOr("other");
+		if (!this.heldRender) {
+			let settle!: () => void;
+			const promise = new Promise<void>((resolve) => (settle = resolve));
+			this.heldRender = { promise, settle };
+		}
+		// `awaitRenderSettled()` follows `latestRenderPromise`: a held render counts as pending.
+		this.latestRenderPromise = this.heldRender.promise;
+		return this.heldRender.promise;
+	}
+
+	/** Collapses bursts of index/view change events (a drag can fire several) into one render. While a
+	 * press is under way inside an Atlas pane the request is held instead, and runs once after it. */
 	private queueRender(): void {
+		// A render must wait while a press that began inside an Atlas pane is under way. The very first
+		// render never waits (there is no row to protect yet, and `onOpen` awaits it).
+		if (this.pointerGestureActive && !this.closed && this.lastRenderedViewId !== null) {
+			void this.holdRender();
+			return;
+		}
 		if (this.renderQueued) return;
 		this.renderQueued = true;
+		// Render log: the first request in a burst names the render; later ones coalesce into it.
+		this.queuedRenderKind = renderCauseOr("other");
 		window.setTimeout(() => {
 			this.renderQueued = false;
-			void this.render();
+			const queuedKind = this.queuedRenderKind ?? "other";
+			this.queuedRenderKind = null;
+			if (this.closed) return;
+			withRenderCause(queuedKind, () => void this.render());
 		}, 0);
 	}
 
@@ -1107,7 +1263,7 @@ export class AtlasExplorerView extends ItemView {
 	 * happened to re-render. Called by the settings tab right after `saveSettings()` for exactly
 	 * these toggles. */
 	refresh(): void {
-		this.queueRender();
+		withRenderCause("settings", () => this.queueRender());
 	}
 
 	/** PR-7 (G21): called from `main.ts`'s vault `"modify"` listener on every file save — refreshes
@@ -1241,7 +1397,7 @@ export class AtlasExplorerView extends ItemView {
 	refreshApiSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.apiSource || Platform.isMobile) return;
 		const headers = this.plugin.apiHeadersStore.get(node.id);
-		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => this.plugin.viewsManager.notifyExternalMutation(), {
+		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, (changed) => withRenderCause("folder-source-refresh", () => (changed ? this.plugin.viewsManager.notifyExternalMutation() : undefined)), {
 			requestImpl: obsidianRequestImpl,
 			trigger,
 			confirmDelete: (count) =>
@@ -1265,7 +1421,7 @@ export class AtlasExplorerView extends ItemView {
 		// never holds (same reason `apiHeadersStore` lookups live here, not in `ViewsManager`, for API
 		// sources) — looked up fresh on every call so a since-changed path is always current.
 		const outsidePath = node.folderSource?.location === "outside" ? this.plugin.folderSourcePathStore.get(node.id) : undefined;
-		this.plugin.viewsManager.refreshFolderSource(view.id, node.id, outsidePath);
+		withRenderCause("folder-source-refresh", () => this.plugin.viewsManager.refreshFolderSource(view.id, node.id, outsidePath));
 	}
 
 	/** PR-7 (G17-G19/G21-G23): the CSV equivalent of `refreshApiSource` — a vault file read stands in
@@ -1274,13 +1430,13 @@ export class AtlasExplorerView extends ItemView {
 	 * desktop, there's no live request to skip. */
 	refreshCsvSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.csvSource) return;
-		// PR-1 R4 fix: a refresh that found nothing comparably different still re-renders (so the dot's
-		// "just now" is real) without writing data.json — this runs on every view load/switch with no
-		// toggle, so an unconditional save here would churn data.json for a no-op refresh.
+		// PR-1 R4 fix -> PR-2 (S3): a refresh that found nothing comparably different neither writes
+		// data.json nor notifies — this runs on every view load/switch with no toggle, so a save or a
+		// re-render here would churn for a no-op refresh.
 		void this.plugin.csvSourceController.refresh(
 			node,
 			node.csvSource,
-			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange()),
+			(changed) => withRenderCause("folder-source-refresh", () => (changed ? this.plugin.viewsManager.notifyExternalMutation() : undefined)),
 			{
 				vault: this.plugin.app.vault,
 				trigger,
@@ -1301,11 +1457,11 @@ export class AtlasExplorerView extends ItemView {
 	 * guard reasoning (a vault file read, not a live request). */
 	refreshMarkdownTableSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.markdownTableSource) return;
-		// PR-1 R4 fix: same no-op-persist guard as `refreshCsvSource` above.
+		// PR-1 R4 fix -> PR-2 (S3): same no-op guard as `refreshCsvSource` above.
 		void this.plugin.markdownTableSourceController.refresh(
 			node,
 			node.markdownTableSource,
-			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange()),
+			(changed) => withRenderCause("folder-source-refresh", () => (changed ? this.plugin.viewsManager.notifyExternalMutation() : undefined)),
 			{
 				vault: this.plugin.app.vault,
 				trigger,
@@ -1749,10 +1905,53 @@ export class AtlasExplorerView extends ItemView {
 	/** PR-2.F2 R2: thin wrapper around `renderNow()` so every call site (direct `await`/`void`, and
 	 * `queueRender`'s own deferred call) records its promise in `latestRenderPromise` before
 	 * returning — synchronously, so no macrotask or microtask can slip in between a call starting
-	 * and this being set. See `awaitRenderSettled()`. */
+	 * and this being set. See `awaitRenderSettled()`.
+	 *
+	 * This is also the render entry for the press hold: while a press that began inside an Atlas pane
+	 * is under way, `renderNow()` does not run (it would detach the pressed row, and its click would
+	 * never fire). The request is held and the returned promise settles once the render that runs
+	 * after the press has finished. */
 	private render(): Promise<void> {
-		const promise = this.renderNow();
+		if (this.pointerGestureActive && !this.closed && this.lastRenderedViewId !== null) return this.holdRender();
+		// Render log: a render that follows a held press is logged with the kind of the request held first.
+		const kind = this.heldRenderKind ?? renderCauseOr("other");
+		this.heldRenderKind = null;
+		// A pane that is not on screen has no size to build against: record the request and render
+		// when it is shown. The first render and a closing view always run.
+		if (!this.closed && this.lastRenderedViewId !== null && isPaneHidden(this.containerEl)) {
+			this.deferHiddenRender(kind);
+			const held = this.heldRender;
+			if (held) {
+				this.heldRender = null;
+				this.renderAfterPointerGesture = false;
+				held.settle();
+			}
+			return Promise.resolve();
+		}
+		const log = this.plugin?.renderLog;
+		const startedAt = Date.now();
+		const t0 = performance.now();
+		let promise = this.renderNow();
+		if (log) {
+			// `renderNow` bumps `renderSeq` synchronously before its first await, so this is its own id.
+			const renderId = this.renderSeq;
+			promise = observeRender(log, promise, {
+				kind,
+				at: startedAt,
+				t0,
+				isCurrent: () => renderId === this.renderSeq,
+				painted: () => this.lastRenderPainted,
+			});
+		}
 		this.latestRenderPromise = promise;
+		const held = this.heldRender;
+		if (held) {
+			// The render that follows a press settles the promise held requests were handed; either
+			// outcome counts, a throw stays with the caller of this render.
+			this.heldRender = null;
+			this.renderAfterPointerGesture = false;
+			void promise.then(held.settle, held.settle);
+		}
 		return promise;
 	}
 
@@ -1771,12 +1970,69 @@ export class AtlasExplorerView extends ItemView {
 		}
 	}
 
+	/** A render asked for while the pane is hidden is recorded, not built: the first request's kind is
+	 * kept, an entry naming it goes in the render log, and a size watch on the pane waits for it to
+	 * be shown. No timer is involved; the watch is Obsidian's own show/hide signal. */
+	private deferHiddenRender(kind: RenderTriggerKind): void {
+		this.hiddenRenderKind ??= kind;
+		this.plugin?.renderLog?.record({ kind, at: Date.now(), durationMs: 0, changed: false });
+		if (this.shownWatcher || typeof ResizeObserver === "undefined") return;
+		const watcher = new ResizeObserver(() => {
+			if (this.closed || isPaneHidden(this.containerEl)) return;
+			this.stopShownWatch();
+			if (this.hiddenRenderKind !== null) {
+				const kind = this.hiddenRenderKind;
+				withRenderCause(kind, () => void this.render());
+			}
+		});
+		watcher.observe(this.containerEl);
+		this.shownWatcher = watcher;
+	}
+
+	private stopShownWatch(): void {
+		this.shownWatcher?.disconnect();
+		this.shownWatcher = null;
+	}
+
+	/** The hidden, same-size sibling `renderNow()` builds the next pane in. It sits next to the live
+	 * pane (never inside it) with the live pane's classes and measured box, so layout reads made
+	 * while building (inbox window, sticky headers, scroll restore) see the real size. */
+	private createStagingPane(live: HTMLElement): HTMLElement {
+		const staging = document.createElement("div");
+		staging.className = live.className;
+		staging.classList.add("atlas-explorer", "atlas-explorer-staging");
+		staging.setAttribute("aria-hidden", "true");
+		staging.style.top = `${live.offsetTop}px`;
+		staging.style.left = `${live.offsetLeft}px`;
+		staging.style.width = `${live.offsetWidth}px`;
+		staging.style.height = `${live.offsetHeight}px`;
+		(live.parentElement ?? this.containerEl).insertBefore(staging, live.nextSibling);
+		return staging;
+	}
+
+	/** Puts back the pane references the last committed pane owns, undoing what a staged build that
+	 * is not going on screen wrote over them. */
+	private restoreLivePaneRefs(): void {
+		const pane = this.livePane;
+		this.filterInputEl = pane?.filterInputEl ?? null;
+		this.bucketListEl = pane?.bucketListEl ?? null;
+		this.stickyEls = pane?.stickyEls ?? null;
+		this.stagedInboxRedraw = null;
+		this.stagedInboxDrawNow = null;
+	}
+
+	/** Builds the next pane in a hidden staging sibling, then either throws it away (its output equals
+	 * what is on screen, so nothing is touched) or puts it on screen in place of the live pane. */
 	private async renderNow(): Promise<void> {
-		const container = this.containerEl.children[1] as HTMLElement;
+		const live = this.containerEl.children[1] as HTMLElement;
 		const renderId = ++this.renderSeq;
 		const isCurrent = () => renderId === this.renderSeq;
+		this.lastRenderPainted = null;
+		this.stagedInboxSignature = null;
+		this.hiddenRenderKind = null;
+		this.stopShownWatch();
 		// PR-2 (G9): captured here, before anything below clears `dragPayload`/`inboxDragRowEl`/
-		// `bucketDragRowEl` (the R4-hardening block right after this) — a render that fires *while*
+		// `bucketDragRowEl` (the commit step at the end) — a render that fires *while*
 		// a drag is still live must still see that correctly, not the already-cleared state those
 		// lines are about to leave behind. Consumed into `sortRefreshAllowedForThisRender` further
 		// down, after the view-switch branch's own `markDirty()` call below so a trigger that fires
@@ -1787,48 +2043,9 @@ export class AtlasExplorerView extends ItemView {
 		// status change, drag drop) doesn't snap the panel back to the top; it's restored after the
 		// body is rebuilt, and reset to 0 only on a genuine view switch (below). If another render is
 		// still in flight, its target wins: the live body may not have been restored yet.
-		const scrollTop = this.pendingScrollTop ?? container.querySelector<HTMLElement>(".atlas-explorer-scroll")?.scrollTop ?? 0;
-		if (this.inboxDragRowEl || this.bucketDragRowEl) {
-			// PR-1.S1 R4 hardening (PR-1 R3: now covers a bucket-node drag too, via `bucketDragRowEl`):
-			// `container.empty()` below is about to detach the dragged row (an index refresh mid-drag,
-			// say). Once it's detached, the window-level `dragend` backstop (registered in `onOpen`)
-			// never fires on it, so the drag would otherwise leak as a live, orphaned payload — and,
-			// for a bucket drag onto a module icon, a dwell timer that keeps running after its own row
-			// is gone — that outlives the gesture. Clear both here too, same as that backstop does.
-			this.dragPayload = null;
-			this.cancelActiveDwell?.();
-		}
-		this.inboxLayoutObserver?.disconnect();
-		this.inboxLayoutObserver = null;
-		this.inboxRedraw = null;
-		this.inboxDragRowEl = null;
-		this.bucketDragRowEl = null;
-		// The filter input lives inside `container` and gets torn down by `container.empty()` below
-		// like everything else — every keystroke re-renders the whole view (index/view-change events
-		// and typing both go through this same `render()`). Capture focus/caret here and restore it
-		// on the freshly-created input after rebuilding, or every keystroke past the first would be
-		// silently lost as focus falls off the removed element.
-		const activeEl = document.activeElement;
-		const filterHadFocus = activeEl instanceof HTMLInputElement && activeEl.classList.contains("atlas-filter");
-		const filterSelectionStart = filterHadFocus ? activeEl.selectionStart : null;
-		const filterSelectionEnd = filterHadFocus ? activeEl.selectionEnd : null;
-		// Dan-found: Escape/Delete (`handleRowKeydown`) never reached a real keyboard press, even
-		// though the exact same keys worked fine dispatched synthetically straight at a queried row
-		// element in this PR's own CDP testing. Root cause is the same class of gap as the drag-abort
-		// bug earlier in this PR: a real click on a focusable (`tabIndex=0`) row focuses it natively
-		// (a browser's own default `mousedown` handling, before our `click` listener even runs) — but
-		// `handleSelectionClick` then calls `render()` in response to that same click, which
-		// `container.empty()`s the row right back out from under that just-assigned focus. The new
-		// row rebuilt in its place is a different DOM node and was never itself focused, so a
-		// following *real* keydown has nowhere relevant to land — while `dispatchEvent` in a test
-		// fires straight at whichever element you queried, focus state or not, so this was invisible
-		// to every synthetic test this PR ran. Same fix shape as the filter input's own focus restore
-		// just above/below: capture before `container.empty()`, restore after rebuild.
-		const activeRowKey = activeEl instanceof HTMLElement && activeEl.dataset.selectKey ? activeEl.dataset.selectKey : null;
+		const scrollTop = this.pendingScrollTop ?? live.querySelector<HTMLElement>(".atlas-explorer-scroll")?.scrollTop ?? 0;
 
 		this.outsideResolvedCache.clear();
-		container.empty();
-		container.addClass("atlas-explorer");
 
 		const view = this.plugin.viewsManager.getActiveView();
 		const allUnits = this.plugin.unitIndex.getUnits();
@@ -1836,6 +2053,12 @@ export class AtlasExplorerView extends ItemView {
 		// G8/E7: a view switch resets the scroll to the top; every other re-render keeps it.
 		const restoreScrollTop = view.id === this.lastRenderedViewId ? scrollTop : 0;
 		this.pendingScrollTop = restoreScrollTop;
+		// E8: the first render after load, a view switch and an emptied pane have no previous output
+		// to compare with, so they always paint.
+		const mustPaint = view.id !== this.lastRenderedViewId || live.childElementCount === 0;
+
+		const staging = this.createStagingPane(live);
+		let committed = false;
 
 		// PR-1 R4: the try/finally starts here, right after `pendingScrollTop` is set above, not just
 		// before `renderBucketSection` — a throw from `renderToolbar` or from the view-switch branch
@@ -1867,17 +2090,15 @@ export class AtlasExplorerView extends ItemView {
 			// `sortRefreshUnfinished`). During a drag the refresh must keep waiting, so an allowance
 			// the superseded render had already consumed (a drag that started after it) goes back
 			// onto the gate: the gate is what survives until the first render after the drag ends.
+			// The gate is consumed here, before the output is compared, so a render that ends up
+			// skipped has still used up its refresh (F2): rows move at the next refresh, not at a save.
 			if (dragInProgress && this.sortRefreshUnfinished) this.sortRefreshGate.markDirty();
 			this.sortRefreshAllowedForThisRender = this.sortRefreshGate.consume(dragInProgress) || (this.sortRefreshUnfinished && !dragInProgress);
 			this.sortRefreshUnfinished = this.sortRefreshAllowedForThisRender;
 
-			this.renderToolbar(container, view);
-			if (filterHadFocus && this.filterInputEl) {
-				this.filterInputEl.focus();
-				this.filterInputEl.setSelectionRange(filterSelectionStart, filterSelectionEnd);
-			}
+			this.renderToolbar(staging, view);
 
-			const scrollBody = container.createDiv({ cls: "atlas-explorer-scroll" });
+			const scrollBody = staging.createDiv({ cls: "atlas-explorer-scroll" });
 			const bucketEl = scrollBody.createDiv({ cls: "atlas-section atlas-bucket" });
 			await this.renderBucketSection(bucketEl, view);
 			if (!isCurrent()) return;
@@ -1899,8 +2120,8 @@ export class AtlasExplorerView extends ItemView {
 			const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
 			await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
 			if (!isCurrent()) return;
-			// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
-			// so later renders can read it from the DOM again.
+			// The staged body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
+			// so later renders can read the live one from the DOM again.
 			this.pendingScrollTop = null;
 			// Both sections always render their header and wrap; a render without them has nothing to stack.
 			const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
@@ -1911,11 +2132,95 @@ export class AtlasExplorerView extends ItemView {
 				bucketHeader && bucketWrap && inboxHeader && inboxWrap
 					? { body: scrollBody, bucketHeader, bucketWrap, inboxHeader, inboxWrap }
 					: null;
-			this.observeInboxLayout(container, scrollBody, bucketWrap ?? bucketEl);
+			// The post-render touches that make a pane look the way it does on screen (sticky-header
+			// variable, open-note highlight) are applied to the staged pane too, so the comparison below
+			// sees the same output the live pane carries and never mistakes them for a change.
+			this.updateStickyLayout();
+			this.updateActiveHighlight(staging);
+
+			// The inbox signature covers the rows outside the drawn window, which the markup does not (R4).
+			if (!mustPaint && this.stagedInboxSignature !== null && this.stagedInboxSignature === this.liveInboxSignature && paneOutput(staging) === paneOutput(live)) {
+				// Nothing visible changed: the live pane is left exactly as it is.
+				this.lastRenderPainted = false;
+				this.restoreLivePaneRefs();
+				this.syncRefreshTimers(view);
+				return;
+			}
+
+			// --- commit: replace the live pane with the staged one (scroll, filter caret and the
+			// focused row are restored as before) -----------------------------------------------------
+			// The filter input lives inside the live pane and is torn down by the swap below — every
+			// keystroke re-renders the whole view (index/view-change events and typing both go through
+			// this same `render()`). Capture focus/caret here and restore it on the new input after,
+			// or every keystroke past the first would be silently lost as focus falls off the removed element.
+			const activeEl = document.activeElement;
+			const filterHadFocus = activeEl instanceof HTMLInputElement && activeEl.classList.contains("atlas-filter");
+			const filterSelectionStart = filterHadFocus ? activeEl.selectionStart : null;
+			const filterSelectionEnd = filterHadFocus ? activeEl.selectionEnd : null;
+			// Dan-found: Escape/Delete (`handleRowKeydown`) never reached a real keyboard press, even
+			// though the exact same keys worked fine dispatched synthetically straight at a queried row
+			// element in this PR's own CDP testing. Root cause is the same class of gap as the drag-abort
+			// bug earlier in this PR: a real click on a focusable (`tabIndex=0`) row focuses it natively
+			// (a browser's own default `mousedown` handling, before our `click` listener even runs) — but
+			// `handleSelectionClick` then calls `render()` in response to that same click, which
+			// replaces the row right back out from under that just-assigned focus. The new
+			// row rebuilt in its place is a different DOM node and was never itself focused, so a
+			// following *real* keydown has nowhere relevant to land — while `dispatchEvent` in a test
+			// fires straight at whichever element you queried, focus state or not, so this was invisible
+			// to every synthetic test this PR ran. Same fix shape as the filter input's own focus restore
+			// just above/below: capture before the swap, restore after.
+			const activeRowKey = activeEl instanceof HTMLElement && activeEl.dataset.selectKey ? activeEl.dataset.selectKey : null;
+
+			if (this.inboxDragRowEl || this.bucketDragRowEl) {
+				// PR-1.S1 R4 hardening (PR-1 R3: now covers a bucket-node drag too, via `bucketDragRowEl`):
+				// the swap below is about to detach the dragged row (an index refresh mid-drag,
+				// say). Once it's detached, the window-level `dragend` backstop (registered in `onOpen`)
+				// never fires on it, so the drag would otherwise leak as a live, orphaned payload — and,
+				// for a bucket drag onto a module icon, a dwell timer that keeps running after its own row
+				// is gone — that outlives the gesture. Clear both here too, same as that backstop does.
+				// This runs only for a render that really replaces the pane: a skipped render leaves the
+				// dragged row where it is, so the drag is left alone too.
+				this.dragPayload = null;
+				this.cancelActiveDwell?.();
+			}
+			this.inboxLayoutObserver?.disconnect();
+			this.inboxLayoutObserver = null;
+			this.inboxRedraw = this.stagedInboxRedraw;
+			this.inboxDrawNow = this.stagedInboxDrawNow;
+			this.stagedInboxRedraw = null;
+			this.stagedInboxDrawNow = null;
+			this.liveInboxSignature = this.stagedInboxSignature;
+			this.inboxDragRowEl = null;
+			this.bucketDragRowEl = null;
+
+			// An input that fired while this render was building but whose render is held (a press in
+			// progress) is not covered by a superseding render yet: the new input must carry what the
+			// user has typed, or that character would be dropped by the swap.
+			if (filterHadFocus && activeEl instanceof HTMLInputElement && this.filterInputEl && this.filterInputEl.value !== activeEl.value) {
+				this.filterInputEl.value = activeEl.value;
+			}
+			// The one DOM operation that puts the new pane on screen: the live children are replaced
+			// by the complete staged ones, so no frame ever shows an emptied or half-built pane.
+			live.replaceChildren(...Array.from(staging.childNodes));
+			if (!live.classList.contains("atlas-explorer")) live.addClass("atlas-explorer");
+			// A body that was detached and re-attached starts at 0 again.
+			scrollBody.scrollTop = restoreScrollTop;
+			committed = true;
+			// The browser clamps the restored scroll to the swapped-in body (a shrunken inbox): draw the
+			// window for the position it really has now, in this same task, so the first frame holds the
+			// right rows. A no-op when the window is the one already drawn while staged.
+			this.inboxDrawNow?.();
+			this.lastRenderPainted = true;
+			this.livePane = { filterInputEl: this.filterInputEl, bucketListEl: this.bucketListEl, stickyEls: this.stickyEls };
+			this.observeInboxLayout(live, scrollBody, bucketWrap ?? bucketEl);
 			this.updateStickyLayout();
 
+			if (filterHadFocus && this.filterInputEl) {
+				this.filterInputEl.focus();
+				this.filterInputEl.setSelectionRange(filterSelectionStart, filterSelectionEnd);
+			}
 			if (activeRowKey) {
-				const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
+				const restored = live.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
 				// `preventScroll` — this row's own visible position (and the scroll position that shows
 				// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
 				// would otherwise fight that by scrolling to whatever the browser's own default
@@ -1923,9 +2228,9 @@ export class AtlasExplorerView extends ItemView {
 				restored?.focus({ preventScroll: true });
 			}
 
-			this.updateActiveHighlight();
 			this.syncRefreshTimers(view);
 		} finally {
+			staging.remove();
 			// PR-1.S1 R6 (PR-1 R4: try moved up to right after `pendingScrollTop` is set, so this also
 			// covers a throw from `renderToolbar` or the view-switch branch, not just `renderBucketSection`/
 			// `renderInboxSection`): if anything in the block above throws (a rejected `resolveRef`, say)
@@ -1937,6 +2242,9 @@ export class AtlasExplorerView extends ItemView {
 			if (isCurrent()) {
 				this.pendingScrollTop = null;
 				this.sortRefreshUnfinished = false; // PR-1 (PR-2 R4): the refresh landed in the live DOM.
+				// A staged pane that did not go on screen (skipped, or the build threw) must not leave
+				// the live pane's references pointing into it.
+				if (!committed) this.restoreLivePaneRefs();
 			}
 		}
 	}
@@ -1969,15 +2277,24 @@ export class AtlasExplorerView extends ItemView {
 	 * font-size or zoom change. Also toggles the short-panel guard class that takes both labels out of
 	 * `position: sticky` when the panel is too short to show both headers plus a row. The actual
 	 * pinning itself is the compositor's job now (CSS `position: sticky`); this only feeds it the one
-	 * value it can't express in pure CSS. */
+	 * value it can't express in pure CSS. Writes nothing when the variable and the class already hold
+	 * the right values (see the comment in the body). */
 	private updateStickyLayout(): void {
 		const s = this.stickyEls;
 		if (!s || !s.body.isConnected) return;
 		const bucketHeaderHeight = s.bucketHeader.getBoundingClientRect().height;
 		const inboxHeaderHeight = s.inboxHeader.getBoundingClientRect().height;
-		s.body.style.setProperty("--atlas-bucket-label-h", `${bucketHeaderHeight}px`);
+		// Both writes are made only when the value really changes: a no-op class or style write still
+		// records an attribute mutation, and a render's swap must show the container's observers one
+		// batch, not a second one for a value the staged pane already carries.
+		const labelHeight = `${bucketHeaderHeight}px`;
+		if (s.body.style.getPropertyValue("--atlas-bucket-label-h") !== labelHeight) {
+			s.body.style.setProperty("--atlas-bucket-label-h", labelHeight);
+		}
 		const fits = s.body.clientHeight >= bucketHeaderHeight + inboxHeaderHeight + INBOX_ROW_HEIGHT;
-		s.body.toggleClass("atlas-sticky-disabled", !fits);
+		if (s.body.classList.contains("atlas-sticky-disabled") === fits) {
+			s.body.toggleClass("atlas-sticky-disabled", !fits);
+		}
 	}
 
 	/** PR-1.F1 (G5): where a section's header belongs once stuck: the bucket at the top, the inbox
@@ -2164,7 +2481,7 @@ export class AtlasExplorerView extends ItemView {
 					this.filterText = "";
 					this.restoreFoldStateAfterFilterClear();
 				}
-				void this.render();
+				withRenderCause("filter", () => void this.render());
 			}, COLLAPSE_TRANSITION_MS);
 		});
 
@@ -2186,11 +2503,13 @@ export class AtlasExplorerView extends ItemView {
 			this.filterText = filterInput.value;
 			if (wasActive && !this.filterText.trim()) this.restoreFoldStateAfterFilterClear();
 			this.openModuleModal?.setFilterText(this.filterText);
-			void this.render();
+			withRenderCause("filter", () => void this.render());
 		});
 		if (this.focusFilterOnNextRender) {
 			this.focusFilterOnNextRender = false;
-			window.setTimeout(() => filterInput.focus(), 0);
+			// Read at fire time: if this render's pane is thrown away as identical, the live input is
+			// the one to focus.
+			window.setTimeout(() => (this.filterInputEl ?? filterInput).focus(), 0);
 		}
 	}
 
@@ -2604,7 +2923,7 @@ export class AtlasExplorerView extends ItemView {
 				const [lo, hi] = from <= to ? [from, to] : [to, from];
 				for (let i = lo; i <= hi; i++) selection.add(order[i]);
 			}
-			void this.render();
+			withRenderCause("click", () => void this.render());
 			return true;
 		}
 
@@ -2615,7 +2934,7 @@ export class AtlasExplorerView extends ItemView {
 			else selection.add(key);
 			this.selectionAnchor = key;
 			this.selectionAnchorScope = scope;
-			void this.render();
+			withRenderCause("click", () => void this.render());
 			return true;
 		}
 
@@ -2631,7 +2950,7 @@ export class AtlasExplorerView extends ItemView {
 		selection.add(key);
 		this.selectionAnchor = key;
 		this.selectionAnchorScope = scope;
-		void this.render();
+		withRenderCause("click", () => void this.render());
 		return false;
 	}
 
@@ -2922,7 +3241,20 @@ export class AtlasExplorerView extends ItemView {
 			const dot = row.createSpan({
 				cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
 			});
-			setTooltip(dot, dotTooltip(node.apiCache, Date.now(), node.apiAwaitingConfirmation));
+			// The pane carries the time-free tooltip (`data-atlas-tip`, which `paneOutput` compares). The
+			// "N m ago" form changes with the clock alone, so it is written only while the dot is hovered
+			// and read fresh from the node then, never baked into output that is compared for changes.
+			const stable = dotTooltip(node.apiCache, null, node.apiAwaitingConfirmation);
+			dot.dataset.atlasTip = stable;
+			setTooltip(dot, stable);
+			let shown = stable;
+			dot.addEventListener("mouseover", () => {
+				const current = this.plugin.viewsManager.getNode(this.plugin.viewsManager.getActiveView().id, node.id) ?? node;
+				const text = dotTooltip(current.apiCache, Date.now(), current.apiAwaitingConfirmation);
+				if (text === shown) return;
+				shown = text;
+				setTooltip(dot, text);
+			});
 		}
 		if (node.folderSource?.location === "outside") {
 			// PR-5 (G6/G11): recomputed fresh on every render (same "no cached connection state
@@ -3185,6 +3517,20 @@ export class AtlasExplorerView extends ItemView {
 		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
 		// PR 9 (issue 2) replaced inline inbox expansion with the Module Contents modal, so every
 		// inbox row is now fixed-height and the virtualized path always applies.
+		this.stagedInboxSignature = JSON.stringify(
+			sorted.map((r) => [
+				unitRefKey(r.ref),
+				r.hidden,
+				r.info.text,
+				r.info.secondary ?? null,
+				r.info.icon,
+				r.info.promoted,
+				r.info.added,
+				r.info.missing,
+				// Drawn from live state when the row is drawn (the greyed missing-added row), so part of the signature.
+				r.info.missing && this.plugin.unitIndex.isAdded(r.ref),
+			])
+		);
 		this.renderVirtualizedInboxRows(listEl, sorted, view, scrollBody, restoreScrollTop);
 
 		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
@@ -3319,7 +3665,7 @@ export class AtlasExplorerView extends ItemView {
 		const drawWindow = () => {
 			frameQueued = false;
 			// Stale callbacks from an earlier render (or after close) must not touch the current DOM.
-			if (!spacer.isConnected || this.inboxRedraw !== scheduleDraw) return;
+			if (!spacer.isConnected || (this.inboxRedraw !== scheduleDraw && this.stagedInboxRedraw !== scheduleDraw)) return;
 			const listOffset = spacer.getBoundingClientRect().top - scrollBody.getBoundingClientRect().top + scrollBody.scrollTop;
 			const { start, end } = computeInboxWindow(scrollBody.scrollTop, listOffset, scrollBody.clientHeight, INBOX_ROW_HEIGHT, INBOX_OVERSCAN, sorted.length);
 			if (start === drawnStart && end === drawnEnd) return;
@@ -3328,7 +3674,8 @@ export class AtlasExplorerView extends ItemView {
 
 			// The row being dragged is kept in the DOM even when it scrolls out of the window (hidden),
 			// so the browser's drag source survives. Everything else is rebuilt for the new window.
-			const dragged = this.inboxDragRowEl;
+			// A window drawn into a staged pane (not yet on screen) never touches the live dragged row.
+			const dragged = this.inboxRedraw === scheduleDraw ? this.inboxDragRowEl : null;
 			// A row's module-icon dwell timer dies with its element, and `dragleave` never fires for a
 			// removed node, so cancel any pending dwell before the rows it belongs to are swapped out.
 			// PR-1.S1 R3: only when the dwell actually belongs to a row in this spacer (and isn't the
@@ -3359,10 +3706,12 @@ export class AtlasExplorerView extends ItemView {
 			// first paint, no separate unhighlighted frame — `updateActiveHighlight` itself reads the
 			// setting and the open file fresh each call, so this also clears/applies correctly if the
 			// setting changed since the last full render, with no extra render pass needed.
-			this.updateActiveHighlight();
+			this.updateActiveHighlight(spacer.closest<HTMLElement>(".atlas-explorer") ?? undefined);
 		};
 
-		this.inboxRedraw = scheduleDraw;
+		// Lives in `stagedInboxRedraw` until the pane it draws into goes on screen (`renderNow` moves it).
+		this.stagedInboxRedraw = scheduleDraw;
+		this.stagedInboxDrawNow = drawWindow;
 		drawWindow();
 		scrollBody.addEventListener("scroll", scheduleDraw);
 	}
@@ -3524,119 +3873,131 @@ export class AtlasExplorerView extends ItemView {
 	 * another" universal. `moveNode` is the correct operation for an existing node changing parent
 	 * either way — it reparents the real node object in place instead of replacing it. */
 	private handleDrop(target: DropTarget, zone: DropZone = "nest"): void {
-		const payload = this.dragPayload;
-		this.dragPayload = null;
-		if (!payload) return;
+		// Render log: the whole drop runs under the `drop` cause, mutations included. Every
+		// `moveNode`/`placeUnit`/`unplaceNode` saves and notifies listeners inline, which queues the
+		// render, so naming the cause only around the trailing `queueRender()` would be too late.
+		withRenderCause("drop", () => {
+			const payload = this.dragPayload;
+			this.dragPayload = null;
+			if (!payload) return;
 
-		if (target.kind === "inbox-area") {
-			// Only a unit has a disk/ref identity to "return to the inbox" — a meta folder dropped
-			// here is simply not a meaningful gesture, so it's a no-op rather than acting on a
-			// fabricated ref for that one, not the whole drag.
+			if (target.kind === "inbox-area") {
+				// Only a unit has a disk/ref identity to "return to the inbox" — a meta folder dropped
+				// here is simply not a meaningful gesture, so it's a no-op rather than acting on a
+				// fabricated ref for that one, not the whole drag.
+				if (payload.kind === "node") {
+					const draggedView = this.plugin.viewsManager.getView(payload.viewId);
+					if (draggedView) {
+						// PR 13: each dragged instance is removed by its own id, not every duplicate of the same unit.
+						// PR-1 (G15b): a sourced unit in the drag asks once, through the shared removal path.
+						const units = payload.nodeIds
+							.map((nodeId) => this.findNodeAnywhere(draggedView.root, nodeId)?.node)
+							.filter((node): node is ViewNode => node?.type === "unit");
+						// A sourced unit asks first, so the removal can run later from the confirm modal,
+						// outside this call's cause: hand the cause down.
+						this.removeUnitsFromView(
+							payload.viewId,
+							units,
+							() => {
+								this.selectedBucketNodeIds.clear();
+								this.queueRender();
+							},
+							"drop"
+						);
+						return;
+					}
+				}
+				this.selectedBucketNodeIds.clear();
+				this.queueRender();
+				return;
+			}
+
+			const viewId = target.viewId;
+			let parentId: string | null = null;
+			let position: number | undefined; // undefined => append (nest, bucket-root, inbox-area)
+
+			if (target.kind === "node") {
+				const view = this.plugin.viewsManager.getView(viewId);
+				if (view && zone !== "nest") {
+					// G1/G2: an edge drop never nests into the target — it lands as a sibling in the
+					// target's own parent (the bucket root, if the target is top-level), at the slot the
+					// indicator line showed: right before the target ("before") or right after it ("after").
+					//
+					// PR-4 (G4/E13): but only once the target's own parent list's effective sort agrees —
+					// `assessDrop` re-derives the same decision `makeDropZone`'s dragover handler showed,
+					// from the live `payload` (not the batch-representative visual shortcut) so a sorted
+					// list's own child is refused outright here too, whole-batch, with the Notice.
+					const assessment = this.assessDrop(target, zone, payload);
+					if (!assessment) return; // target vanished mid-drag — nothing left to drop onto.
+					if (assessment.decision === "refuse") {
+						if (assessment.effectiveSort) void this.showSortedDropRefusedNotice(view, assessment.parentId, assessment.effectiveSort);
+						return;
+					}
+					parentId = assessment.parentId;
+					position = zone === "after" ? assessment.index + 1 : assessment.index;
+				} else {
+					const found = view && this.findNodeAnywhere(view.root, target.nodeId);
+					if (found) parentId = found.node.id;
+				}
+			}
+
 			if (payload.kind === "node") {
-				const draggedView = this.plugin.viewsManager.getView(payload.viewId);
-				if (draggedView) {
-					// PR 13: each dragged instance is removed by its own id, not every duplicate of the same unit.
-					// PR-1 (G15b): a sourced unit in the drag asks once, through the shared removal path.
-					const units = payload.nodeIds
-						.map((nodeId) => this.findNodeAnywhere(draggedView.root, nodeId)?.node)
-						.filter((node): node is ViewNode => node?.type === "unit");
-					this.removeUnitsFromView(payload.viewId, units, () => {
-						this.selectedBucketNodeIds.clear();
-						this.queueRender();
+				const view = this.plugin.viewsManager.getView(viewId);
+				if (!view) return;
+				// PR 20: a node already nested under *another* node in this same drag batch travels along
+				// with that ancestor's own move automatically — moving it again separately right after
+				// would yank it back out into a sibling of its own ancestor, flattening a relationship the
+				// user very likely meant to keep by dragging them together in the first place.
+				const toMove = payload.nodeIds.filter((id) => {
+					const found = this.findNodeAnywhere(view.root, id);
+					if (!found) return false;
+					return !payload.nodeIds.some((otherId) => {
+						if (otherId === id) return false;
+						const other = this.findNodeAnywhere(view.root, otherId);
+						return !!other && this.nodeContainsDescendant(other.node, id);
 					});
-					return;
-				}
-			}
-			this.selectedBucketNodeIds.clear();
-			this.queueRender();
-			return;
-		}
-
-		const viewId = target.viewId;
-		let parentId: string | null = null;
-		let position: number | undefined; // undefined => append (nest, bucket-root, inbox-area)
-
-		if (target.kind === "node") {
-			const view = this.plugin.viewsManager.getView(viewId);
-			if (view && zone !== "nest") {
-				// G1/G2: an edge drop never nests into the target — it lands as a sibling in the
-				// target's own parent (the bucket root, if the target is top-level), at the slot the
-				// indicator line showed: right before the target ("before") or right after it ("after").
-				//
-				// PR-4 (G4/E13): but only once the target's own parent list's effective sort agrees —
-				// `assessDrop` re-derives the same decision `makeDropZone`'s dragover handler showed,
-				// from the live `payload` (not the batch-representative visual shortcut) so a sorted
-				// list's own child is refused outright here too, whole-batch, with the Notice.
-				const assessment = this.assessDrop(target, zone, payload);
-				if (!assessment) return; // target vanished mid-drag — nothing left to drop onto.
-				if (assessment.decision === "refuse") {
-					if (assessment.effectiveSort) void this.showSortedDropRefusedNotice(view, assessment.parentId, assessment.effectiveSort);
-					return;
-				}
-				parentId = assessment.parentId;
-				position = zone === "after" ? assessment.index + 1 : assessment.index;
-			} else {
-				const found = view && this.findNodeAnywhere(view.root, target.nodeId);
-				if (found) parentId = found.node.id;
-			}
-		}
-
-		if (payload.kind === "node") {
-			const view = this.plugin.viewsManager.getView(viewId);
-			if (!view) return;
-			// PR 20: a node already nested under *another* node in this same drag batch travels along
-			// with that ancestor's own move automatically — moving it again separately right after
-			// would yank it back out into a sibling of its own ancestor, flattening a relationship the
-			// user very likely meant to keep by dragging them together in the first place.
-			const toMove = payload.nodeIds.filter((id) => {
-				const found = this.findNodeAnywhere(view.root, id);
-				if (!found) return false;
-				return !payload.nodeIds.some((otherId) => {
-					if (otherId === id) return false;
-					const other = this.findNodeAnywhere(view.root, otherId);
-					return !!other && this.nodeContainsDescendant(other.node, id);
 				});
-			});
-			// An existing tree node (meta or unit) is being reparented/reordered — `moveNode` operates
-			// on it directly by id, in place, so its own children/collapsed state travels with it.
-			// PR-3 (G3): for an edge drop, `index` starts at the computed sibling position instead of
-			// always the end, so the whole selection lands together at the destination in the same
-			// relative order it was dragged in.
-			//
-			// R1 fix: the next slot is derived from where the *previous* row actually landed, not
-			// from a flat `index++`. `moveNode`'s `index` param is read against the pre-removal array
-			// (see its own doc comment) and adjusted for a same-parent downward move — so once any
-			// moved row came from above the drop point in the same parent, a naive running counter
-			// drifts one slot too high for every row after it (and mis-handles E1 no-ops the same
-			// way). Re-reading each node's real post-move position with `findNodeParent` and chaining
-			// the next index off *that* keeps the batch landing correctly regardless of which parent
-			// each row started in, or whether a given move turned out to be a no-op.
-			let index = position ?? (parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length);
-			for (const nodeId of toMove) {
-				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) {
-					const landed = this.findNodeParent(view.root, nodeId, null);
-					index = landed ? landed.index + 1 : index + 1;
+				// An existing tree node (meta or unit) is being reparented/reordered — `moveNode` operates
+				// on it directly by id, in place, so its own children/collapsed state travels with it.
+				// PR-3 (G3): for an edge drop, `index` starts at the computed sibling position instead of
+				// always the end, so the whole selection lands together at the destination in the same
+				// relative order it was dragged in.
+				//
+				// R1 fix: the next slot is derived from where the *previous* row actually landed, not
+				// from a flat `index++`. `moveNode`'s `index` param is read against the pre-removal array
+				// (see its own doc comment) and adjusted for a same-parent downward move — so once any
+				// moved row came from above the drop point in the same parent, a naive running counter
+				// drifts one slot too high for every row after it (and mis-handles E1 no-ops the same
+				// way). Re-reading each node's real post-move position with `findNodeParent` and chaining
+				// the next index off *that* keeps the batch landing correctly regardless of which parent
+				// each row started in, or whether a given move turned out to be a no-op.
+				let index = position ?? (parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length);
+				for (const nodeId of toMove) {
+					if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) {
+						const landed = this.findNodeParent(view.root, nodeId, null);
+						index = landed ? landed.index + 1 : index + 1;
+					}
+				}
+				this.selectedBucketNodeIds.clear();
+				this.queueRender();
+				return;
+			}
+
+			// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view.
+			// PR-3 (G1): an edge drop places the batch starting at `position`, in drag order; a nest/
+			// append drop (`position` undefined) keeps the pre-PR-3 behaviour of always appending.
+			if (position === undefined) {
+				for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
+			} else {
+				let pos = position;
+				for (const ref of payload.refs) {
+					this.plugin.viewsManager.placeUnit(viewId, ref, parentId, pos);
+					pos++;
 				}
 			}
-			this.selectedBucketNodeIds.clear();
+			this.selectedInboxRefKeys.clear();
 			this.queueRender();
-			return;
-		}
-
-		// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view.
-		// PR-3 (G1): an edge drop places the batch starting at `position`, in drag order; a nest/
-		// append drop (`position` undefined) keeps the pre-PR-3 behaviour of always appending.
-		if (position === undefined) {
-			for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
-		} else {
-			let pos = position;
-			for (const ref of payload.refs) {
-				this.plugin.viewsManager.placeUnit(viewId, ref, parentId, pos);
-				pos++;
-			}
-		}
-		this.selectedInboxRefKeys.clear();
-		this.queueRender();
+		});
 	}
 
 	private nodeContainsDescendant(node: ViewNode, targetId: string): boolean {
@@ -3781,8 +4142,9 @@ export class AtlasExplorerView extends ItemView {
 	 * the existing link-graph promotion recompute (does it have a real backlink from outside the
 	 * module?) — this never force-promotes it; a file with no backlinks simply becomes ordinary,
 	 * invisible internals, matching the rest of the model. A file that is already placed in a view
-	 * stays placed in every view, as a normal row at its new path, whether or not it is still a unit. A placed *block* is still un-placed in every view once the link
-	 * graph resolves and it is no longer a unit. */
+	 * stays placed in every view, as a normal row at its new path, whether or not it is still a unit.
+	 * A placed *block* is still un-placed in every view once the link graph resolves and it is no
+	 * longer a unit. */
 	private async handleAddToModule(ref: UnitRef, folderPath: string, skipConfirm = false): Promise<void> {
 		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
 		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
@@ -4464,14 +4826,17 @@ export class AtlasExplorerView extends ItemView {
 	 * Units holding a live source get a single confirm for the whole batch; confirming clears each one's
 	 * device-local state, cancelling changes nothing (`after` runs only once removal has happened).
 	 * Units without a live source are removed straight away, as before. */
-	private removeUnitsFromView(viewId: string, units: ViewNode[], after?: () => void): void {
-		const removeAll = () => {
+	private removeUnitsFromView(viewId: string, units: ViewNode[], after?: () => void, cause?: RenderTriggerKind): void {
+		const removeUnits = () => {
 			for (const node of units) {
 				if (this.holdsLiveDataSource(node)) this.forgetDeviceLocalSourceState(node.id);
 				this.plugin.viewsManager.unplaceNode(viewId, node.id);
 			}
 			after?.();
 		};
+		// Render log: `cause` names the gesture behind the removal. The confirm modal runs `removeAll`
+		// later, outside the caller's own `withRenderCause`, so the cause is re-applied here.
+		const removeAll = () => (cause ? withRenderCause(cause, removeUnits) : removeUnits());
 		const sourced = units.filter((node) => this.holdsLiveDataSource(node));
 		if (sourced.length === 0) {
 			removeAll();
@@ -4757,8 +5122,8 @@ export class AtlasExplorerView extends ItemView {
 	 * every existing `[data-ref-key]` row is read via its own dataset string and compared with plain
 	 * `===`, so a path with selector/regex characters (`Draft [v2].md`, `#`, quotes...) needs no
 	 * escaping and can't be read as a selector (the added special-character case). */
-	private updateActiveHighlight(): void {
-		const container = this.containerEl.children[1] as HTMLElement;
+	private updateActiveHighlight(root?: HTMLElement): void {
+		const container = root ?? (this.containerEl.children[1] as HTMLElement);
 		container.querySelectorAll(".atlas-row.is-active").forEach((el) => el.removeClass("is-active"));
 		// PR-1.F2 (G9): read live, not cached — clears every highlight and returns before adding any
 		// when off, so the setting is the single source of truth this method itself enforces (hiding

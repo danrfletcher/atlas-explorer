@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,9 @@ import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types"
 import { activeSortFor } from "../../src/sort";
 import { basenameRowInfo, callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, proto, realNode, rowOrder, useRealRenderNode, view } from "./explorer-view-sort-truncate-helpers";
 import { dragOverAt, makeDropFake, makeRow, makeVm } from "./explorer-view-drop-helpers";
+import { makeSectionHarness, SectionHarness } from "../explorer-header-fixtures";
+import { PressEnv, flush, openExplorer } from "./explorer-view-press-helpers";
+import { DEFAULT_SETTINGS } from "../../src/settings";
 
 function apiItem(id: string, explicitStatusId?: string): ApiItemState {
 	return { id, label: id, explicitStatusId };
@@ -721,5 +724,105 @@ describe("PR-1 R2 — Modified sorts Outside-Vault Folder-source children by the
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+// PR-2 (F2): through the real `render()` (the staged compare and skip included) and the real bucket sort,
+// a Modified-sorted list moves its rows at the next refresh trigger, never at a save, and a render that is
+// skipped for identical output still uses up the refresh it was given.
+describe("PR-2 F2 — Modified-sorted rows do not move at an autosave; they move at the next refresh", () => {
+	let h: SectionHarness;
+	let env: PressEnv;
+	let mtimes: Record<string, number>;
+
+	const ids = () => Array.from(h.panel().querySelectorAll<HTMLElement>(".atlas-bucket .atlas-row-unit")).map((el) => el.dataset.id);
+	const records: MutationRecord[] = [];
+	let observer: MutationObserver;
+	const watch = () => {
+		records.length = 0;
+		observer = new MutationObserver((batch) => records.push(...batch));
+		observer.observe(h.panel(), { subtree: true, childList: true, attributes: true, characterData: true });
+	};
+	const mutationsSince = () => records.length + observer.takeRecords().length;
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		mtimes = { "A.md": 100, "B.md": 200 };
+		h = makeSectionHarness({ bucketRows: 0, inboxRows: 0 });
+		const ex = h.explorer as unknown as Record<string, unknown> & {
+			plugin: { statusesManager: unknown; settings: unknown; viewsManager: Record<string, unknown> };
+		};
+		// The real bucket sort; only the row itself, the lookups and the mtime source are stubbed.
+		delete ex.renderNodeList;
+		ex.renderNode = async (node: ViewNode, container: HTMLElement) => {
+			container.createDiv({ cls: "atlas-row atlas-row-unit", attr: { "data-id": node.id } });
+		};
+		ex.modifiedTimeForRef = (ref: { path: string }) => mtimes[ref.path];
+		const modifiedView: View = {
+			id: "v1",
+			name: "Actionable",
+			inboxMode: "view",
+			sortMode: "modified",
+			root: [realNode("a", { ref: { kind: "file", path: "A.md" } }), realNode("b", { ref: { kind: "file", path: "B.md" } })],
+		};
+		ex.plugin.statusesManager = makeStatusesManager();
+		ex.plugin.settings = DEFAULT_SETTINGS;
+		Object.assign(ex.plugin.viewsManager, { getActiveView: () => modifiedView, managedRowFilterState: () => "shown", getNode: () => null });
+		env = await openExplorer(h);
+		await flush(env);
+	});
+
+	afterEach(() => {
+		observer?.disconnect();
+		env.teardown();
+		h.teardown();
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it("the first render sorts newest first", () => {
+		expect(ids()).toEqual(["b", "a"]);
+	});
+
+	it("a note saved after the list was drawn does not move any row at the autosave", async () => {
+		mtimes = { "A.md": 300, "B.md": 50 }; // A is now the newest
+		watch();
+
+		env.fireViewsChange(false); // metadata resolve after the autosave
+		await flush(env);
+		expect(ids()).toEqual(["b", "a"]);
+		expect(mutationsSince()).toBe(0); // skipped: the pane is untouched
+
+		env.fireUnitIndexChange(); // the index hears about the save too
+		await flush(env);
+		expect(ids()).toEqual(["b", "a"]);
+		expect(mutationsSince()).toBe(0);
+	});
+
+	it("the next refresh trigger (the pane regains focus) moves the rows, in one repaint", async () => {
+		mtimes = { "A.md": 300, "B.md": 50 };
+		env.fireViewsChange(false);
+		await flush(env);
+		expect(ids()).toEqual(["b", "a"]);
+
+		env.fireLeafChange({}); // another pane was active
+		env.fireLeafChange(env.ex.leaf);
+		await flush(env);
+
+		expect(ids()).toEqual(["a", "b"]);
+	});
+
+	it("a refresh whose render is skipped for identical output still uses the refresh up", async () => {
+		// Focus regained while nothing has changed: the render is skipped, and it consumed the refresh.
+		env.fireLeafChange({});
+		env.fireLeafChange(env.ex.leaf);
+		await flush(env);
+		expect((env.ex as unknown as { lastRenderPainted: boolean }).lastRenderPainted).toBe(false);
+
+		mtimes = { "A.md": 300, "B.md": 50 }; // a save after that refresh
+		env.fireViewsChange(false);
+		await flush(env);
+
+		expect(ids()).toEqual(["b", "a"]); // rows move at the next refresh, not at the save
 	});
 });

@@ -6,7 +6,7 @@
 import { vi } from "vitest";
 import type { WorkspaceLeaf } from "obsidian";
 import { AtlasExplorerView } from "../src/explorer-view";
-import { View } from "../src/types";
+import { Unit, View } from "../src/types";
 import { FakeResizeObserver, fileUnits } from "./unit/explorer-view-scroll-helpers";
 
 export const ROW = 28;
@@ -21,7 +21,22 @@ export interface ScrollCall {
 	behavior: ScrollBehavior;
 }
 
+/** What the harness's stubbed bucket and inbox render from. A test changes it, then renders, to model
+ * an edited label, a status change, a reorder or a new row (PR-2). */
+export interface SectionState {
+	units: Unit[];
+	/** Inbox row text by unit path; a path not in the map shows its own path. */
+	labels: Map<string, string>;
+	bucketRows: number;
+	/** Stamped on every bucket row as `data-status`, standing in for a status dot. */
+	bucketStatus: string;
+}
+
 export interface SectionHarness {
+	state: SectionState;
+	/** PR-2: whether the pane counts as on screen; the host's `isShown()` answers with it. */
+	setShown: (shown: boolean) => void;
+	host: HTMLElement;
 	explorer: AtlasExplorerView;
 	scrollCalls: ScrollCall[];
 	setInboxMode: ReturnType<typeof vi.fn>;
@@ -60,8 +75,8 @@ function install(saved: Saved[], target: object, key: string, descriptor: Proper
 }
 
 export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: number } = {}): SectionHarness {
-	const bucketRows = options.bucketRows ?? BUCKET_ROWS;
 	const inboxRows = options.inboxRows ?? INBOX_ROWS;
+	const state: SectionState = { units: fileUnits(inboxRows), labels: new Map(), bucketRows: options.bucketRows ?? BUCKET_ROWS, bucketStatus: "" };
 	let headerH = 28;
 	let viewH = VIEWPORT_H;
 	const scrollCalls: ScrollCall[] = [];
@@ -73,7 +88,7 @@ export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: n
 
 	/** Geometry in scroll-body coordinates (content-space), derived from the rendered DOM. */
 	const geometry = () => {
-		const bucketContent = isCollapsed(".atlas-bucket > .atlas-meta-children") ? 0 : bucketRows * ROW;
+		const bucketContent = isCollapsed(".atlas-bucket > .atlas-meta-children") ? 0 : state.bucketRows * ROW;
 		const bucketH = headerH + bucketContent;
 		const spacer = document.querySelector<HTMLElement>(".atlas-inbox-spacer");
 		const inboxContent = isCollapsed(".atlas-inbox > .atlas-meta-children") ? 0 : parseFloat(spacer?.style.height ?? "0") || 0;
@@ -158,13 +173,12 @@ export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: n
 	const openAddFileModal = vi.fn();
 	const showInboxHeaderMenu = vi.fn();
 	const setInboxMode = vi.fn();
-	const units = fileUnits(inboxRows);
 	const plugin = {
 		app: { workspace: { on: vi.fn(() => ({})) }, vault: { getAbstractFileByPath: () => null } },
-		unitIndex: { getUnits: () => units, onChange: vi.fn(() => () => {}) },
+		unitIndex: { getUnits: () => state.units, onChange: vi.fn(() => () => {}) },
 		viewsManager: {
 			getActiveView: () => view,
-			getInboxUnits: () => units,
+			getInboxUnits: () => state.units,
 			getDismissedInboxUnits: () => [],
 			setInboxMode,
 			onChange: vi.fn(() => () => {}),
@@ -181,9 +195,9 @@ export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: n
 		renderToolbar: (container: HTMLElement) => container.createDiv({ cls: "atlas-toolbar" }),
 		// The 60 bucket rows; their content doesn't matter to the header behaviour under test.
 		renderNodeList: async (_nodes: unknown, container: HTMLElement) => {
-			for (let i = 0; i < bucketRows; i++) container.createDiv({ cls: "atlas-row atlas-row-unit" });
+			for (let i = 0; i < state.bucketRows; i++) container.createDiv({ cls: "atlas-row atlas-row-unit", attr: { "data-status": state.bucketStatus } });
 		},
-		resolveRef: async (ref: { path: string }) => ({ text: ref.path, icon: "file" }),
+		resolveRef: async (ref: { path: string }) => ({ text: state.labels.get(ref.path) ?? ref.path, icon: "file" }),
 		matchesFilter: () => true,
 		setPlacementTooltip: vi.fn(),
 		updateActiveHighlight: vi.fn(),
@@ -197,6 +211,12 @@ export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: n
 	const panel = () => host.children[1] as HTMLElement;
 
 	return {
+		state,
+		setShown: (shown: boolean) => {
+			if (shown) host.removeAttribute("data-test-hidden");
+			else host.setAttribute("data-test-hidden", "");
+		},
+		host,
 		explorer,
 		scrollCalls,
 		setInboxMode,
