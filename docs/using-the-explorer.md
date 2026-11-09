@@ -88,10 +88,10 @@ The inbox lists every unit not placed in the current view. With **Auto-promote l
 
 ## Module contents
 
-Click a module's icon (or choose **View module contents**) to see its internals, or press and hold anywhere on a module row for half a second. Moving the pointer more than a few pixels, or releasing early, cancels the hold; a right-click never starts one. Internals aren't units until promoted. Right-click an item there for **Reveal in native explorer**, **Promote and place in view…** or **Promote to inbox**.
+Click a module's icon (or choose **View module contents**) to see its internals, or press and hold anywhere on a module row for half a second. Moving the pointer more than 5 pixels, or releasing early, cancels the hold; a right-click never starts one. Internals aren't units until promoted. Right-click an item there for **Reveal in native explorer**, **Promote and place in view…** or **Promote to inbox**.
 
 - **Hide / unhide**: the eye button on each row hides that item (a folder hides what's under it). Hidden rows are dimmed, and the choice is remembered per module. A hidden item that only a link promoted stays out of the inbox; items you promoted, added or placed yourself are not affected. Nothing on disk changes, and links to the item still resolve.
-- **Drag out**: drag an item out of the modal and the modal fades so what's behind it can take the drop. Drop it on the Inbox to add it there (with the **added** pill), or on the view to promote and place it. Dropping anywhere else, or back inside the modal, cancels and changes nothing.
+- **Drag out**: drag an item out of the modal and the modal fades so what's behind it can take the drop. Drop it on the Inbox to add it there (with the **added** pill), or on the view to promote and place it. Dropping anywhere else, or back inside the modal, cancels and changes nothing, and so does pressing **Escape** mid-drag: the modal returns to full opacity and stays open.
 
 ## Writing links: the `[[` suggester
 

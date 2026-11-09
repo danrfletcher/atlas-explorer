@@ -1,7 +1,7 @@
 import { App, FuzzyMatch, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TAbstractFile, TFile, TFolder, WorkspaceLeaf, renderResults, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import type { AtlasSettings } from "./settings";
-import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, nodeHoldsLiveDataSource, parseUnitRefKey, unitRefKey, unitToRef } from "./types";
+import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, nodeHoldsLiveDataSource, parseUnitRefKey, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 import { matchesActiveFile } from "./active-highlight";
 import {
 	ApiSourceIdPair,
@@ -385,8 +385,22 @@ export class ModuleContentsModal extends Modal {
 		if (this.filterText) this.setFilterText(this.filterText);
 	}
 
+	/** PR-3 (E4): a close request while a boundary drag is in progress aborts the drag instead and the
+	 * modal stays open. Obsidian handles Escape in its own `window` capture listener, registered before
+	 * any plugin's, so it reaches this modal's scope and calls `close()` before a plugin listener can
+	 * take the key (and that close removes the plugin listener before it runs). Guarding `close()` is
+	 * the only point that sees the Escape first. A drag that has ended (`dragend`, a drop) has already
+	 * cleared `internalDrag`, so those closes go through. */
+	close(): void {
+		if (this.internalDrag) {
+			this.cancelItemDrag();
+			return;
+		}
+		super.close();
+	}
+
 	onClose(): void {
-		this.stopItemDrag();
+		this.cancelItemDrag(); // a drag still in progress must not leave the explorer's drop zones armed
 		this.contentEl.empty();
 		this.callbacks.onCloseCallback?.();
 	}
@@ -533,13 +547,27 @@ export class ModuleContentsModal extends Modal {
 				e.preventDefault();
 				e.stopPropagation();
 			};
+			// PR-3 (E4): Escape aborts the drag. The browser cancels a native drag itself, but if the key
+			// does reach the page it must neither close the modal nor leave the explorer's drop zones
+			// armed, so it is taken here and the drag is ended with no state change. This is the fallback:
+			// Obsidian's own `window` capture listener is registered earlier and runs first, so the
+			// modal-close it triggers is stopped in `close()`, which also ends the drag; this listener then
+			// no longer exists. It still covers an Escape Obsidian does not route to this modal.
+			const onKey = (e: KeyboardEvent) => {
+				if (e.key !== "Escape") return;
+				e.preventDefault();
+				e.stopImmediatePropagation();
+				this.cancelItemDrag();
+			};
 			document.addEventListener("dragover", onOver, true);
 			this.modalEl.addEventListener("dragleave", onDragLeave);
 			document.addEventListener("drop", onDrop, true);
+			window.addEventListener("keydown", onKey, true);
 			this.removeDragListeners = () => {
 				document.removeEventListener("dragover", onOver, true);
 				this.modalEl.removeEventListener("dragleave", onDragLeave);
 				document.removeEventListener("drop", onDrop, true);
+				window.removeEventListener("keydown", onKey, true);
 			};
 		});
 		row.addEventListener("dragend", () => {
@@ -553,6 +581,15 @@ export class ModuleContentsModal extends Modal {
 	private updateDragOut(x: number, y: number): void {
 		if (!this.internalDrag) return;
 		this.containerEl.toggleClass(MODULE_DRAG_OUT_CLASS, pointOutsideRect(x, y, this.modalEl.getBoundingClientRect()));
+	}
+
+	/** Aborts a drag in progress (Escape, or the modal closing under it): this side is reset as in
+	 * `stopItemDrag`, and the explorer is told so it disarms its drop zones. Nothing is promoted or
+	 * placed, and a no-op when no drag is in progress. */
+	private cancelItemDrag(): void {
+		if (!this.internalDrag) return;
+		this.stopItemDrag();
+		this.callbacks.onItemDragEnd();
 	}
 
 	/** Ends the item drag on this side: listeners off, opacity back, no state change. */
@@ -4020,7 +4057,7 @@ export class AtlasExplorerView extends ItemView {
 			// like "Promote and place in view…", so it takes the inbox-payload placement path below.
 			const moduleRef = dragged.kind === "module-item" ? dragged.ref : null;
 			if (moduleRef && target.kind === "inbox-area") {
-				this.plugin.unitIndex.markAdded(moduleRef);
+				this.addModuleItemToInbox(moduleRef);
 				void this.plugin.flushSave();
 				this.moduleDragCommitted = true;
 				this.queueRender();
@@ -5260,11 +5297,21 @@ export class AtlasExplorerView extends ItemView {
 		modal.open();
 	}
 
+	/** PR-3 (G3): the one way a Module Contents item reaches the inbox's "added" state, shared by the
+	 * menu item and the drop on the Inbox. An item that is already a manual promotion is left alone, so
+	 * `addedItems` never gains a second entry for something `manualPromotions` already holds; one
+	 * that is already added is a no-op inside `markAdded`. In-memory only: the caller saves. */
+	private addModuleItemToInbox(ref: UnitRef): void {
+		const { unitIndex } = this.plugin;
+		if (unitIndex.getManualPromotions().some((manual) => unitRefsEqual(manual, ref))) return;
+		unitIndex.markAdded(ref);
+	}
+
 	/** PR-2 (G2): "Promote to inbox" on a Module Contents item. Marks it "added" (the terminal inbox
 	 * state, same as the "+" button), saves at once and redraws; plugin data only, nothing on disk. */
 	private promoteToInbox(path: string, isFolder: boolean): void {
 		const ref: UnitRef = isFolder ? { kind: "folder", path } : { kind: "file", path };
-		this.plugin.unitIndex.markAdded(ref);
+		this.addModuleItemToInbox(ref);
 		void this.plugin.flushSave();
 		void this.render();
 	}

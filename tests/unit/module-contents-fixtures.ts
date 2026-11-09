@@ -72,7 +72,7 @@ export function makeModuleRig(files: string[], folders: string[], hidden: Record
 		promoteAndPlaceFlow: vi.fn(),
 		singleDragRef: proto.singleDragRef,
 	} as Record<string, unknown>;
-	for (const name of ["moduleModalCallbacks", "openModuleContentsModal", "promoteToInbox", "startModuleItemDrag", "endModuleItemDrag", "handleDrop"]) {
+	for (const name of ["moduleModalCallbacks", "openModuleContentsModal", "promoteToInbox", "addModuleItemToInbox", "startModuleItemDrag", "endModuleItemDrag", "handleDrop", "findNodeAnywhere"]) {
 		explorer[name] = proto[name].bind(explorer);
 	}
 	explorer.singleDragRef = proto.singleDragRef.bind(explorer);

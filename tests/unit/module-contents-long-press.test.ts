@@ -36,9 +36,9 @@ describe("G2 long-press: 500 ms hold on a module row opens Module Contents", () 
 		expect(open).toHaveBeenCalledWith("Mod");
 	});
 
-	it("the constants are the spec's: 500 ms and a 6 px slop", () => {
+	it("the constants are the spec's: 500 ms and a 5 px slop", () => {
 		expect(LONG_PRESS_MS).toBe(500);
-		expect(LONG_PRESS_SLOP_PX).toBe(6);
+		expect(LONG_PRESS_SLOP_PX).toBe(5);
 	});
 
 	it("also fires when the hold starts on the row's icon (a status/module icon is part of the row)", () => {
@@ -48,19 +48,19 @@ describe("G2 long-press: 500 ms hold on a module row opens Module Contents", () 
 		expect(open).toHaveBeenCalledTimes(1);
 	});
 
-	it("moving more than 6 px cancels the timer", () => {
+	it("moving more than 5 px cancels the timer", () => {
 		const { row, open } = wiredRow();
 		down(row, 10, 10);
-		move(row, 10, 17); // 7 px
+		move(row, 10, 16); // 6 px
 		vi.advanceTimersByTime(2000);
 		expect(open).not.toHaveBeenCalled();
 	});
 
-	it("moving up to 6 px does not cancel it", () => {
+	it("moving up to 5 px does not cancel it", () => {
 		const { row, open } = wiredRow();
 		down(row, 10, 10);
-		move(row, 13, 15); // sqrt(9+25) = 5.83 px
-		move(row, 10, 16); // exactly 6 px
+		move(row, 13, 14); // sqrt(9+16) = 5 px, exactly the slop
+		move(row, 10, 15); // 5 px
 		vi.advanceTimersByTime(500);
 		expect(open).toHaveBeenCalledTimes(1);
 	});

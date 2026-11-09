@@ -3,7 +3,7 @@ export const LONG_PRESS_MS = 500;
 
 /** How far (px, straight-line) the pointer may wander during the hold before it counts as a drag or a
  * scroll rather than a press, cancelling the timer. */
-export const LONG_PRESS_SLOP_PX = 6;
+export const LONG_PRESS_SLOP_PX = 5;
 
 export interface LongPressTimers {
 	setTimeoutFn: (cb: () => void, ms: number) => unknown;
