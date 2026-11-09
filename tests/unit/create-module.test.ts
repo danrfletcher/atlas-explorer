@@ -545,7 +545,7 @@ describe("UT-11 menu builder (the real showUnitMenu)", () => {
 		["root pdf", { kind: "file", path: "Foo.pdf" }, { type: "root-file", path: "Foo.pdf" }, BASE],
 		["missing file", { kind: "file", path: "Gone.md" }, undefined, BASE_MISSING],
 		["promoted block", { kind: "block", path: "Foo.md", subpath: "^abc123" }, { type: "promoted-block", path: "Foo.md", subpath: "^abc123" }, ["Open", "Open in new tab", "Copy link", "Sort children…", "Data source…", "Add under…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…"]],
-		["module row", { kind: "folder", path: "Alpha" }, { type: "folder-unit", path: "Alpha" }, ["Open", "Open in new tab", "Reveal in native explorer", "View module contents", "Copy link", "Sort children…", "Data source…", "Add under…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…"]],
+		["module row", { kind: "folder", path: "Alpha" }, { type: "folder-unit", path: "Alpha" }, ["Open", "Open in new tab", "Click action…", "Reveal in native explorer", "View module contents", "Copy link", "Sort children…", "Data source…", "Add under…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…"]],
 	])("%s: exactly the existing items, no Create Module", (_label, ref, unit, expected) => {
 		const { menu } = menuFor(ref, unit ? [unit] : []);
 		expect(menu.titles()).toEqual(expected);

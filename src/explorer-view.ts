@@ -17,6 +17,7 @@ import { resolveUnit } from "./unit-display";
 import { attachLongPress } from "./long-press";
 import { pointOutsideRect } from "./module-contents-drag";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
+import { ClickActionModal, ClickActionTarget } from "./click-action-modal";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
 import { openStatusPickerPopup } from "./status-popup";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
@@ -1110,6 +1111,8 @@ export class AtlasExplorerView extends ItemView {
 	 * must close it too (resolving the flow as a cancel), or confirming it afterwards would mutate
 	 * and `render()` a view that is gone. */
 	private openAddUnderPrompts = new Set<{ close(): void }>();
+	/** Atlas-18: the Click action… modals currently open (closed with the view, like every other modal). */
+	private openClickActionModals = new Set<ClickActionModal>();
 	private renderQueued = false;
 	/** Render log: the kind of the first trigger that queued the pending `queueRender()` timeout. Later
 	 * requests in the same tick coalesce into it and don't overwrite it. */
@@ -1347,6 +1350,8 @@ export class AtlasExplorerView extends ItemView {
 		for (const modal of [...this.openConfirmDeleteModals]) modal.close();
 		// Same iterate-a-copy rule: closing a prompt settles it, which un-registers it from the set.
 		for (const prompt of [...this.openAddUnderPrompts]) prompt.close();
+		// Same rule for the Click action… modals: closing one un-registers it (and closes its command picker).
+		for (const modal of [...this.openClickActionModals]) modal.close();
 		// Nothing may render on, or stay held for, a closed view: drop the press state and settle any
 		// promise a held render handed out so no `awaitRenderSettled()` caller waits on it forever.
 		this.closed = true;
@@ -1810,6 +1815,11 @@ export class AtlasExplorerView extends ItemView {
 	private showApiItemMenu(evt: MouseEvent, view: View, folderNode: ViewNode, item: ApiItemState): void {
 		const menu = new Menu();
 		const isPlaceholder = item.kind === PLACEHOLDER_ROW_KIND;
+		// Atlas-18 (G15): API item rows only (a row of an API source), never a Table or CSV row.
+		if (folderNode.apiSource) {
+			menu.addItem((mi) => mi.setTitle("Click action…").setIcon("mouse-pointer-click").onClick(() => this.openClickActionModal(view, folderNode, item)));
+			menu.addSeparator();
+		}
 		if (item.noteRef) {
 			menu.addItem((mi) => mi.setTitle("Open attachment").setIcon("file-text").onClick(() => void this.openApiItemAttachment(item)));
 			menu.addSeparator();
@@ -4429,6 +4439,11 @@ export class AtlasExplorerView extends ItemView {
 			menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
 			menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
 		}
+		// Atlas-18 (G15): a module (a folder ref) next to Open. Not on an Outside-Vault-managed row, whose
+		// plain click opens nothing, so "Default (open the interface note)" would not be true of it.
+		if (!outsideManaged && ref.kind === "folder") {
+			menu.addItem((item) => item.setTitle("Click action…").setIcon("mouse-pointer-click").onClick(() => this.openClickActionModal(view, node)));
+		}
 		if (!outsideManaged && (ref.kind === "file" || ref.kind === "folder")) {
 			menu.addItem((item) => item.setTitle("Reveal in native explorer").setIcon("folder-open").onClick(() => this.revealInNativeExplorer(ref.path)));
 		}
@@ -4899,6 +4914,24 @@ export class AtlasExplorerView extends ItemView {
 		).open();
 	}
 
+	/** Atlas-18 (G1/G2/G10): opens the Click action… modal on a module, Folder or API item row, preloaded with
+	 * what the row holds now. Save writes through `ViewsManager` (`undefined` = clear: the key goes absent).
+	 * Storage only: nothing runs. `item` is set for an API item row, whose action lives on its
+	 * `apiItemState` entry under `node` (the owning Folder); otherwise `node` is the module or Folder itself. */
+	openClickActionModal(view: View, node: ViewNode, item?: ApiItemState): void {
+		const { viewsManager } = this.plugin;
+		const target: ClickActionTarget = item ? "api-item" : node.type === "meta" ? "folder" : "module";
+		// Read live at open time, not at menu-build time: the row may have changed since the menu was drawn.
+		const stored = item ? viewsManager.getNode(view.id, node.id)?.apiItemState?.[item.id]?.clickAction : viewsManager.getNode(view.id, node.id)?.clickAction;
+		const modal = new ClickActionModal(this.plugin.app, target, stored, (action) => {
+			if (item) viewsManager.setApiItemClickAction(view.id, node.id, item.id, action);
+			else viewsManager.setClickAction(view.id, node.id, action);
+		});
+		this.openClickActionModals.add(modal);
+		modal.onClosed = () => this.openClickActionModals.delete(modal);
+		modal.open();
+	}
+
 	/** PR-5 (G7): the inbox section header's own right-click menu — a single toggle item, same
 	 * `Menu`/`showAtMouseEvent` construction as the toolbar view-name menu and the row menus below.
 	 * Toggling flips the instance-level `showDismissed` flag and re-renders; no persisted write, same
@@ -5043,6 +5076,8 @@ export class AtlasExplorerView extends ItemView {
 
 	private showMetaFolderMenu(evt: MouseEvent, node: ViewNode, view: View, ancestors: StatusGovernance[] = []): void {
 		const menu = new Menu();
+		// Atlas-18 (G15): top section of a Folder's menu.
+		menu.addItem((item) => item.setTitle("Click action…").setIcon("mouse-pointer-click").onClick(() => this.openClickActionModal(view, node)));
 		// PR 13: same clone-as-sibling action as a unit row's context menu — a meta folder has no
 		// disk identity to begin with, so "duplicating" it just clones the organizational label and
 		// its whole subtree, same mechanics either way (`duplicateNode` doesn't distinguish types).

@@ -87,6 +87,11 @@ export function sanitizeClickAction(raw: unknown): ClickAction | undefined {
 	return { kind, value };
 }
 
+function sameClickAction(a: ClickAction | undefined, b: ClickAction | undefined): boolean {
+	if (!a || !b) return !a && !b;
+	return a.kind === b.kind && a.value === b.value;
+}
+
 /** R20/E9: `apiItemState` entries come straight from `data.json` and can each be malformed
  * independently of the container being a well-shaped object — e.g. `{"1": {"id": "1"}}` (no label) or
  * `{"1": 5}`. Left unchecked, a missing/non-string `label` crashes `apiItemMatchesFilter` and
@@ -1891,6 +1896,42 @@ export class ViewsManager {
 		if (!item) return;
 		item.noteRef = noteRef;
 		this.save();
+	}
+
+	/** Atlas-18 (G1/G2): sets or clears a module's or Folder's Click action from the Click action… modal.
+	 * `undefined` clears it (the key is deleted, so the node stores nothing: absent = today's behaviour).
+	 * Only a Folder (`meta`) or a module (`unit` whose ref is a folder) can hold one; any other node, and
+	 * an action the load-time sanitiser would drop, is refused (`false`) and changes nothing. Saving the
+	 * stored value again is a no-op that neither persists nor notifies. Storage only: nothing runs. */
+	setClickAction(viewId: string, nodeId: string, action: ClickAction | undefined): boolean {
+		const view = this.getView(viewId);
+		const node = view && this.findNode(view.root, nodeId)?.node;
+		if (!node) return false;
+		if (node.type !== "meta" && !(node.type === "unit" && node.ref?.kind === "folder")) return false;
+		const next = action === undefined ? undefined : sanitizeClickAction(action);
+		if (action !== undefined && !next) return false;
+		if (sameClickAction(node.clickAction, next)) return true;
+		if (next) node.clickAction = next;
+		else delete node.clickAction;
+		this.save();
+		return true;
+	}
+
+	/** Atlas-18 (G10 storage half): sets or clears one API item's own Click action (the Item override). Same
+	 * rules as `setClickAction`: `undefined` deletes the key, an unsaveable action is refused, an unchanged
+	 * value is a no-op. Storage only: nothing runs. */
+	setApiItemClickAction(viewId: string, nodeId: string, itemId: string, action: ClickAction | undefined): boolean {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		const item = found?.node.apiItemState?.[itemId];
+		if (!item) return false;
+		const next = action === undefined ? undefined : sanitizeClickAction(action);
+		if (action !== undefined && !next) return false;
+		if (sameClickAction(item.clickAction, next)) return true;
+		if (next) item.clickAction = next;
+		else delete item.clickAction;
+		this.save();
+		return true;
 	}
 
 	/** G26/G29: removes a placeholder row's `apiItemState` entry outright — gated by the caller on
