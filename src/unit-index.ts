@@ -267,13 +267,33 @@ export class UnitIndex {
 
 	/** True when `unit` is promoted only because a link or embed reaches it, and its path sits under a
 	 * folder listed in `noAutoPromoteFolders`. Manual promotions and "added" items are never blocked.
-	 * Read by the inbox lists only: promotion itself is unchanged, so placed items keep resolving. */
+	 * The inbox lists read it through `isSuppressedFromInbox`: promotion itself is unchanged, so
+	 * placed items keep resolving. */
 	isLinkOnlyInNoAutoPromoteFolder(unit: Unit): boolean {
-		if (unit.type !== "promoted-file" && unit.type !== "promoted-folder" && unit.type !== "promoted-block") return false;
 		if (!isCoveredByNoAutoPromote(unit.path, this.getNormalizedNoAutoPromoteFolders())) return false;
+		return this.isLinkOnlyPromotion(unit);
+	}
+
+	/** PR-1 (G1): the classification helper. True when `unit` is a promoted-* unit that no user choice
+	 * backs: not in `manualPromotions` and not an `addedItems` entry, so only a link or embed (or a
+	 * Folder source's managed ref) put it in the index. Never true for base units (folders, root
+	 * files, free blocks) or for `added-*` units. */
+	isLinkOnlyPromotion(unit: Unit): boolean {
+		if (unit.type !== "promoted-file" && unit.type !== "promoted-folder" && unit.type !== "promoted-block") return false;
 		const ref = unitToRef(unit);
 		if (this.isAdded(ref)) return false;
 		return !this.manualPromotions.some((manual) => unitRefsEqual(manual, ref));
+	}
+
+	/** PR-1 (G1): the one inbox rule both inbox lists read. While `settings.autoPromotion` is off every
+	 * link-only promoted unit is kept out, whatever folder it sits in (this global suppression takes
+	 * precedence over `noAutoPromoteFolders`). While it is on, only link-only units under a
+	 * `noAutoPromoteFolders` entry are kept out. Read live on every call, so flipping the setting
+	 * takes effect on the next render with no index rebuild; promotion itself is unchanged, so placed
+	 * units keep resolving. */
+	isSuppressedFromInbox(unit: Unit): boolean {
+		if (!this.settings.autoPromotion) return this.isLinkOnlyPromotion(unit);
+		return this.isLinkOnlyInNoAutoPromoteFolder(unit);
 	}
 
 	/** R2: the memoised read side of `noAutoPromoteFoldersCache` — recomputes only when the settings

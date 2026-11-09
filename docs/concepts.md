@@ -22,7 +22,7 @@ You capture a thing at the largest level where it's self-contained. A chat trans
 
 So `Bets/steps/step-3.md` isn't a unit today. The day something outside `Bets/` links to it, it is. A link from inside the same module never promotes anything, and neither do self-links, links from excluded folders, unresolved links, or links inside code fences.
 
-You can also promote by hand: **Promote and place in view…** in a module's contents (see [Module contents](using-the-explorer.md#module-contents)), or the **+** button on the inbox. Manual promotions are permanent; nothing removes them. To stop a folder's files being promoted by links at all, list it under **Never auto-promote from these folders** in [Settings](settings.md).
+You can also promote by hand: **Promote and place in view…** in a module's contents (see [Module contents](using-the-explorer.md#module-contents)), or the **+** button on the inbox. Manual promotions are permanent; nothing removes them. A promoted item reaches the inbox only if **Auto-promote linked items** is on in [Settings](settings.md), which is off by default; with it off the inbox holds just your manual promotions and **+** additions, and anything you placed in a view stays placed. To stop a folder's files being promoted by links at all while it is on, list it under **Never auto-promote from these folders**.
 
 ## Free blocks
 

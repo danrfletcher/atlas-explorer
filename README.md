@@ -37,7 +37,7 @@ A **unit** is anything that (a) has an address you can link to, and (b) means th
 
 You capture a thing at the largest level where it's self-contained. A chat transcript is a file. An agent system is a folder. Anything *inside* a unit is internals, and internals are not units until something outside links to them, at which point they're **promoted** into a unit in their own right. This applies at every level: a module is a unit at capture; a file inside it stays internals until something outside the module links to it; a block inside that file stays internals until something links to *it*.
 
-So `Bets/steps/step-3.md` isn't a unit today. The day something outside `Bets/` links to it, it is. You can also promote by hand, and you can switch auto-promotion off for chosen folders.
+So `Bets/steps/step-3.md` isn't a unit today. The day something outside `Bets/` links to it, it is. You can also promote by hand, and by default links alone no longer put anything in your inbox: turn on **Auto-promote linked items** in Settings to have them appear there. You can also keep chosen folders out of auto-promotion.
 
 ### Free blocks
 
@@ -80,6 +80,7 @@ Under **Settings → Atlas Explorer**, with two tabs, **Basic** and **Status**. 
 | Pool folder | `_pool` |
 | Excluded folders | dot-folders, the pool folder, `_to_delete` |
 | Never auto-promote from these folders | none |
+| Auto-promote linked items | off |
 | Interface note convention | `<Folder>/<Folder>.md` only |
 | Replace native explorer on startup | on |
 | Block display length | 80 |

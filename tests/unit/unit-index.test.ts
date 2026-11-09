@@ -392,7 +392,7 @@ describe("UnitIndex dismiss state vs. re-promotion — dismiss always wins (G10)
 	it("dismiss state survives a live link-cache recompute that newly promotes the dismissed ref (its outside-module link count going from zero to nonzero), and the plain inbox keeps excluding it", () => {
 		const caches: Record<string, CachedMetadata> = {};
 		const resolve: Record<string, string> = {};
-		const { app, index } = makeIndex(["ModuleA/Source.md", "ModuleB/Target.md"], ["ModuleA", "ModuleB"], caches, resolve);
+		const { app, index } = makeIndex(["ModuleA/Source.md", "ModuleB/Target.md"], ["ModuleA", "ModuleB"], caches, resolve, [], { autoPromotion: true });
 
 		// Nothing links to Target.md yet, so it has zero outside-module links and isn't promoted.
 		expect(promotedFilePaths(index)).toEqual([]);

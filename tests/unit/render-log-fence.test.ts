@@ -52,6 +52,7 @@ describe("F7: no setting, no UI beyond the command, no off switch", () => {
 				"retainIconMatchBackground",
 				"highlightOpenNote",
 				"mcpServerEnabled",
+				"autoPromotion",
 			].sort()
 		);
 	});

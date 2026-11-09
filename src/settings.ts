@@ -40,6 +40,11 @@ export interface AtlasSettings {
 	 * `McpTokenStore`, never in this object. Off by default: the server never starts for a vault
 	 * no one has opted into exposing. */
 	mcpServerEnabled: boolean;
+	/** PR-1 (G1): whether a link or embed from another note may put an item in the inbox. Off by
+	 * default: the inbox holds only manual promotions and "added" items. Read live by
+	 * `UnitIndex.isSuppressedFromInbox`; it never unplaces anything and never changes how links
+	 * resolve. Absent in an old `data.json` resolves to off, via `normalizeAutoPromotion`. */
+	autoPromotion: boolean;
 }
 
 export const DEFAULT_TO_DELETE_FOLDER = "_to_delete";
@@ -59,7 +64,14 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	retainIconMatchBackground: false,
 	highlightOpenNote: true,
 	mcpServerEnabled: false,
+	autoPromotion: false,
 };
+
+/** PR-1 (G1): anything in `data.json` that isn't a real boolean (absent, a string, `null`...) is off,
+ * the safe default, rather than being coerced by truthiness (`"false"` must not turn it on). */
+export function normalizeAutoPromotion(raw: unknown): boolean {
+	return typeof raw === "boolean" ? raw : false;
+}
 
 /** PR-1.F2: a hand-edited `data.json` can hold any JSON value for `highlightOpenNote` (a string,
  * a number, `null`...). The one stated rule: anything that isn't a real boolean falls back to the
@@ -204,6 +216,17 @@ export class AtlasSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 						this.plugin.unitIndex.rebuild();
 					})
+			);
+
+		new Setting(containerEl)
+			.setName("Auto-promote linked items")
+			.setDesc("When on, a file, folder or block that another note links to or embeds appears in the inbox on its own. When off (the default), the inbox holds only what you add with + or promote by hand. Items already placed in a view stay where they are either way, and the 'Never auto-promote from these folders' list still applies when this is on.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.autoPromotion).onChange(async (value) => {
+					this.plugin.settings.autoPromotion = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshExplorerViews();
+				})
 			);
 
 		new Setting(containerEl)

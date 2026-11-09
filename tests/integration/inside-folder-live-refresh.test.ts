@@ -415,7 +415,7 @@ describe("PR-2 (GP2, E9): the pane repaints once per user action, and not at all
 		getUnits: () => [],
 		onChange: () => () => {},
 		isDismissed: () => false,
-		isLinkOnlyInNoAutoPromoteFolder: () => false,
+		isSuppressedFromInbox: () => false,
 	};
 
 	beforeEach(() => {

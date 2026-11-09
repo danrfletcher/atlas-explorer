@@ -79,7 +79,7 @@ With a row focused: **Enter** opens it, **Space** folds or unfolds it, **F2** re
 
 ## The inbox
 
-The inbox lists every unit not placed in the current view.
+The inbox lists every unit not placed in the current view. With **Auto-promote linked items** off (the default), items that only a link or embed promoted are left out; see [Settings](settings.md).
 
 - **This view / Global** toggles between the view's own inbox and the global one (units placed in no view at all).
 - **+** adds any file or sub-folder from the vault, found with a fuzzy-search box. Added items carry an **added** tag; an added sub-folder is a module. Added items are kept until you remove them.
