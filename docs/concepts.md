@@ -35,7 +35,7 @@ If you rename a free block to a real name, it **graduates**: it moves out of the
 Every folder is a unit: a **module** whose **interface** is a note saying what the folder is and what it's responsible for, with everything else inside as internals. (The code still calls this a "folder-unit"; the UI says "Module".)
 
 - The interface note is `<Folder>/<Folder>.md` by default. In [Settings](settings.md) you can also accept `index.md` / `README.md`. A module without an interface note is still a unit: an inbox row's menu offers **Create interface note**, and picking the module from the `[[` suggester creates one.
-- Clicking a module's name opens its interface note. Clicking its icon opens **Module contents**, a view of its internals.
+- Clicking a module's name opens its interface note. Clicking its icon, or pressing and holding the row, opens **Module contents**, a view of its internals.
 - A module's properties are its interface note's properties.
 - Only folders directly in the vault root are modules at capture. A nested folder appears only if it is promoted, or added with the inbox's **+** (an added sub-folder is a module too).
 

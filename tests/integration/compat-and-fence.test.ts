@@ -24,7 +24,7 @@ describe("data compatibility (a v0.2.1 data.json)", () => {
 		// PR-2 added dismissedByView/dismissedGlobal/addedItems: absent from this v0.2.1 fixture
 		// (so it still proves old-data compatibility), named explicitly so a future key addition
 		// doesn't silently hide in this list the way PR-2's did before.
-		const newPr2Keys = ["dismissedByView", "dismissedGlobal", "addedItems"];
+		const newPr2Keys = ["dismissedByView", "dismissedGlobal", "addedItems", "hiddenModuleItems"]; // hiddenModuleItems: atlas-17 PR-2
 		expect(keys).toEqual([...Object.keys(data), ...newPr2Keys].sort());
 	});
 

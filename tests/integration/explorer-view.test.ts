@@ -843,7 +843,7 @@ describe("PR-1.F2 — R1: the real settings-tab onChange drives refreshExplorerV
 				},
 			},
 			settings: sharedSettings,
-			unitIndex: { getManualPromotions: () => [], getDismissedByView: () => ({}), getDismissedGlobal: () => [], getAddedItems: () => [] },
+			unitIndex: { getManualPromotions: () => [], getDismissedByView: () => ({}), getDismissedGlobal: () => [], getAddedItems: () => [], getHiddenModuleItems: () => ({}) },
 			viewsManager: { getViews: () => [], getActiveViewId: () => "default" },
 			statusesManager: { getStatusSets: () => [], getColorPalette: () => [] },
 			expandedModuleFolders: new Set<string>(),

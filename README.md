@@ -48,7 +48,7 @@ A thought too small to deserve a filename still needs to exist. These are **free
 Every folder is a unit: a **module** whose **interface** is a note saying what the folder is and what it's responsible for, with everything else inside as internals.
 
 - The interface note is `<Folder>/<Folder>.md` by default (optionally also `index.md` / `README.md`). A module without one is still a unit.
-- Clicking a module's name opens its interface note. Clicking its icon opens a **Module contents** view of its internals.
+- Clicking a module's name opens its interface note. Clicking its icon, or pressing and holding the row for 500 ms, opens a **Module contents** view of its internals, where you can hide items, promote them to the inbox, or drag them out onto the inbox or view.
 - Atlas never rearranges a module's insides on disk, with one deliberate, confirmable exception: dragging a file or block directly onto a module's **icon** moves it in. A file that is already placed in a view stays placed where it is (in every view that holds it) after the move; a placed block that is no longer a unit after the move is removed from the views.
 
 ### Views, bucket, inbox
