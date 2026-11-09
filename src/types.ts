@@ -282,6 +282,11 @@ export interface ViewNode extends StatusGovernance {
 	 * set on any bucket node, meta or unit (PR-1), and never set at the same time as `apiSource`/`csvSource` on
 	 * the same node. */
 	markdownTableSource?: MarkdownTableSourceConfig;
+	/** Atlas-18 (G17): what a plain click on this row runs. Only meaningful on a module (`type: "unit"`)
+	 * or Folder (`type: "meta"`) node. Absent = today's behaviour (a module opens its interface note, a
+	 * Folder does nothing). Stored in synced `data.json` and kept on every device, including mobile,
+	 * where a `terminal` action is a runtime notice rather than something dropped on load. */
+	clickAction?: ClickAction;
 }
 
 /** PR-1 (G15), shared with PR-3.F1's `remove_node` MCP tool: true when a node holds a live data
@@ -297,6 +302,16 @@ export function nodeHoldsLiveDataSource(node: ViewNode): boolean {
  * `ApiHeadersStore` (G13: device-local only). */
 export interface ApiHeader {
 	key: string;
+	value: string;
+}
+
+/** Atlas-18 (G17): a Click action stored on a Bucket row — what a plain click runs. `value` is a
+ * command line (`terminal`), an Obsidian command id (`command`) or a URI (`uri`). Absent on a node or
+ * API row means today's behaviour. Distinct from `ApiClickAction` below, which is the API *source's*
+ * own click action (none / open-attachment / run-command) and must stay separate. */
+export type ClickActionKind = "terminal" | "command" | "uri";
+export interface ClickAction {
+	kind: ClickActionKind;
 	value: string;
 }
 
@@ -364,6 +379,11 @@ export interface ApiSourceConfig {
 	clickAction?: ApiClickAction;
 	/** PR-5 (G9b): command string executed in the background when action is "run-command". */
 	command?: string;
+	/** Atlas-18 (G7/G17): JS source of the per-source Click function, run at click time with the row's
+	 * item metadata. Only stored here; compiling and running it is a later PR. Absent means no function
+	 * (an empty string is never stored). Not to be confused with `clickAction` above, the source
+	 * click action. */
+	clickFunction?: string;
 }
 
 /** PR-4 (G3-G5/G10/G16): the Inside-Vault "Folder" source's config. Outside Vault (external
@@ -516,6 +536,10 @@ export interface ApiItemState {
 	 * uses it to re-insert the row among the owner's real children at (approximately) its old slot,
 	 * instead of appending it after all of them the way a genuine API/Table row still is. */
 	position?: number;
+	/** Atlas-18 (G10/G17): the Item override — a Click action set on this one API row. Lives on the
+	 * item, so duplicating the owning Folder never copies it. Inert (but kept) when the row has no live
+	 * API source above it (E16). */
+	clickAction?: ClickAction;
 }
 
 /** PR 17: extends `StatusGovernance` so the view root itself can be a governor — "Statuses" on the

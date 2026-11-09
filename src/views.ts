@@ -18,6 +18,7 @@ import {
 	ApiFieldMapping,
 	ApiItemState,
 	ApiSourceConfig,
+	ClickAction,
 	CsvSourceConfig,
 	DEFAULT_VIEW_NAME,
 	FolderSourceConfig,
@@ -71,6 +72,21 @@ function isValidUnitRef(value: unknown): value is UnitRef {
 	return false;
 }
 
+/** Atlas-18 (G17): a `clickAction` loaded from `data.json` can be any JSON value. Keeps it only when
+ * `kind` is one of the three known kinds and `value` is a non-blank string; anything else (a non-object,
+ * an array, a missing/unknown kind, a non-string or blank value) is dropped, so the field becomes absent
+ * and the row falls back to today's behaviour. Extra keys are stripped by rebuilding the object. The
+ * value is kept exactly as stored (not trimmed). Never throws, and deliberately takes no account of the
+ * platform: a `terminal` action must survive a load on mobile, where running it is a runtime notice
+ * (E17/G13). */
+export function sanitizeClickAction(raw: unknown): ClickAction | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const { kind, value } = raw as { kind?: unknown; value?: unknown };
+	if (kind !== "terminal" && kind !== "command" && kind !== "uri") return undefined;
+	if (typeof value !== "string" || value.trim() === "") return undefined;
+	return { kind, value };
+}
+
 /** R20/E9: `apiItemState` entries come straight from `data.json` and can each be malformed
  * independently of the container being a well-shaped object — e.g. `{"1": {"id": "1"}}` (no label) or
  * `{"1": 5}`. Left unchecked, a missing/non-string `label` crashes `apiItemMatchesFilter` and
@@ -79,7 +95,7 @@ function isValidUnitRef(value: unknown): value is UnitRef {
  * repair (not an object, or no string `label`); everything else is dropped field-by-field rather than
  * discarding the whole row. `id` is always retaken from the state map's own key, since that's the
  * value every other lookup (by id) actually keys on. */
-function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
+export function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
 	if (!raw || typeof raw !== "object") return null;
 	const item = raw as Partial<ApiItemState>;
 	if (typeof item.label !== "string") return null;
@@ -92,6 +108,9 @@ function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
 	if (typeof item.lastSeenAt === "string" && !isNaN(new Date(item.lastSeenAt).getTime())) {
 		sanitized.lastSeenAt = item.lastSeenAt;
 	}
+	// Atlas-18 (G17): the Item override. Set only when well-formed, so an absent one stays absent.
+	const clickAction = sanitizeClickAction(item.clickAction);
+	if (clickAction) sanitized.clickAction = clickAction;
 	return sanitized;
 }
 
@@ -106,7 +125,7 @@ function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
  * `apiItemOrder` too: a Folder can legitimately have rows with no source at all (source removed, or a
  * `data.json` that dropped just the `apiSource` object by hand), and those rows are sanitized on their
  * own merits below, independent of whether `apiSource` survived. */
-function sanitizeApiFields(node: ViewNode): void {
+export function sanitizeApiFields(node: ViewNode): void {
 	if (node.apiSource) {
 		const raw = node.apiSource as Partial<ApiSourceConfig> & { mapping?: Partial<ApiFieldMapping> };
 		const mapping = raw.mapping;
@@ -146,6 +165,8 @@ function sanitizeApiFields(node: ViewNode): void {
 			const action: ApiClickAction | undefined =
 				rawAction === "none" || rawAction === "run-command" || rawAction === "open-attachment" ? rawAction : undefined;
 			const command = typeof raw.command === "string" ? raw.command : undefined;
+			// Atlas-18 (G7/G17): an empty box means no function, so an empty string is stored as absent.
+			const clickFunction = typeof raw.clickFunction === "string" && raw.clickFunction !== "" ? raw.clickFunction : undefined;
 			node.apiSource = {
 				// PR-3 R1 fix: stamp the discriminant on every load, not only when the modal builds a
 				// fresh config — without it, every API source had `type === undefined` after a reload,
@@ -171,9 +192,17 @@ function sanitizeApiFields(node: ViewNode): void {
 				action,
 				clickAction: action,
 				command,
+				clickFunction,
 			};
 		}
 	}
+
+	// Atlas-18 (G17): a node's own Click action. Sanitised on every node (module, Folder or otherwise)
+	// because the field is plain data; whether a given node kind acts on it is the explorer's call. The key
+	// is deleted, not set to undefined, when there is nothing valid, so a load never adds a key.
+	const clickAction = sanitizeClickAction(node.clickAction);
+	if (clickAction) node.clickAction = clickAction;
+	else delete node.clickAction;
 
 	// G4: rows survive a source's removal as plain static rows — sanitize `apiItemState`/`apiItemOrder`
 	// whenever either is actually present (or a source exists to have produced them), rather than only
@@ -506,11 +535,14 @@ export function collectOutsideFolderSourceNodeIdPairs(original: ViewNode, clone:
 
 /** G7 (extended to G4's static rows): a deep copy of a Folder's per-id row state — `noteRef` is itself
  * an object, so a shallow copy of the map would still leave both copies' rows pointing at (and able to
- * mutate) the very same `UnitRef`. */
-function cloneApiItemState(state: Record<string, ApiItemState>): Record<string, ApiItemState> {
+ * mutate) the very same `UnitRef`. Atlas-18 (G17): the same goes for an Item override's `clickAction`,
+ * which is copied as a new object here; `cloneNode` then strips it, since an override lives on the item
+ * and is never carried across by a duplicate (E7). */
+export function cloneApiItemState(state: Record<string, ApiItemState>): Record<string, ApiItemState> {
 	const out: Record<string, ApiItemState> = {};
 	for (const [id, item] of Object.entries(state)) {
 		out[id] = { ...item, noteRef: item.noteRef ? { ...item.noteRef } : item.noteRef };
+		if (item.clickAction) out[id].clickAction = { ...item.clickAction };
 	}
 	return out;
 }
@@ -1210,10 +1242,16 @@ export class ViewsManager {
 			clone.apiItemOrder = [];
 		} else if (node.apiItemState) {
 			clone.apiItemState = cloneApiItemState(node.apiItemState);
+			// Atlas-18 (E7): an Item override is not copied by a duplicate; every other row field is.
+			for (const row of Object.values(clone.apiItemState)) delete row.clickAction;
 			clone.apiItemOrder = node.apiItemOrder ? [...node.apiItemOrder] : [];
 		}
 		clone.apiCache = undefined;
 		clone.apiAwaitingConfirmation = undefined;
+
+		// Atlas-18 (G17/E7): the node's own Click action is carried over, as a new object, so editing
+		// one copy's action never edits the other's (`{ ...node }` above shares the reference).
+		if (node.clickAction) clone.clickAction = { ...node.clickAction };
 
 		// PR-4: same reference-sharing hazard as `apiSource` above — a shallow `{...node}` spread
 		// would leave both nodes' `folderSource` pointing at the very same object.
