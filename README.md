@@ -37,7 +37,7 @@ A **unit** is anything that (a) has an address you can link to, and (b) means th
 
 You capture a thing at the largest level where it's self-contained. A chat transcript is a file. An agent system is a folder. Anything *inside* a unit is internals, and internals are not units until something outside links to them, at which point they're **promoted** into a unit in their own right. This applies at every level: a module is a unit at capture; a file inside it stays internals until something outside the module links to it; a block inside that file stays internals until something links to *it*.
 
-So `Bets/steps/step-3.md` isn't a unit today. The day something outside `Bets/` links to it, it is. You can also promote by hand, and you can switch auto-promotion off for chosen folders.
+So `Bets/steps/step-3.md` isn't a unit today. The day something outside `Bets/` links to it, it is. You can also promote by hand, and by default links alone no longer put anything in your inbox: turn on **Auto-promote linked items** in Settings to have them appear there. You can also keep chosen folders out of auto-promotion.
 
 ### Free blocks
 
@@ -48,7 +48,7 @@ A thought too small to deserve a filename still needs to exist. These are **free
 Every folder is a unit: a **module** whose **interface** is a note saying what the folder is and what it's responsible for, with everything else inside as internals.
 
 - The interface note is `<Folder>/<Folder>.md` by default (optionally also `index.md` / `README.md`). A module without one is still a unit.
-- Clicking a module's name opens its interface note. Clicking its icon opens a **Module contents** view of its internals.
+- Clicking a module's name opens its interface note. Clicking its icon, or pressing and holding the row for 500 ms, opens a **Module contents** view of its internals, where you can hide items, promote them to the inbox, or drag them out onto the inbox or view.
 - Atlas never rearranges a module's insides on disk, with one deliberate, confirmable exception: dragging a file or block directly onto a module's **icon** moves it in. A file that is already placed in a view stays placed where it is (in every view that holds it) after the move; a placed block that is no longer a unit after the move is removed from the views.
 
 ### Views, bucket, inbox
@@ -80,6 +80,7 @@ Under **Settings → Atlas Explorer**, with two tabs, **Basic** and **Status**. 
 | Pool folder | `_pool` |
 | Excluded folders | dot-folders, the pool folder, `_to_delete` |
 | Never auto-promote from these folders | none |
+| Auto-promote linked items | off |
 | Interface note convention | `<Folder>/<Folder>.md` only |
 | Replace native explorer on startup | on |
 | Block display length | 80 |

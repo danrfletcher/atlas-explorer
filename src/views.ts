@@ -1282,7 +1282,10 @@ export class ViewsManager {
 	 * OR-check `UnitIndex.isDismissed` already implements: global mode only ever reads the global
 	 * dismiss set (so a non-Global dismiss never hides a row from Global, per G4's "no over-broad
 	 * write"), while view mode reads that view's own set OR'd with the global set (so a Global-view
-	 * dismiss cascades here without this method needing to enumerate views itself). */
+	 * dismiss cascades here without this method needing to enumerate views itself).
+	 * PR-1 (G1): link-only promoted units are also left out whenever `UnitIndex.isSuppressedFromInbox`
+	 * says so, which is every one of them while `settings.autoPromotion` is off. Manual promotions,
+	 * "added" items and placed units are unaffected. */
 	getInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex?: UnitIndex): Unit[] {
 		let placed: Unit[];
 		if (mode === "global") {
@@ -1294,7 +1297,7 @@ export class ViewsManager {
 		if (!unitIndex) return placed;
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
-			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
+			if (unitIndex.isSuppressedFromInbox(u)) return false;
 			return mode === "global" ? !unitIndex.isDismissed(ref, "global") : !unitIndex.isDismissed(ref, "view", viewId);
 		});
 	}
@@ -1303,7 +1306,8 @@ export class ViewsManager {
 	 * dismissed for this scope, so "Show Dismissed" can reveal exactly the rows the plain inbox
 	 * excludes. Shares the same mode semantics as `getInboxUnits` (global reads only the global
 	 * dismiss set; view reads that view's own set OR'd with global), so toggling never reveals a row
-	 * that `getInboxUnits` wouldn't otherwise have hidden for the same `(viewId, mode)`. */
+	 * that `getInboxUnits` wouldn't otherwise have hidden for the same `(viewId, mode)`. Link-only units
+	 * `UnitIndex.isSuppressedFromInbox` keeps out of the inbox are left out here too. */
 	getDismissedInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex: UnitIndex): Unit[] {
 		let placed: Unit[];
 		if (mode === "global") {
@@ -1314,7 +1318,7 @@ export class ViewsManager {
 		}
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
-			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
+			if (unitIndex.isSuppressedFromInbox(u)) return false;
 			return mode === "global" ? unitIndex.isDismissed(ref, "global") : unitIndex.isDismissed(ref, "view", viewId);
 		});
 	}

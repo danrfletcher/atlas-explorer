@@ -96,7 +96,7 @@ function setup(root: ViewNode[], entries: TAbstractFile[] = [], leafCount = 0): 
 		app,
 		viewsManager,
 		settings: { ...DEFAULT_SETTINGS, noAutoPromoteFolders: [] },
-		unitIndex: { onVaultCreate: vi.fn(), onVaultDelete: vi.fn(), onVaultRename: () => false },
+		unitIndex: { onVaultCreate: vi.fn(), onVaultDelete: vi.fn(), pruneHiddenModuleItems: () => false, onVaultRename: () => false },
 		graduation,
 		onModuleFolderRename: () => false,
 		persistDebounced: Object.assign(vi.fn(), { run: vi.fn() }),
@@ -415,7 +415,7 @@ describe("PR-2 (GP2, E9): the pane repaints once per user action, and not at all
 		getUnits: () => [],
 		onChange: () => () => {},
 		isDismissed: () => false,
-		isLinkOnlyInNoAutoPromoteFolder: () => false,
+		isSuppressedFromInbox: () => false,
 	};
 
 	beforeEach(() => {

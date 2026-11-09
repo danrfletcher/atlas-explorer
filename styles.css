@@ -678,6 +678,49 @@ input.atlas-yaml-key-invalid[type="text"]:not(:disabled) {
 	border-radius: 0;
 }
 
+/* PR-2 (G2): Module Contents — the per-item eye button, the dimmed look of a hidden item, the empty
+ * notice, and the fade a dragged-out item puts the whole modal under. */
+.atlas-module-item-hide {
+	margin-left: auto;
+	display: flex;
+	flex-shrink: 0;
+	cursor: pointer;
+	color: var(--text-faint);
+}
+
+.atlas-module-item-hide:hover,
+.atlas-module-item-hide.is-hidden-item {
+	color: var(--text-normal);
+}
+
+.atlas-module-item-hidden,
+.atlas-module-hidden-branch .atlas-row-internal {
+	opacity: 0.45;
+}
+
+.atlas-module-modal-empty {
+	color: var(--text-muted);
+	padding: 8px 16px;
+}
+
+/* A drag that has left the modal frame: the frame and backdrop fade and stop catching the pointer, so
+ * the Inbox and view drop zones underneath can take the drop. Removed again on re-entry or drag end. */
+.modal-container.atlas-module-drag-out {
+	pointer-events: none;
+}
+
+.modal-container.atlas-module-drag-out .modal {
+	opacity: 0.25;
+	pointer-events: none;
+}
+
+/* Obsidian writes an inline `style="opacity: 0.85"` on .modal-bg, and an inline style beats any normal
+ * rule, so the backdrop needs !important to dim. Scoped to the drag-out class, so it goes with it. */
+.modal-container.atlas-module-drag-out .modal-bg {
+	opacity: 0.25 !important;
+	pointer-events: none;
+}
+
 /* PR 14: settings-panel tab switcher (Basic / Status) — plain button row, active tab highlighted
  * the same way Obsidian's own nav-item selection looks, so it reads as native chrome. */
 .atlas-settings-tabs {

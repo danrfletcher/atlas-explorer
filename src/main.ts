@@ -4,11 +4,12 @@ import {
 	AtlasSettings,
 	DEFAULT_SETTINGS,
 	computeDefaultExcludedFolders,
+	normalizeAutoPromotion,
 	normalizeHighlightOpenNote,
 	normalizeNoAutoPromoteFolders,
 	rewriteNoAutoPromoteFolders,
 } from "./settings";
-import { UnitIndex } from "./unit-index";
+import { UnitIndex, sanitizeHiddenModuleItems } from "./unit-index";
 import { AddedItem, UnitRef, View } from "./types";
 import { registerAddBlockCommand } from "./commands";
 import { AtlasLinkSuggest } from "./link-suggest";
@@ -60,6 +61,9 @@ interface AtlasData {
 	dismissedGlobal: UnitRef[];
 	/** PR-2: units manually added to the inbox via "+", distinct from `manualPromotions`. */
 	addedItems: AddedItem[];
+	/** PR-2 (G2): module path -> vault paths of items hidden inside that module's Module Contents
+	 * modal. Absent in a `data.json` written before this existed (read as nothing hidden). */
+	hiddenModuleItems: Record<string, string[]>;
 }
 
 export default class AtlasPlugin extends Plugin {
@@ -70,6 +74,7 @@ export default class AtlasPlugin extends Plugin {
 	private dismissedByView: Record<string, UnitRef[]>;
 	private dismissedGlobal: UnitRef[];
 	private addedItems: AddedItem[];
+	private hiddenModuleItems: Record<string, string[]>;
 	/** PR 10: runtime form of `AtlasData.expandedModuleFolders` — a `Set` for O(1) membership checks
 	 * from the modal, which re-checks every visible subfolder's expanded state on each open. */
 	private expandedModuleFolders: Set<string>;
@@ -127,7 +132,8 @@ export default class AtlasPlugin extends Plugin {
 			this.manualPromotions,
 			this.dismissedByView,
 			this.dismissedGlobal,
-			this.addedItems
+			this.addedItems,
+			this.hiddenModuleItems
 		);
 		this.viewsManager = new ViewsManager(
 			this.app,
@@ -347,6 +353,7 @@ export default class AtlasPlugin extends Plugin {
 	 * so the placeholder/mode reconciliation has already run by the time the folder re-reads. */
 	onVaultDeleteEvent(file: TAbstractFile): void {
 		this.unitIndex.onVaultDelete(file.path);
+		if (this.unitIndex.pruneHiddenModuleItems(file.path)) this.persistDebounced(); // PR-2: no orphaned hidden entries
 		this.graduation.handleDelete(file);
 		// G27: clears any placeholder row's noteRef pointing at the deleted file — additive
 		// alongside the two existing calls above, which this leaves untouched.
@@ -448,10 +455,13 @@ export default class AtlasPlugin extends Plugin {
 		// PR-1.F2: a hand-edited non-boolean value must not throw and falls back to the default (on),
 		// rather than being carried through by the plain `Object.assign` above.
 		this.settings.highlightOpenNote = normalizeHighlightOpenNote(this.settings.highlightOpenNote);
+		// PR-1 (G1): a missing or non-boolean value (an upgrade from a data.json without the key) is off.
+		this.settings.autoPromotion = normalizeAutoPromotion(this.settings.autoPromotion);
 		this.manualPromotions = data?.manualPromotions ?? [];
 		this.dismissedByView = data?.dismissedByView ?? {};
 		this.dismissedGlobal = data?.dismissedGlobal ?? [];
 		this.addedItems = data?.addedItems ?? [];
+		this.hiddenModuleItems = sanitizeHiddenModuleItems(data?.hiddenModuleItems);
 		this.expandedModuleFolders = new Set(data?.expandedModuleFolders ?? []);
 		if (!data) {
 			this.settings.excludedFolders = computeDefaultExcludedFolders(this.app, this.settings.poolFolder);
@@ -476,7 +486,19 @@ export default class AtlasPlugin extends Plugin {
 			dismissedByView: this.unitIndex.getDismissedByView(),
 			dismissedGlobal: this.unitIndex.getDismissedGlobal(),
 			addedItems: this.unitIndex.getAddedItems(),
+			hiddenModuleItems: this.unitIndex.getHiddenModuleItems(),
 		} satisfies AtlasData);
+	}
+
+	/** PR-2 (G2): hides or unhides one item of a module's contents. Plugin data only; saved through the
+	 * debounced persist, so a run of quick clicks on the eye button writes once. */
+	setModuleItemHidden(modulePath: string, itemPath: string, hidden: boolean): void {
+		if (this.unitIndex.setModuleItemHidden(modulePath, itemPath, hidden)) this.persistDebounced();
+	}
+
+	/** PR-2 (G2): whether `itemPath` itself is on `modulePath`'s hidden list. */
+	isModuleItemHidden(modulePath: string, itemPath: string): boolean {
+		return this.unitIndex.isModuleItemExplicitlyHidden(modulePath, itemPath);
 	}
 
 	/** PR 10: whether a module-internal subfolder should render expanded in a Module Contents modal.

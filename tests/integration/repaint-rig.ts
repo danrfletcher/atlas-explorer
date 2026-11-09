@@ -19,7 +19,7 @@ export interface RigUnitIndex {
 	getUnits(): unknown[];
 	onChange(cb: () => void): () => void;
 	isDismissed(...args: unknown[]): boolean;
-	isLinkOnlyInNoAutoPromoteFolder(...args: unknown[]): boolean;
+	isSuppressedFromInbox(...args: unknown[]): boolean;
 }
 
 export interface RepaintRig {

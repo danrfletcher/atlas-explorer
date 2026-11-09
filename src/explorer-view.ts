@@ -1,7 +1,7 @@
 import { App, FuzzyMatch, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TAbstractFile, TFile, TFolder, WorkspaceLeaf, renderResults, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import type { AtlasSettings } from "./settings";
-import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, nodeHoldsLiveDataSource, parseUnitRefKey, unitRefKey, unitToRef } from "./types";
+import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, nodeHoldsLiveDataSource, parseUnitRefKey, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 import { matchesActiveFile } from "./active-highlight";
 import {
 	ApiSourceIdPair,
@@ -14,6 +14,8 @@ import {
 import { outsideChildMtime, resolveOutsidePath } from "./folder-source-outside";
 import { DropDecision, DropZone, resolveDropDecision, resolveDropZone } from "./drop-zones";
 import { resolveUnit } from "./unit-display";
+import { attachLongPress } from "./long-press";
+import { pointOutsideRect } from "./module-contents-drag";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
 import { openStatusPickerPopup } from "./status-popup";
@@ -129,7 +131,13 @@ const MODULE_HOVER_DWELL_MS = 650;
 /** PR 20: both variants now carry an array — a plain single-item drag is just the length-1 case,
  * so every existing drop-handling call site only needed to start iterating instead of gaining a
  * second, parallel "batch" code path next to the original single-item one. */
-type DragPayload = { kind: "node"; nodeIds: string[]; viewId: string } | { kind: "inbox"; refs: UnitRef[] };
+type DragPayload =
+	| { kind: "node"; nodeIds: string[]; viewId: string }
+	| { kind: "inbox"; refs: UnitRef[] }
+	/** PR-2 (G2): one item dragged out of a Module Contents modal. Unlike an inbox row it is not yet a
+	 * unit: dropping it on the Inbox marks it "added", dropping it on the view promotes and places it. It
+	 * never takes part in the module-icon drop (a real disk move) or the hover-to-open-contents dwell. */
+	| { kind: "module-item"; ref: UnitRef };
 
 /** PR-3: a row-level drop target (`"node"`) also carries an edge zone (`DropZone`, from
  * `drop-zones.ts`); `"bucket-root"`/`"inbox-area"` targets never do — both are empty-space drops
@@ -308,7 +316,11 @@ export function candidateFoldersForAdd(
  * In `dropTarget` mode (only ever passed when opened via the hover-during-drag gesture, issue 2
  * point 5) every folder shown — including the module's own root — becomes a live drop target for
  * whatever's still being dragged, skipping the usual confirm dialog entirely, since choosing an
- * exact destination inside this modal already *is* the confirmation. */
+ * exact destination inside this modal already *is* the confirmation.
+ *
+ * PR-2 (G2) adds three controls that touch only Atlas's own data, never the files: an eye button per
+ * row (hide/unhide, kept per module), a "Promote to inbox" entry in the right-click menu, and dragging
+ * a row out of the modal (the frame fades and goes click-through so the Inbox/view can take the drop). */
 export interface ModuleContentsModalCallbacks {
 	onOpenFile: (file: TFile) => void;
 	onRevealInNative: (path: string) => void;
@@ -324,11 +336,31 @@ export interface ModuleContentsModalCallbacks {
 	/** PR 10: called when the user clicks a subfolder's chevron, so the explorer view can persist
 	 * the new state via `AtlasPlugin.setModuleFolderExpanded`. */
 	onToggleFolder: (path: string, expanded: boolean) => void;
+	/** PR-2 (G2): whether this item is on the module's hidden list — backed by
+	 * `AtlasPlugin.isModuleItemHidden`, so the eye state survives closing and reopening the modal. */
+	isItemHidden: (path: string) => boolean;
+	/** PR-2 (G2): the eye button — sets or clears the item's hidden flag in plugin data (never on disk). */
+	onToggleItemHidden: (path: string, hidden: boolean) => void;
+	/** PR-2 (G2): the "Promote to inbox" menu item — marks the item "added". The modal closes after. */
+	onPromoteToInbox: (path: string, isFolder: boolean) => void;
+	/** PR-2 (G2): a drag of one item row has started. The explorer arms its drop zones with this item. */
+	onItemDragStart: (path: string, isFolder: boolean) => void;
+	/** PR-2 (G2): the drag is over (dropped or cancelled). Returns true when a drop zone took the item,
+	 * in which case the modal closes; false leaves it open and nothing has changed. */
+	onItemDragEnd: () => boolean;
 }
+
+/** PR-2 (G2): modal-frame opacity while an item is dragged outside it (the backdrop gets the same). */
+export const MODULE_DRAG_OUT_CLASS = "atlas-module-drag-out";
+/** The only drag-data type a Module Contents item drag carries. Deliberately not text/plain: see `wireItemDrag`. */
+export const MODULE_ITEM_DRAG_MIME = "application/x-atlas-module-item";
 
 export class ModuleContentsModal extends Modal {
 	private filterText = "";
 	private rows: { el: HTMLElement; name: string }[] = [];
+	/** The item row being dragged out of this modal, from `dragstart` to `dragend`. */
+	private internalDrag: { path: string } | null = null;
+	private removeDragListeners: (() => void) | null = null;
 
 	constructor(app: App, private folder: TFolder, private callbacks: ModuleContentsModalCallbacks) {
 		super(app);
@@ -347,10 +379,28 @@ export class ModuleContentsModal extends Modal {
 		}
 
 		this.renderTree(this.folder, treeEl, 0);
+		if (this.folder.children.length === 0) {
+			this.contentEl.createDiv({ cls: "atlas-module-modal-empty", text: "This module is empty." });
+		}
 		if (this.filterText) this.setFilterText(this.filterText);
 	}
 
+	/** PR-3 (E4): a close request while a boundary drag is in progress aborts the drag instead and the
+	 * modal stays open. Obsidian handles Escape in its own `window` capture listener, registered before
+	 * any plugin's, so it reaches this modal's scope and calls `close()` before a plugin listener can
+	 * take the key (and that close removes the plugin listener before it runs). Guarding `close()` is
+	 * the only point that sees the Escape first. A drag that has ended (`dragend`, a drop) has already
+	 * cleared `internalDrag`, so those closes go through. */
+	close(): void {
+		if (this.internalDrag) {
+			this.cancelItemDrag();
+			return;
+		}
+		super.close();
+	}
+
 	onClose(): void {
+		this.cancelItemDrag(); // a drag still in progress must not leave the explorer's drop zones armed
 		this.contentEl.empty();
 		this.callbacks.onCloseCallback?.();
 	}
@@ -374,6 +424,7 @@ export class ModuleContentsModal extends Modal {
 	private renderTree(folder: TFolder, container: HTMLElement, depth: number): void {
 		for (const child of folder.children) {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-internal" });
+			const isFolder = child instanceof TFolder;
 			row.style.paddingLeft = `${depth * 16 + 16}px`;
 			// Always reserve the chevron's slot, even for a file (which never gets one) — otherwise
 			// a file's icon sits flush against the row's edge while a folder's icon is pushed right
@@ -385,6 +436,29 @@ export class ModuleContentsModal extends Modal {
 			setIcon(iconEl, child instanceof TFolder ? "folder" : "file");
 			row.createSpan({ cls: "atlas-row-text", text: child.name });
 			this.rows.push({ el: row, name: child.name });
+
+			// PR-2 (G2): the eye button. `hidden` is this item's own flag; the rows under a hidden folder
+			// are dimmed too (via the `atlas-module-hidden-branch` class on their wrapper) but keep their
+			// own eye state, so unhiding the folder is what brings them back.
+			let hidden = this.callbacks.isItemHidden(child.path);
+			let branchEl: HTMLElement | null = null;
+			const hideBtn = row.createDiv({ cls: "atlas-module-item-hide" });
+			const paintHidden = () => {
+				setIcon(hideBtn, hidden ? "eye-off" : "eye");
+				hideBtn.setAttr("aria-label", hidden ? "Unhide" : "Hide");
+				hideBtn.toggleClass("is-hidden-item", hidden);
+				row.toggleClass("atlas-module-item-hidden", hidden);
+				branchEl?.toggleClass("atlas-module-hidden-branch", hidden);
+			};
+			paintHidden();
+			hideBtn.addEventListener("click", (evt) => {
+				evt.stopPropagation(); // never also opens the file
+				hidden = !hidden;
+				paintHidden();
+				this.callbacks.onToggleItemHidden(child.path, hidden);
+			});
+
+			this.wireItemDrag(row, child.path, isFolder);
 
 			if (child instanceof TFile) {
 				row.addEventListener("click", () => {
@@ -412,6 +486,15 @@ export class ModuleContentsModal extends Modal {
 							this.close();
 						})
 				);
+				menu.addItem((item) =>
+					item
+						.setTitle("Promote to inbox")
+						.setIcon("inbox")
+						.onClick(() => {
+							this.callbacks.onPromoteToInbox(child.path, isFolder);
+							this.close();
+						})
+				);
 				menu.showAtMouseEvent(evt);
 			});
 
@@ -423,6 +506,8 @@ export class ModuleContentsModal extends Modal {
 				childrenWrap.toggleClass("is-collapsed", !expanded);
 				const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
 				this.renderTree(child, childrenInner, depth + 1);
+				branchEl = childrenWrap;
+				paintHidden();
 
 				chevron.addEventListener("click", (evt) => {
 					evt.stopPropagation();
@@ -435,13 +520,96 @@ export class ModuleContentsModal extends Modal {
 		}
 	}
 
+	/** PR-2 (G2): makes an item row draggable out of the modal. Crossing the modal's frame dims it (and
+	 * its backdrop) and makes it click-through, so the Inbox and view drop zones underneath can take the
+	 * drop; coming back inside, or ending the drag anywhere else, restores it. */
+	private wireItemDrag(row: HTMLElement, path: string, isFolder: boolean): void {
+		row.setAttr("draggable", "true");
+		row.addEventListener("dragstart", (evt) => {
+			evt.stopPropagation();
+			this.stopItemDrag();
+			this.internalDrag = { path };
+			// Private type only: a text/plain payload would let a drop on an open note's editor insert the
+			// path into the note (CodeMirror reads "Text"), which is Atlas editing file content.
+			evt.dataTransfer?.setData(MODULE_ITEM_DRAG_MIME, path);
+			if (evt.dataTransfer) evt.dataTransfer.effectAllowed = "move";
+			this.callbacks.onItemDragStart(path, isFolder);
+			// Once the frame is click-through the modal itself stops hearing the drag, so the position
+			// is tracked on the document (capture) for the rest of it.
+			const onOver = (e: DragEvent) => this.updateDragOut(e.clientX, e.clientY);
+			const onDragLeave = (e: DragEvent) => {
+				if (e.relatedTarget instanceof Node && this.modalEl.contains(e.relatedTarget)) return;
+				this.updateDragOut(e.clientX, e.clientY);
+			};
+			const onDrop = (e: DragEvent) => {
+				// Released back over the modal's own frame: not a drop on anything underneath it.
+				if (pointOutsideRect(e.clientX, e.clientY, this.modalEl.getBoundingClientRect())) return;
+				e.preventDefault();
+				e.stopPropagation();
+			};
+			// PR-3 (E4): Escape aborts the drag. The browser cancels a native drag itself, but if the key
+			// does reach the page it must neither close the modal nor leave the explorer's drop zones
+			// armed, so it is taken here and the drag is ended with no state change. This is the fallback:
+			// Obsidian's own `window` capture listener is registered earlier and runs first, so the
+			// modal-close it triggers is stopped in `close()`, which also ends the drag; this listener then
+			// no longer exists. It still covers an Escape Obsidian does not route to this modal.
+			const onKey = (e: KeyboardEvent) => {
+				if (e.key !== "Escape") return;
+				e.preventDefault();
+				e.stopImmediatePropagation();
+				this.cancelItemDrag();
+			};
+			document.addEventListener("dragover", onOver, true);
+			this.modalEl.addEventListener("dragleave", onDragLeave);
+			document.addEventListener("drop", onDrop, true);
+			window.addEventListener("keydown", onKey, true);
+			this.removeDragListeners = () => {
+				document.removeEventListener("dragover", onOver, true);
+				this.modalEl.removeEventListener("dragleave", onDragLeave);
+				document.removeEventListener("drop", onDrop, true);
+				window.removeEventListener("keydown", onKey, true);
+			};
+		});
+		row.addEventListener("dragend", () => {
+			if (!this.internalDrag) return;
+			this.stopItemDrag();
+			if (this.callbacks.onItemDragEnd()) this.close();
+		});
+	}
+
+	/** Dims the modal while the dragged item is outside its frame; restores it the moment it is back. */
+	private updateDragOut(x: number, y: number): void {
+		if (!this.internalDrag) return;
+		this.containerEl.toggleClass(MODULE_DRAG_OUT_CLASS, pointOutsideRect(x, y, this.modalEl.getBoundingClientRect()));
+	}
+
+	/** Aborts a drag in progress (Escape, or the modal closing under it): this side is reset as in
+	 * `stopItemDrag`, and the explorer is told so it disarms its drop zones. Nothing is promoted or
+	 * placed, and a no-op when no drag is in progress. */
+	private cancelItemDrag(): void {
+		if (!this.internalDrag) return;
+		this.stopItemDrag();
+		this.callbacks.onItemDragEnd();
+	}
+
+	/** Ends the item drag on this side: listeners off, opacity back, no state change. */
+	private stopItemDrag(): void {
+		this.removeDragListeners?.();
+		this.removeDragListeners = null;
+		this.internalDrag = null;
+		this.containerEl.removeClass(MODULE_DRAG_OUT_CLASS);
+	}
+
 	private wireDropZone(row: HTMLElement, folderPath: string): void {
+		// An item dragged out of this very modal is never a drop on one of its own rows.
 		row.addEventListener("dragover", (evt) => {
+			if (this.internalDrag) return;
 			evt.preventDefault();
 			row.addClass("atlas-drop-target");
 		});
 		row.addEventListener("dragleave", () => row.removeClass("atlas-drop-target"));
 		row.addEventListener("drop", (evt) => {
+			if (this.internalDrag) return;
 			evt.preventDefault();
 			row.removeClass("atlas-drop-target");
 			this.callbacks.dropTarget?.onDrop(folderPath);
@@ -899,6 +1067,9 @@ export class AtlasExplorerView extends ItemView {
 	 * a module icon would otherwise place a ref with no real file behind it into the bucket. */
 	private missingAddedInboxKeys = new Set<string>();
 	private dragPayload: DragPayload | null = null;
+	/** PR-2 (G2): set by `handleDrop` when a drop zone takes a `module-item` drag; read (and cleared) by
+	 * `endModuleItemDrag` when the drag ends. */
+	private moduleDragCommitted = false;
 	/** PR-3 (G1): the single shared drop-indicator line element, repositioned (never duplicated)
 	 * across whichever row the pointer is currently hovering an edge zone of. `null` whenever no
 	 * row is currently showing one — cleared on `dragleave`, on `drop`, and by the window-level
@@ -3877,9 +4048,23 @@ export class AtlasExplorerView extends ItemView {
 		// `moveNode`/`placeUnit`/`unplaceNode` saves and notifies listeners inline, which queues the
 		// render, so naming the cause only around the trailing `queueRender()` would be too late.
 		withRenderCause("drop", () => {
-			const payload = this.dragPayload;
+			const dragged = this.dragPayload;
 			this.dragPayload = null;
-			if (!payload) return;
+			if (!dragged) return;
+
+			// PR-2 (G2): an item dragged out of Module Contents. On the Inbox it becomes an "added" unit (the
+			// same terminal state as the "+" button); anywhere in the view it is promoted and placed exactly
+			// like "Promote and place in view…", so it takes the inbox-payload placement path below.
+			const moduleRef = dragged.kind === "module-item" ? dragged.ref : null;
+			if (moduleRef && target.kind === "inbox-area") {
+				this.addModuleItemToInbox(moduleRef);
+				void this.plugin.flushSave();
+				this.moduleDragCommitted = true;
+				this.queueRender();
+				return;
+			}
+			const payload: Exclude<DragPayload, { kind: "module-item" }> =
+				dragged.kind === "module-item" ? { kind: "inbox", refs: [dragged.ref] } : dragged;
 
 			if (target.kind === "inbox-area") {
 				// Only a unit has a disk/ref identity to "return to the inbox" — a meta folder dropped
@@ -3984,6 +4169,12 @@ export class AtlasExplorerView extends ItemView {
 			}
 
 			// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view.
+			if (moduleRef) {
+				// A refused edge drop returned above, so reaching here means the item really is placed.
+				this.plugin.unitIndex.addManualPromotion(moduleRef);
+				void this.plugin.saveManualPromotions();
+				this.moduleDragCommitted = true;
+			}
 			// PR-3 (G1): an edge drop places the batch starting at `position`, in drag order; a nest/
 			// append drop (`position` undefined) keeps the pre-PR-3 behaviour of always appending.
 			if (position === undefined) {
@@ -4213,6 +4404,7 @@ export class AtlasExplorerView extends ItemView {
 	 * unreviewed bulk-move feature — the row-level drop zone underneath still handles a multi-item
 	 * drag the normal way (organizational meta-nesting, never a disk move) once this returns `null`. */
 	private singleDragRef(payload: DragPayload): UnitRef | null {
+		if (payload.kind === "module-item") return null; // PR-2: never a disk move
 		if (payload.kind === "inbox") return payload.refs.length === 1 ? payload.refs[0] : null;
 		return payload.nodeIds.length === 1 ? this.refOfNode(payload.viewId, payload.nodeIds[0]) : null;
 	}
@@ -4997,6 +5189,12 @@ export class AtlasExplorerView extends ItemView {
 		// path doesn't change depending on state that can flip at any time). The drag-hold-to-open
 		// dwell mechanic below is unaffected either way — it was never click-based.
 
+		// PR-2 (G2): press and hold (500 ms) anywhere on the row opens Module Contents. The hold cancels on
+		// release, drift past the slop, a drag start or a right-click, and a completed hold swallows the
+		// click that follows — so it never also selects the row, opens its note or changes its status
+		// (the status dot's own click). The drag-hold dwell below is drag-based and never overlaps it.
+		attachLongPress(row, () => this.openModuleContentsModal(folderPath));
+
 		let dwellTimer: number | undefined;
 		const cancelDwell = () => {
 			if (dwellTimer === undefined) return;
@@ -5008,7 +5206,7 @@ export class AtlasExplorerView extends ItemView {
 			}
 		};
 		const startDwell = () => {
-			if (!this.dragPayload || dwellTimer !== undefined) return;
+			if (!this.dragPayload || this.dragPayload.kind === "module-item" || dwellTimer !== undefined) return;
 			this.cancelActiveDwell = cancelDwell;
 			this.activeDwellRow = row;
 			dwellTimer = window.setTimeout(() => {
@@ -5019,7 +5217,8 @@ export class AtlasExplorerView extends ItemView {
 			}, MODULE_HOVER_DWELL_MS);
 		};
 		iconEl.addEventListener("dragover", (evt) => {
-			if (!this.dragPayload) return;
+			// PR-2: a module-item drag falls through to the row's own nest zone instead.
+			if (!this.dragPayload || this.dragPayload.kind === "module-item") return;
 			evt.preventDefault();
 			evt.stopPropagation();
 			iconEl.addClass("atlas-drop-target");
@@ -5030,6 +5229,7 @@ export class AtlasExplorerView extends ItemView {
 			cancelDwell();
 		});
 		iconEl.addEventListener("drop", (evt) => {
+			if (this.dragPayload?.kind === "module-item") return; // PR-2: bubbles to the row's own drop zone
 			evt.preventDefault();
 			evt.stopPropagation();
 			iconEl.removeClass("atlas-drop-target");
@@ -5047,15 +5247,27 @@ export class AtlasExplorerView extends ItemView {
 		this.openModuleModal = modal;
 	}
 
-	private openModuleContentsModal(folderPath: string): void {
-		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
-		if (!(folder instanceof TFolder)) return;
-		const modal: ModuleContentsModal = new ModuleContentsModal(this.plugin.app, folder, {
+	/** The callbacks both ways of opening Module Contents share. */
+	private moduleModalCallbacks(folderPath: string): Omit<ModuleContentsModalCallbacks, "onCloseCallback" | "dropTarget"> {
+		return {
 			onOpenFile: (file) => void this.openRef({ kind: "file", path: file.path }),
 			onRevealInNative: (path) => this.revealInNativeExplorer(path),
 			onPromoteAndPlace: (path, isFolder) => this.promoteAndPlaceFlow(path, isFolder),
 			isFolderExpanded: (path) => this.plugin.isModuleFolderExpanded(path),
 			onToggleFolder: (path, expanded) => this.plugin.setModuleFolderExpanded(path, expanded),
+			isItemHidden: (path) => this.plugin.isModuleItemHidden(folderPath, path),
+			onToggleItemHidden: (path, hidden) => this.plugin.setModuleItemHidden(folderPath, path, hidden),
+			onPromoteToInbox: (path, isFolder) => this.promoteToInbox(path, isFolder),
+			onItemDragStart: (path, isFolder) => this.startModuleItemDrag(path, isFolder),
+			onItemDragEnd: () => this.endModuleItemDrag(),
+		};
+	}
+
+	private openModuleContentsModal(folderPath: string): void {
+		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
+		if (!(folder instanceof TFolder)) return;
+		const modal: ModuleContentsModal = new ModuleContentsModal(this.plugin.app, folder, {
+			...this.moduleModalCallbacks(folderPath),
 			onCloseCallback: () => {
 				if (this.openModuleModal === modal) this.openModuleModal = null;
 			},
@@ -5074,11 +5286,7 @@ export class AtlasExplorerView extends ItemView {
 		const ref = this.singleDragRef(payload);
 		if (!ref || ref.kind === "folder") return; // only files/blocks are moveable into a module (see handleDrop)
 		const modal: ModuleContentsModal = new ModuleContentsModal(this.plugin.app, folder, {
-			onOpenFile: (file) => void this.openRef({ kind: "file", path: file.path }),
-			onRevealInNative: (path) => this.revealInNativeExplorer(path),
-			onPromoteAndPlace: (path, isFolder) => this.promoteAndPlaceFlow(path, isFolder),
-			isFolderExpanded: (path) => this.plugin.isModuleFolderExpanded(path),
-			onToggleFolder: (path, expanded) => this.plugin.setModuleFolderExpanded(path, expanded),
+			...this.moduleModalCallbacks(folderPath),
 			dropTarget: { onDrop: (targetFolderPath) => void this.handleAddToModule(ref, targetFolderPath, true) },
 			onCloseCallback: () => {
 				if (this.openModuleModal === modal) this.openModuleModal = null;
@@ -5087,6 +5295,41 @@ export class AtlasExplorerView extends ItemView {
 		});
 		this.trackModuleModal(modal);
 		modal.open();
+	}
+
+	/** PR-3 (G3): the one way a Module Contents item reaches the inbox's "added" state, shared by the
+	 * menu item and the drop on the Inbox. An item that is already a manual promotion is left alone, so
+	 * `addedItems` never gains a second entry for something `manualPromotions` already holds; one
+	 * that is already added is a no-op inside `markAdded`. In-memory only: the caller saves. */
+	private addModuleItemToInbox(ref: UnitRef): void {
+		const { unitIndex } = this.plugin;
+		if (unitIndex.getManualPromotions().some((manual) => unitRefsEqual(manual, ref))) return;
+		unitIndex.markAdded(ref);
+	}
+
+	/** PR-2 (G2): "Promote to inbox" on a Module Contents item. Marks it "added" (the terminal inbox
+	 * state, same as the "+" button), saves at once and redraws; plugin data only, nothing on disk. */
+	private promoteToInbox(path: string, isFolder: boolean): void {
+		const ref: UnitRef = isFolder ? { kind: "folder", path } : { kind: "file", path };
+		this.addModuleItemToInbox(ref);
+		void this.plugin.flushSave();
+		void this.render();
+	}
+
+	/** PR-2 (G2): an item row in Module Contents started dragging — arms the Inbox/view drop zones. */
+	private startModuleItemDrag(path: string, isFolder: boolean): void {
+		this.moduleDragCommitted = false;
+		this.dragPayload = { kind: "module-item", ref: isFolder ? { kind: "folder", path } : { kind: "file", path } };
+	}
+
+	/** PR-2 (G2): the item drag is over. Disarms the drop zones; returns whether a drop zone took the
+	 * item (`handleDrop` sets the flag), so the modal knows to close. A drag that ended anywhere else
+	 * returns false having changed nothing. */
+	private endModuleItemDrag(): boolean {
+		const committed = this.moduleDragCommitted;
+		this.moduleDragCommitted = false;
+		if (this.dragPayload?.kind === "module-item") this.dragPayload = null;
+		return committed;
 	}
 
 	private async copyLink(ref: UnitRef): Promise<void> {

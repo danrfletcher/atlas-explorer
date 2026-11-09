@@ -14,7 +14,7 @@ describe("data compatibility (a v0.2.1 data.json)", () => {
 	it("settings keys are the v0.2.1 fixture's keys plus noAutoPromoteFolders and highlightOpenNote", () => {
 		// noAutoPromoteFolders and highlightOpenNote (PR-1.F2) are new and absent from the fixture;
 		// loading without them yields [] / true respectively (see main-persistence tests).
-		expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([...Object.keys(data.settings), "noAutoPromoteFolders", "highlightOpenNote", "mcpServerEnabled"].sort());
+		expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([...Object.keys(data.settings), "noAutoPromoteFolders", "highlightOpenNote", "mcpServerEnabled", "autoPromotion"].sort());
 	});
 
 	it("persisted AtlasData keys are the v0.2.1 fixture's keys plus PR-2's new fields", () => {
@@ -24,7 +24,7 @@ describe("data compatibility (a v0.2.1 data.json)", () => {
 		// PR-2 added dismissedByView/dismissedGlobal/addedItems: absent from this v0.2.1 fixture
 		// (so it still proves old-data compatibility), named explicitly so a future key addition
 		// doesn't silently hide in this list the way PR-2's did before.
-		const newPr2Keys = ["dismissedByView", "dismissedGlobal", "addedItems"];
+		const newPr2Keys = ["dismissedByView", "dismissedGlobal", "addedItems", "hiddenModuleItems"]; // hiddenModuleItems: atlas-17 PR-2
 		expect(keys).toEqual([...Object.keys(data), ...newPr2Keys].sort());
 	});
 
@@ -48,7 +48,7 @@ describe("fence regression", () => {
 	it("RG-1/2/3 adds no setting, command or menu item", () => {
 		const commands = [...read("src/commands.ts").matchAll(/id: "([^"]+)"/g), ...read("src/f10-commands.ts").matchAll(/id: "([^"]+)"/g)].map((m) => m[1]);
 		expect(commands.sort()).toEqual(["add-block", "new-view", "open-explorer", "place-active-file-in-view", "rebuild-index", "reveal-active-file", "switch-view"]);
-		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(23); // 19 + PR-1.S1's MCP server section (heading, enable toggle, port, token)
+		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(24); // 19 + PR-1.S1's MCP server section (heading, enable toggle, port, token) + the Auto-promote linked items toggle
 		for (const f of NEW_FILES) expect(read(f), f).not.toMatch(/addCommand\(|addItem\(|new Setting\(|addSettingTab|registerEditorSuggest/);
 		const wired = [...readdirSync(join(root, "src"))].filter((f) => f.endsWith(".ts")).filter((f) => /openNameDialog/.test(read(`src/${f}`)));
 		expect(wired.sort()).toEqual(["add-under-named.ts", "create-from-meta.ts", "create-module.ts", "main.ts", "name-dialog.ts", "test-harness.ts"]); // main.ts: graduation's clash dialog (PR-2); create-module.ts: PR-3; create-from-meta.ts: PR-4; add-under-named.ts: PR-3.F2/F3 (File and Module share it)
