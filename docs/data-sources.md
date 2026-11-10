@@ -48,9 +48,64 @@ Pulls rows from a JSON endpoint.
 
 **Refresh.** Two independent toggles, both off by default: **Refresh when Atlas view loads**, and **Refresh every** N minutes (minimum 5, runs only while the view is open; stale views refresh on next visit). **Refresh now** is always on the menu. A connection dot on the item shows the last result; if the endpoint is unreachable, the dot goes red with a tooltip ("unreachable, last updated 3 h ago") and rows still show from the cache. On mobile, API sources show their cached rows and don't fetch.
 
-**Click action.** What happens when a row is clicked: **Open attachment** (the default), **None**, or **Run terminal command in background** (desktop only). A command is run directly, not through a shell, so pipes, redirects, `&&`, globbing, `~` and environment variables don't work. Use `{field}` for the value of an extra mapped field. Commands run with your trust, and the dialog says so.
+### Source click action
 
-**Attaching notes.** Right-click a row for **Add note**, **Add block** or **Add module** to create a note and link it to the row (one attachment per row). **Remove attachment** unlinks it. If the linked note is deleted or renamed, Atlas clears or follows it.
+What happens when an API row is clicked, as far as the source itself is concerned: **Open attachment** (the default), **None**, or **Run terminal command in background** (desktop only). A command is run directly, not through a shell, so pipes, redirects, `&&`, globbing, `~` and environment variables don't work. Use `{field}` for the value of an extra mapped field. Commands run with your trust, and the dialog says so.
+
+This is the layer below the [Click function](#click-function) and the [Item override](#item-override): a row with neither follows this setting exactly as before. Those two run first, and this setting applies only to a row they leave alone.
+
+### Click function
+
+An API source can also hold a **Click function**: JavaScript that runs each time you click one of its rows (or press Enter on it) and decides what that row does. Set it in the Data source modal, under the **Click function** heading below the click action. Because it runs at click time, a row added by a refresh works with nothing set by hand. It is available on every API source, whether its fields are drag-mapped or mapped with JavaScript.
+
+When you click an API row, Atlas runs the first of these that applies:
+
+1. The row's [Item override](#item-override).
+2. The Click function's result.
+3. The source click action.
+4. Open attachment, which applies only when the source click action is **Open attachment** or unset (and the row has an attached note).
+
+The modal shows this helper text under the code box, and this is the whole contract:
+
+> Runs when you click a row (or press Enter on it), unless the row has its own Click action. It decides what the row does, so rows added by a refresh work with nothing set by hand.
+>
+> item is { id, label, secondary, extra }. extra holds the row's extra mapped fields and is empty on a not-found row, so guard it (item.extra.path may be undefined).
+>
+> Return { kind: "terminal", argv: [...] } to run a command (no shell, no {field} placeholders), { kind: "command", id } to run an Obsidian command, { kind: "uri", uri } to open a URI, { kind: "none" } to do nothing, or return nothing to fall through to the click action above.
+>
+> The function must be synchronous: an async function or a returned Promise is rejected with a notice. Any other return value, or an error thrown, also shows a notice and runs nothing.
+
+An empty box means no function. Details the helper text leaves out:
+
+- `argv` goes straight to the runner with no tokenizing and no `{field}` resolution. Each element reaches the program exactly as returned, and nothing goes through a shell.
+- `{ kind: "none" }` stops everything: nothing runs and no attachment opens. Returning nothing falls through to the source click action.
+- An invalid shape (an unknown `kind`, a missing or non-string `id` or `uri`, an `argv` that is not a non-empty array of strings), a Promise return or a throw shows a notice with the reason and runs nothing, and the source click action does not run either.
+- A row whose cache was cleared, or a *not found* row, gets `extra = {}`. Its `id`, `label` and `secondary` come from the stored row, and `secondary` is `undefined` when the row has none. Guard `item.extra` before reading from it.
+- A second click on the same row within 1 second is ignored, as for any [click action](using-the-explorer.md#click-actions).
+- A click with a modifier key, or on the row's status dot, does not call the function; it does whatever the source click action does (or nothing, if the row has an Item override).
+- Save compiles the code but never runs it. A syntax error, or code that is not a function, blocks Save with an inline error.
+
+**The Click function is unsandboxed and has no timeout.** It runs with Atlas's full trust, like the JavaScript mapping above, and an infinite loop in it freezes Obsidian. Only paste code you wrote or have read.
+
+For example, to open an app by its path when the row has one, and otherwise run an Obsidian command named after the row's id:
+
+```js
+(item) => item.extra.path ? { kind: "terminal", argv: ["open", "-a", item.extra.path] } : { kind: "command", id: "app-runner:open-" + item.id }
+```
+
+A row with `extra.path` set to `Docker` runs `open -a Docker`. A row with no `path` runs the command `app-runner:open-<its id>`. The command id here is only sample text: Atlas runs whatever id the function returns and does not depend on any particular plugin.
+
+### Item override
+
+Any one API row can have its own click action, called an **Item override**. Right-click the row, choose **Click action…**, pick a **Kind** and **Save**. Besides the three kinds, the dropdown offers **Use source setting** (no override) and **None** (the row does nothing: no Click function, source click action or attachment runs for it). The override is the first thing a click checks, so it beats the Click function; **Clear click action** on the row's menu removes it, and the row returns to the function.
+
+- **Merge** refresh keeps an override, including on a row that has gone *not found*. **Overwrite** drops it along with the row; a row that later returns starts fresh.
+- Duplicating the item that holds the source does not copy overrides: they belong to the rows, not to the copy.
+- An override on a row whose source was removed, or on a Table or CSV row, does nothing; the setting is kept.
+
+### Attaching notes
+
+Right-click a row for **Add note**, **Add block** or **Add module** to create a note and link it to the row (one attachment per row). **Remove attachment** unlinks it. If the linked note is deleted or renamed, Atlas clears or follows it.
 
 Removing a *not found* row is per row (**Remove**), with no bulk action and no undo.
 
