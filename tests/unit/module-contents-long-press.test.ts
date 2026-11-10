@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AtlasExplorerView } from "../../src/explorer-view";
-import { LONG_PRESS_MS, LONG_PRESS_SLOP_PX, attachLongPress } from "../../src/long-press";
+import { LONG_PRESS_MS, LONG_PRESS_SLOP_PX, LONG_PRESS_SWALLOW_MS, attachLongPress } from "../../src/long-press";
 
 const down = (el: Element, x = 10, y = 10, button = 0) =>
 	el.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: x, clientY: y, button }));
+const downAs = (el: Element, pointerType: string) => {
+	const evt = new MouseEvent("pointerdown", { bubbles: true, clientX: 10, clientY: 10, button: 0 });
+	Object.defineProperty(evt, "pointerType", { value: pointerType });
+	el.dispatchEvent(evt);
+};
 const move = (el: Element, x: number, y: number) => el.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: x, clientY: y }));
 const up = (el: Element) => el.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
 
@@ -152,5 +157,129 @@ describe("G2 long-press: 500 ms hold on a module row opens Module Contents", () 
 		down(el);
 		vi.advanceTimersByTime(2000);
 		expect(cb).not.toHaveBeenCalled();
+	});
+
+	// R3: the swallow must stop every listener on the row, including ones registered before it and ones
+	// on the row when the click's own target is the row (padding), and must not stay armed afterwards.
+	it("swallows a click that targets the row itself even for listeners registered before and after attachLongPress", () => {
+		const el = document.body.appendChild(document.createElement("div"));
+		const before = vi.fn();
+		const after = vi.fn();
+		const beforeCapture = vi.fn();
+		el.addEventListener("click", before);
+		el.addEventListener("click", beforeCapture, true);
+		const cb = vi.fn();
+		attachLongPress(el, cb);
+		el.addEventListener("click", after);
+		// Same element, same phase, registered later: only stopImmediatePropagation stops this one.
+		const afterCapture = vi.fn();
+		el.addEventListener("click", afterCapture, true);
+		down(el);
+		vi.advanceTimersByTime(500);
+		up(el);
+		el.click();
+		expect(cb).toHaveBeenCalledTimes(1);
+		expect(before).not.toHaveBeenCalled();
+		expect(after).not.toHaveBeenCalled();
+		expect(afterCapture).not.toHaveBeenCalled();
+		// A capture listener registered earlier on the same element still ran first, which is the one
+		// ordering a listener on the row itself cannot be stopped from.
+		expect(beforeCapture).toHaveBeenCalledTimes(1);
+	});
+
+	it("swallows a click on a child of the row too", () => {
+		const { row, icon, open } = wiredRow();
+		const rowClick = vi.fn();
+		const iconClick = vi.fn();
+		row.addEventListener("click", rowClick);
+		icon.addEventListener("click", iconClick);
+		down(row);
+		vi.advanceTimersByTime(500);
+		up(row);
+		icon.click();
+		expect(open).toHaveBeenCalledTimes(1);
+		expect(rowClick).not.toHaveBeenCalled();
+		expect(iconClick).not.toHaveBeenCalled();
+	});
+
+	it("the swallow disarms itself after the release, so a click that never reached the row does not eat a later one", () => {
+		const { row, open } = wiredRow();
+		const clicked = vi.fn();
+		row.addEventListener("click", clicked);
+		down(row);
+		vi.advanceTimersByTime(500);
+		up(row); // the release landed on the row, but no click arrives
+		vi.advanceTimersByTime(LONG_PRESS_SWALLOW_MS - 1);
+		row.click();
+		expect(clicked).not.toHaveBeenCalled(); // still inside the window: that was the release's click
+		down(row);
+		vi.advanceTimersByTime(500);
+		up(row);
+		vi.advanceTimersByTime(LONG_PRESS_SWALLOW_MS);
+		row.click();
+		expect(clicked).toHaveBeenCalledTimes(1);
+		expect(open).toHaveBeenCalledTimes(2);
+	});
+
+	it("the swallow also disarms when the pointer leaves the row after the hold (the release lands on the modal)", () => {
+		const { row, open } = wiredRow();
+		const clicked = vi.fn();
+		row.addEventListener("click", clicked);
+		down(row);
+		vi.advanceTimersByTime(500);
+		row.dispatchEvent(new Event("pointerleave", { bubbles: true }));
+		vi.advanceTimersByTime(LONG_PRESS_SWALLOW_MS);
+		row.click();
+		expect(open).toHaveBeenCalledTimes(1);
+		expect(clicked).toHaveBeenCalledTimes(1);
+	});
+
+	it("the next press cancels a pending disarm and starts clean", () => {
+		const { row } = wiredRow();
+		const clicked = vi.fn();
+		row.addEventListener("click", clicked);
+		down(row);
+		vi.advanceTimersByTime(500);
+		up(row);
+		down(row); // a quick second press before the window ends
+		up(row);
+		row.click();
+		expect(clicked).toHaveBeenCalledTimes(1);
+	});
+
+	// R6: on touch the OS raises contextmenu for the same long press.
+	it("a touch hold that fired swallows the OS contextmenu raised for it, so the row menu does not open too", () => {
+		const { row, open } = wiredRow();
+		const menu = vi.fn();
+		row.addEventListener("contextmenu", menu);
+		downAs(row, "touch");
+		vi.advanceTimersByTime(500);
+		const evt = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+		row.dispatchEvent(evt);
+		expect(open).toHaveBeenCalledTimes(1);
+		expect(menu).not.toHaveBeenCalled();
+		expect(evt.defaultPrevented).toBe(true);
+	});
+
+	it("a touch contextmenu that arrives first still cancels the hold, so only the row menu opens", () => {
+		const { row, open } = wiredRow();
+		const menu = vi.fn();
+		row.addEventListener("contextmenu", menu);
+		downAs(row, "touch");
+		vi.advanceTimersByTime(300);
+		row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+		vi.advanceTimersByTime(2000);
+		expect(open).not.toHaveBeenCalled();
+		expect(menu).toHaveBeenCalledTimes(1);
+	});
+
+	it("a mouse right-click after a fired hold is still the row menu: only touch/pen holds swallow contextmenu", () => {
+		const { row } = wiredRow();
+		const menu = vi.fn();
+		row.addEventListener("contextmenu", menu);
+		downAs(row, "mouse");
+		vi.advanceTimersByTime(500);
+		row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+		expect(menu).toHaveBeenCalledTimes(1);
 	});
 });

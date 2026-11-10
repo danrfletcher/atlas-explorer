@@ -491,14 +491,26 @@ export default class AtlasPlugin extends Plugin {
 	}
 
 	/** PR-2 (G2): hides or unhides one item of a module's contents. Plugin data only; saved through the
-	 * debounced persist, so a run of quick clicks on the eye button writes once. */
+	 * debounced persist, so a run of quick clicks on the eye button writes once. A hide is recorded under
+	 * the module being viewed; an unhide clears the item from every module's list, so the eye never reads
+	 * "visible" while the item is still hidden through another module (`UnitIndex.isModuleItemHidden`). */
 	setModuleItemHidden(modulePath: string, itemPath: string, hidden: boolean): void {
-		if (this.unitIndex.setModuleItemHidden(modulePath, itemPath, hidden)) this.persistDebounced();
+		const changed = hidden
+			? this.unitIndex.setModuleItemHidden(modulePath, itemPath, true)
+			: this.unitIndex.unhideItemEverywhere(itemPath);
+		if (changed) this.persistDebounced();
 	}
 
-	/** PR-2 (G2): whether `itemPath` itself is on `modulePath`'s hidden list. */
-	isModuleItemHidden(modulePath: string, itemPath: string): boolean {
-		return this.unitIndex.isModuleItemExplicitlyHidden(modulePath, itemPath);
+	/** PR-2 (G2): whether `itemPath` itself is hidden, in whichever module it was hidden from. The eye
+	 * button reads this, so it agrees with what the inbox does with the item. */
+	isModuleItemHidden(itemPath: string): boolean {
+		return this.unitIndex.isItemHiddenInAnyModule(itemPath);
+	}
+
+	/** The hidden-list entry that hides `path` (itself or a folder above it), or null. Lets a module
+	 * opened directly show that it is hidden as a whole, as the inbox treats it. */
+	moduleHiddenBy(path: string): string | null {
+		return this.unitIndex.findHiddenCover(path);
 	}
 
 	/** PR 10: whether a module-internal subfolder should render expanded in a Module Contents modal.

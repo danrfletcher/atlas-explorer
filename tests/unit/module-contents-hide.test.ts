@@ -103,8 +103,8 @@ describe("G3 hide/unhide state per module, as data.json will hold it", () => {
 	it("hiding in one module does not hide the same-named item in another", () => {
 		const rig = makeModuleRig(["A/n.md", "B/n.md"], ["A", "B"]);
 		click(rig, { module: "A", item: "n.md" });
-		expect(rig.plugin.isModuleItemHidden("A", "A/n.md")).toBe(true);
-		expect(rig.plugin.isModuleItemHidden("B", "B/n.md")).toBe(false);
+		expect(rig.plugin.isModuleItemHidden("A/n.md")).toBe(true);
+		expect(rig.plugin.isModuleItemHidden("B/n.md")).toBe(false);
 	});
 });
 
@@ -136,5 +136,82 @@ describe("G3 plugin-level toggles are idempotent", () => {
 		rig.plugin.setModuleItemHidden("Mod", "Mod/a.md", true);
 		rig.plugin.setModuleItemHidden("Mod", "Mod/a.md", false);
 		expect(rig.app.vault.calls).toEqual(before);
+	});
+});
+
+describe("R5: the eye agrees with the inbox when an item is reached through a sub-folder module", () => {
+	const hiddenIn = (rig: ReturnType<typeof makeModuleRig>, module: string, name: string) =>
+		itemRow(rig.openModal(module), name).classList.contains("atlas-module-item-hidden");
+
+	it("an item hidden while viewing Mod shows as hidden when Mod/sub is opened directly", () => {
+		const rig = makeModuleRig(FILES, FOLDERS);
+		rig.plugin.setModuleItemHidden("Mod", "Mod/sub/c.md", true);
+		expect(rig.index.isModuleItemHidden("Mod/sub/c.md")).toBe(true);
+		expect(hiddenIn(rig, "Mod/sub", "c.md")).toBe(true);
+		expect(eye(itemRow(rig.openModal("Mod/sub"), "c.md")).getAttribute("aria-label")).toBe("Unhide");
+	});
+
+	it("clicking the eye from Mod/sub unhides it for good: no module keeps the flag and the inbox sees it again", () => {
+		const rig = makeModuleRig(FILES, FOLDERS, { Mod: ["Mod/sub/c.md"], "Mod/sub": ["Mod/sub/c.md"] });
+		const modal = rig.openModal("Mod/sub");
+		eye(itemRow(modal, "c.md")).click();
+		modal.close();
+		expect(rig.index.getHiddenModuleItems()).toEqual({});
+		expect(rig.index.isModuleItemHidden("Mod/sub/c.md")).toBe(false);
+		expect(rig.persistDebounced).toHaveBeenCalledTimes(1);
+		expect(hiddenIn(rig, "Mod", "sub")).toBe(false);
+		expect(eye(itemRow(rig.openModal("Mod/sub"), "c.md")).getAttribute("aria-label")).toBe("Hide");
+	});
+
+	it("hiding from Mod/sub records the flag under Mod/sub only, and leaves other items alone", () => {
+		const rig = makeModuleRig(FILES, FOLDERS);
+		const modal = rig.openModal("Mod/sub");
+		eye(itemRow(modal, "c.md")).click();
+		expect(rig.index.getHiddenModuleItems()).toEqual({ "Mod/sub": ["Mod/sub/c.md"] });
+	});
+
+	const notice = (modal: ReturnType<ReturnType<typeof makeModuleRig>["openModal"]>) =>
+		modal.contentEl.querySelector<HTMLElement>(".atlas-module-hidden-notice")!;
+	const tree = (modal: ReturnType<ReturnType<typeof makeModuleRig>["openModal"]>) =>
+		modal.contentEl.querySelector<HTMLElement>(".atlas-module-modal-tree")!;
+
+	it("a folder hidden in Mod: opening Mod/sub directly dims its rows and says so, as the inbox treats them as hidden", () => {
+		const rig = makeModuleRig(FILES, FOLDERS, { Mod: ["Mod/sub"] });
+		expect(rig.index.isModuleItemHidden("Mod/sub/c.md")).toBe(true);
+		const modal = rig.openModal("Mod/sub");
+		expect(tree(modal).classList.contains("atlas-module-hidden-branch")).toBe(true);
+		expect(notice(modal).classList.contains("is-visible")).toBe(true);
+		expect(notice(modal).textContent).toContain("hidden");
+		// The row's own eye is its own flag; the module-level state is what the notice carries.
+		expect(eye(itemRow(modal, "c.md")).getAttribute("aria-label")).toBe("Hide");
+	});
+
+	it("the notice's Unhide clears the flag everywhere: rows undim, the inbox sees them, and it persists", () => {
+		const rig = makeModuleRig(FILES, FOLDERS, { Mod: ["Mod/sub"], Other: ["Mod/sub"] });
+		const modal = rig.openModal("Mod/sub");
+		notice(modal).querySelector<HTMLElement>("button")!.click();
+		expect(rig.index.getHiddenModuleItems()).toEqual({});
+		expect(rig.index.isModuleItemHidden("Mod/sub/c.md")).toBe(false);
+		expect(rig.persistDebounced).toHaveBeenCalledTimes(1);
+		expect(tree(modal).classList.contains("atlas-module-hidden-branch")).toBe(false);
+		expect(notice(modal).classList.contains("is-visible")).toBe(false);
+		expect(tree(rig.openModal("Mod/sub")).classList.contains("atlas-module-hidden-branch")).toBe(false);
+	});
+
+	it("a hidden ancestor of the module names itself in the notice and its Unhide brings the module back", () => {
+		const rig = makeModuleRig(["Mod/sub/deep/d.md", "Mod/a.md"], ["Mod", "Mod/sub", "Mod/sub/deep"], { Mod: ["Mod/sub"] });
+		const modal = rig.openModal("Mod/sub/deep");
+		expect(notice(modal).textContent).toContain("Mod/sub");
+		notice(modal).querySelector<HTMLElement>("button")!.click();
+		expect(rig.index.isModuleItemHidden("Mod/sub/deep/d.md")).toBe(false);
+		expect(notice(modal).classList.contains("is-visible")).toBe(false);
+	});
+
+	it("a module that nothing hides shows no notice and no dimming", () => {
+		const rig = makeModuleRig(FILES, FOLDERS, { Mod: ["Mod/a.md"] });
+		const modal = rig.openModal("Mod/sub");
+		expect(tree(modal).classList.contains("atlas-module-hidden-branch")).toBe(false);
+		expect(notice(modal).classList.contains("is-visible")).toBe(false);
+		expect(notice(modal).textContent).toBe("");
 	});
 });

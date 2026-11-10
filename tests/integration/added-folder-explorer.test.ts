@@ -86,6 +86,7 @@ function makeCtx(files: string[], folders: string[], index?: (app: App) => UnitI
 			isModuleFolderExpanded: vi.fn(() => false),
 			setModuleFolderExpanded: vi.fn(),
 			isModuleItemHidden: vi.fn(() => false),
+			moduleHiddenBy: vi.fn(() => null),
 			setModuleItemHidden: vi.fn(),
 			folderSourcePathStore: { get: () => undefined },
 		},

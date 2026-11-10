@@ -341,9 +341,14 @@ export interface ModuleContentsModalCallbacks {
 	/** PR 10: called when the user clicks a subfolder's chevron, so the explorer view can persist
 	 * the new state via `AtlasPlugin.setModuleFolderExpanded`. */
 	onToggleFolder: (path: string, expanded: boolean) => void;
-	/** PR-2 (G2): whether this item is on the module's hidden list — backed by
-	 * `AtlasPlugin.isModuleItemHidden`, so the eye state survives closing and reopening the modal. */
+	/** PR-2 (G2): whether this item is hidden (in this module or, for an item seen through a sub-folder
+	 * module, in the module it was hidden from) — backed by `AtlasPlugin.isModuleItemHidden`, so the eye
+	 * state survives closing and reopening the modal and matches what the inbox does. */
 	isItemHidden: (path: string) => boolean;
+	/** The hidden-list entry that hides this module's own folder (the folder itself or one above it), or
+	 * null. `isModuleItemHidden` hides everything under a hidden folder, so a module opened directly
+	 * (an added sub-folder hidden from its parent module) shows its rows dimmed with an Unhide notice. */
+	hiddenBy?: (path: string) => string | null;
 	/** PR-2 (G2): the eye button — sets or clears the item's hidden flag in plugin data (never on disk). */
 	onToggleItemHidden: (path: string, hidden: boolean) => void;
 	/** PR-2 (G2): the "Promote to inbox" menu item — marks the item "added". The modal closes after. */
@@ -365,6 +370,11 @@ export class ModuleContentsModal extends Modal {
 	private rows: { el: HTMLElement; name: string }[] = [];
 	/** The item row being dragged out of this modal, from `dragstart` to `dragend`. */
 	private internalDrag: { path: string } | null = null;
+	/** Set when Escape (or a close request) aborted that drag; held until the browser's own `dragend` (or
+	 * the next `dragstart`). The native drag may outlive the abort, and for a modal opened by the drag
+	 * dwell, whose folder rows are live drop zones with a confirm-free disk move, a release over one of
+	 * them must not count as a drop. */
+	private dragCancelled = false;
 	private removeDragListeners: (() => void) | null = null;
 
 	constructor(app: App, private folder: TFolder, private callbacks: ModuleContentsModalCallbacks) {
@@ -374,7 +384,29 @@ export class ModuleContentsModal extends Modal {
 	onOpen(): void {
 		this.titleEl.setText(this.folder.name);
 		this.contentEl.addClass("atlas-module-modal-content");
+		const hiddenNoticeEl = this.contentEl.createDiv({ cls: "atlas-module-hidden-notice" });
 		const treeEl = this.contentEl.createDiv({ cls: "atlas-module-modal-tree" });
+		// This module's own folder may be hidden (from its parent module's modal): the inbox then keeps
+		// everything in it out, so the rows are dimmed and the notice offers the unhide.
+		const paintModuleHidden = (): void => {
+			const cover = this.callbacks.hiddenBy?.(this.folder.path) ?? null;
+			treeEl.toggleClass("atlas-module-hidden-branch", cover !== null);
+			hiddenNoticeEl.empty();
+			hiddenNoticeEl.toggleClass("is-visible", cover !== null);
+			if (cover === null) return;
+			const own = cover === this.folder.path;
+			hiddenNoticeEl.createSpan({
+				text: own
+					? "This folder is hidden, so everything in it is kept out of the inbox."
+					: `"${cover}" is hidden, so everything in here is kept out of the inbox.`,
+			});
+			const unhide = hiddenNoticeEl.createEl("button", { cls: "atlas-module-hidden-unhide", text: "Unhide" });
+			unhide.addEventListener("click", () => {
+				this.callbacks.onToggleItemHidden(cover, false);
+				paintModuleHidden();
+			});
+		};
+		paintModuleHidden();
 
 		if (this.callbacks.dropTarget) {
 			const rootRow = treeEl.createDiv({ cls: "atlas-row atlas-row-internal atlas-module-modal-root" });
@@ -533,6 +565,7 @@ export class ModuleContentsModal extends Modal {
 		row.addEventListener("dragstart", (evt) => {
 			evt.stopPropagation();
 			this.stopItemDrag();
+			this.dragCancelled = false;
 			this.internalDrag = { path };
 			// Private type only: a text/plain payload would let a drop on an open note's editor insert the
 			// path into the note (CodeMirror reads "Text"), which is Atlas editing file content.
@@ -576,6 +609,7 @@ export class ModuleContentsModal extends Modal {
 			};
 		});
 		row.addEventListener("dragend", () => {
+			this.dragCancelled = false; // the native drag is over, so drops mean something again
 			if (!this.internalDrag) return;
 			this.stopItemDrag();
 			if (this.callbacks.onItemDragEnd()) this.close();
@@ -590,10 +624,12 @@ export class ModuleContentsModal extends Modal {
 
 	/** Aborts a drag in progress (Escape, or the modal closing under it): this side is reset as in
 	 * `stopItemDrag`, and the explorer is told so it disarms its drop zones. Nothing is promoted or
-	 * placed, and a no-op when no drag is in progress. */
+	 * placed, and a no-op when no drag is in progress. The abort is remembered in `dragCancelled` until
+	 * the native drag ends, so the modal's own drop zones ignore a release that still arrives. */
 	private cancelItemDrag(): void {
 		if (!this.internalDrag) return;
 		this.stopItemDrag();
+		this.dragCancelled = true;
 		this.callbacks.onItemDragEnd();
 	}
 
@@ -606,15 +642,16 @@ export class ModuleContentsModal extends Modal {
 	}
 
 	private wireDropZone(row: HTMLElement, folderPath: string): void {
-		// An item dragged out of this very modal is never a drop on one of its own rows.
+		// An item dragged out of this very modal is never a drop on one of its own rows, and neither is the
+		// tail of such a drag that Escape already aborted.
 		row.addEventListener("dragover", (evt) => {
-			if (this.internalDrag) return;
+			if (this.internalDrag || this.dragCancelled) return;
 			evt.preventDefault();
 			row.addClass("atlas-drop-target");
 		});
 		row.addEventListener("dragleave", () => row.removeClass("atlas-drop-target"));
 		row.addEventListener("drop", (evt) => {
-			if (this.internalDrag) return;
+			if (this.internalDrag || this.dragCancelled) return;
 			evt.preventDefault();
 			row.removeClass("atlas-drop-target");
 			this.callbacks.dropTarget?.onDrop(folderPath);
@@ -3837,7 +3874,18 @@ export class AtlasExplorerView extends ItemView {
 	 * persists immediately, matching the click-driven-action convention `promoteAndPlace` uses. */
 	private openAddFileModal(): void {
 		const { app, settings, unitIndex, viewsManager } = this.plugin;
-		const units = unitIndex.getUnits();
+		// A unit `isSuppressedFromInbox` keeps out of the inbox (a link-only promotion while auto-promotion
+		// is off, or one the user hid) is not on screen as an inbox row, so it must stay pickable here:
+		// choosing it marks it "added", which is terminal and brings it into the inbox. Placed units are
+		// still left out below via `isPlacedAnywhere`/`placed`. A suppressed unit the user dismissed for
+		// the active inbox scope (global, or this view) stays out too: `getInboxUnits` still filters a
+		// dismissed unit after `markAdded`, so offering it would do nothing visible. Un-dismiss it first.
+		const view = viewsManager.getActiveView();
+		const dismissedHere = (unit: Unit): boolean =>
+			view.inboxMode === "global"
+				? unitIndex.isDismissed(unitToRef(unit), "global")
+				: unitIndex.isDismissed(unitToRef(unit), "view", view.id);
+		const units = unitIndex.getUnits().filter((unit) => !unitIndex.isSuppressedFromInbox(unit) || dismissedHere(unit));
 		// PR-1.F1: one placed-set per open, shared by the file and folder candidate lists.
 		const placed = viewsManager.placedRefKeys();
 		const isPlacedAnywhere = (ref: UnitRef): boolean => placed.has(unitRefKey(ref));
@@ -5403,7 +5451,8 @@ export class AtlasExplorerView extends ItemView {
 			onPromoteAndPlace: (path, isFolder) => this.promoteAndPlaceFlow(path, isFolder),
 			isFolderExpanded: (path) => this.plugin.isModuleFolderExpanded(path),
 			onToggleFolder: (path, expanded) => this.plugin.setModuleFolderExpanded(path, expanded),
-			isItemHidden: (path) => this.plugin.isModuleItemHidden(folderPath, path),
+			isItemHidden: (path) => this.plugin.isModuleItemHidden(path),
+			hiddenBy: (path) => this.plugin.moduleHiddenBy(path),
 			onToggleItemHidden: (path, hidden) => this.plugin.setModuleItemHidden(folderPath, path, hidden),
 			onPromoteToInbox: (path, isFolder) => this.promoteToInbox(path, isFolder),
 			onItemDragStart: (path, isFolder) => this.startModuleItemDrag(path, isFolder),
