@@ -332,10 +332,40 @@ export class UnitIndex {
 		return Object.values(this.hiddenModuleItems).some((items) => items.some((hidden) => isPathHiddenBy(path, hidden)));
 	}
 
-	/** PR-2 (G2): whether `itemPath` itself is on `modulePath`'s hidden list (what the eye button
-	 * toggles), as opposed to merely sitting under a hidden folder. */
-	isModuleItemExplicitlyHidden(modulePath: string, itemPath: string): boolean {
-		return (this.hiddenModuleItems[modulePath] ?? []).includes(itemPath);
+	/** The hidden-list entry (in any module) that hides `path`: `path` itself or the nearest folder above
+	 * it, or null when nothing does. This is the `isModuleItemHidden` rule with its reason attached, so
+	 * a module opened directly can say why everything in it is kept out of the inbox. */
+	findHiddenCover(path: string): string | null {
+		let best: string | null = null;
+		for (const items of Object.values(this.hiddenModuleItems)) {
+			for (const hidden of items) {
+				if (isPathHiddenBy(path, hidden) && (best === null || hidden.length > best.length)) best = hidden;
+			}
+		}
+		return best;
+	}
+
+	/** Whether `itemPath` itself is on the hidden list of any module. This is what the eye button shows:
+	 * the flags are stored per module, but a hide made while viewing `Mod` also applies to the same item
+	 * seen through its added sub-folder module `Mod/sub` (`isModuleItemHidden` reads every module), so the
+	 * eye must read every module too or it would disagree with the inbox. */
+	isItemHiddenInAnyModule(itemPath: string): boolean {
+		return Object.values(this.hiddenModuleItems).some((items) => items.includes(itemPath));
+	}
+
+	/** Unhides `itemPath` in every module that lists it, in one change notification. Returns whether
+	 * anything changed; the caller persists. */
+	unhideItemEverywhere(itemPath: string): boolean {
+		let changed = false;
+		for (const [modulePath, items] of Object.entries(this.hiddenModuleItems)) {
+			if (!items.includes(itemPath)) continue;
+			changed = true;
+			const next = items.filter((path) => path !== itemPath);
+			if (next.length === 0) delete this.hiddenModuleItems[modulePath];
+			else this.hiddenModuleItems[modulePath] = next;
+		}
+		if (changed) this.notifyChange();
+		return changed;
 	}
 
 	/** PR-2 (G2): hides or unhides `itemPath` inside `modulePath` (exact path, not its descendants). Only

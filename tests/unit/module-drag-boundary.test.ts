@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { MODULE_DRAG_OUT_CLASS } from "../../src/explorer-view";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AtlasExplorerView, MODULE_DRAG_OUT_CLASS } from "../../src/explorer-view";
 import { dragEvent, fileRef, folderRef, itemRow, makeModuleRig, sizeModal } from "./module-contents-fixtures";
 
 // atlas-17 PR-3 (G3/E4): dragging a Module Contents row across the modal boundary. Real modal, real
@@ -357,5 +357,80 @@ describe("F1 a boundary drag never touches the disk", () => {
 		drop(rig, { kind, viewId: "v1" });
 		row.dispatchEvent(dragEvent("dragend", ...OUTSIDE));
 		expect(rig.app.vault.calls).toEqual(calls);
+	});
+});
+
+// R1 (polish): a modal opened by the drag dwell has live drop zones with a confirm-free disk move. When
+// Escape aborts an item drag started inside it, the native drag may still be running, and a release over
+// one of its folder rows must not run that move.
+describe("Escape-aborted item drag in a drag-dwell modal does not turn a late drop into a disk move", () => {
+	function dwellModal() {
+		const rig = makeModuleRig(FILES, FOLDERS);
+		const handleAddToModule = vi.fn();
+		Object.assign(rig.explorer, {
+			dragPayload: { kind: "inbox", refs: [fileRef("Other/x.md")] },
+			handleAddToModule,
+			singleDragRef: (AtlasExplorerView.prototype as unknown as Record<string, (...a: unknown[]) => unknown>).singleDragRef.bind(rig.explorer),
+		});
+		(AtlasExplorerView.prototype as unknown as Record<string, (...a: unknown[]) => unknown>).openModuleContentsModalForDrag.call(rig.explorer, "Mod");
+		const modal = (rig.explorer.trackModuleModal as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as ReturnType<typeof rig.openModal>;
+		opened.push(modal);
+		sizeModal(modal);
+		return { rig, modal, handleAddToModule };
+	}
+	const dropOn = (row: HTMLElement) => {
+		const evt = dragEvent("drop", ...INSIDE);
+		row.dispatchEvent(evt);
+		return evt;
+	};
+
+	it("without any item drag, a drop on a folder row is the dwell drop and runs the move once", () => {
+		const { modal, handleAddToModule } = dwellModal();
+		dropOn(itemRow(modal, "sub"));
+		expect(handleAddToModule).toHaveBeenCalledTimes(1);
+		expect(handleAddToModule).toHaveBeenCalledWith(fileRef("Other/x.md"), "Mod/sub", true);
+	});
+
+	it("after Escape mid item-drag, a drop on a folder row (or the module root) is ignored", () => {
+		const { modal, handleAddToModule } = dwellModal();
+		itemRow(modal, "a.md").dispatchEvent(dragEvent("dragstart"));
+		escape();
+		const row = itemRow(modal, "sub");
+		const over = dragEvent("dragover", ...INSIDE);
+		row.dispatchEvent(over);
+		expect(over.defaultPrevented).toBe(false); // not offered as a drop target either
+		const evt = dropOn(row);
+		dropOn(modal.contentEl.querySelector<HTMLElement>(".atlas-module-modal-root")!);
+		expect(evt.defaultPrevented).toBe(false);
+		expect(handleAddToModule).not.toHaveBeenCalled();
+		expect(document.body.contains(modal.containerEl)).toBe(true);
+	});
+
+	it("the same holds when Obsidian's own Escape handling reaches close() first", () => {
+		const { modal, handleAddToModule } = dwellModal();
+		itemRow(modal, "a.md").dispatchEvent(dragEvent("dragstart"));
+		modal.close(); // aborts the drag, modal stays
+		dropOn(itemRow(modal, "sub"));
+		expect(handleAddToModule).not.toHaveBeenCalled();
+	});
+
+	it("the browser's dragend ends the cancelled state, so later drops work again", () => {
+		const { modal, handleAddToModule } = dwellModal();
+		const a = itemRow(modal, "a.md");
+		a.dispatchEvent(dragEvent("dragstart"));
+		escape();
+		a.dispatchEvent(dragEvent("dragend", ...INSIDE));
+		dropOn(itemRow(modal, "sub"));
+		expect(handleAddToModule).toHaveBeenCalledTimes(1);
+	});
+
+	it("a new item drag after an Escape starts clean, and a drop ignored during it stays ignored", () => {
+		const { modal, handleAddToModule } = dwellModal();
+		const a = itemRow(modal, "a.md");
+		a.dispatchEvent(dragEvent("dragstart"));
+		escape();
+		a.dispatchEvent(dragEvent("dragstart")); // dragend never came; the next drag resets the flag
+		dropOn(itemRow(modal, "sub")); // internal drag in progress: still not a drop on its own rows
+		expect(handleAddToModule).not.toHaveBeenCalled();
 	});
 });

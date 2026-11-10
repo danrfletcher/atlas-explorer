@@ -6,7 +6,7 @@ import { UnitIndex } from "../../src/unit-index";
 import { unitRefKey, unitToRef } from "../../src/types";
 import type { Unit } from "../../src/types";
 import { seedRoot } from "../helpers";
-import { BASE_KEYS, LINK_ONLY_KEYS, USER_CHOICE_KEYS, buildFixture, file } from "../auto-promotion-fixtures";
+import { BASE_KEYS, LINK_ONLY_KEYS, USER_CHOICE_KEYS, buildFixture, file, inboxKeys } from "../auto-promotion-fixtures";
 
 /** PR-1 (G1): the classification helper `UnitIndex.isLinkOnlyPromotion`, and the inbox rule
  * `isSuppressedFromInbox` built on it. */
@@ -155,5 +155,32 @@ describe("duplicate references across notes", () => {
 		app.metadataCache.getFileCache = (() => null) as App["metadataCache"]["getFileCache"];
 		index.onMetadataResolved();
 		expect(index.getUnits().filter((u) => u.path === "Mod/Target.md")).toHaveLength(0);
+	});
+});
+
+describe("Folder-source-managed refs (R2): indexed as promoted-* units, so link-only", () => {
+	it("a Folder-source ref nothing links to is link-only, and the inbox drops it while the switch is off", () => {
+		const fx = buildFixture({ autoPromotion: false });
+		fx.app.vault.seedFile("Alpha/fromSource.md");
+		fx.index.setFolderSourceRefs([file("Alpha/fromSource.md")]);
+
+		const unit = unitAt(fx, "file:Alpha/fromSource.md");
+		expect(unit.type).toBe("promoted-file");
+		expect(fx.index.isLinkOnlyPromotion(unit)).toBe(true);
+		expect(fx.index.isSuppressedFromInbox(unit)).toBe(true);
+		expect(inboxKeys(fx, "view")).not.toContain("file:Alpha/fromSource.md");
+		expect(inboxKeys(fx, "global")).not.toContain("file:Alpha/fromSource.md");
+
+		fx.settings.autoPromotion = true;
+		expect(inboxKeys(fx, "view")).toContain("file:Alpha/fromSource.md");
+	});
+
+	it("a Folder-source ref the user also added or promoted by hand is not link-only", () => {
+		const fx = buildFixture({ autoPromotion: false });
+		fx.app.vault.seedFile("Alpha/fromSource.md");
+		fx.index.setFolderSourceRefs([file("Alpha/fromSource.md")]);
+		fx.index.markAdded(file("Alpha/fromSource.md"));
+		expect(fx.index.isSuppressedFromInbox(unitAt(fx, "file:Alpha/fromSource.md"))).toBe(false);
+		expect(inboxKeys(fx, "view")).toContain("file:Alpha/fromSource.md");
 	});
 });
