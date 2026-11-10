@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App, Menu } from "obsidian";
 import { ADD_UNDER_KINDS, AddUnderKind } from "../../src/add-under";
 import { AtlasExplorerView } from "../../src/explorer-view";
-import { ViewNode, createEmptyView } from "../../src/types";
+import { ApiItemState, ViewNode, createEmptyView } from "../../src/types";
 import { ViewsManager } from "../../src/views";
 
 const view = createEmptyView("v1", "Default");
@@ -163,7 +163,8 @@ describe("PR-2.F1 — \"Add under…\" menu item (G6/G7/E5/E8)", () => {
 	});
 
 	it("F1: an API/Table item row's menu (showApiItemMenu) never offers it", () => {
-		const fake = { plugin: { viewsManager: { removeApiItem: vi.fn(), clearApiItemNoteRef: vi.fn() } } };
+		const row: ApiItemState = { id: "1", label: "Row", kind: "placeholder", notFound: true, noteRef: { kind: "file", path: "N.md" } };
+		const fake = { plugin: { viewsManager: { removeApiItem: vi.fn(), clearApiItemNoteRef: vi.fn(), getNode: () => ({ ...metaNode({ id: "folder" }), apiItemState: { "1": row } }) } } };
 		let built: Menu | undefined;
 		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
 			built = this;
@@ -173,7 +174,7 @@ describe("PR-2.F1 — \"Add under…\" menu item (G6/G7/E5/E8)", () => {
 			new MouseEvent("contextmenu"),
 			view,
 			metaNode({ id: "folder" }),
-			{ id: "1", label: "Row", kind: "placeholder", notFound: true, noteRef: { kind: "file", path: "N.md" } }
+			row
 		);
 		show.mockRestore();
 		expect(built!.titles()).not.toContain("Add under…");

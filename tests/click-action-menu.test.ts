@@ -57,7 +57,13 @@ function build(method: string, args: unknown[], host = fakeHost()): { menu: Menu
 
 const unitMenu = (ref: UnitRef, node: ViewNode, outsideManaged = false) => build("showUnitMenu", [ref, view, node, "Name", [], outsideManaged]);
 const metaMenu = (node: ViewNode) => build("showMetaFolderMenu", [node, view]);
-const apiMenu = (owner: ViewNode, item: ApiItemState = row()) => build("showApiItemMenu", [view, owner, item]);
+const apiMenu = (owner: ViewNode, item: ApiItemState = row()) => {
+	// T1: the menu reads the live row from ViewsManager, so the host holds this owner with the item in it.
+	const host = fakeHost();
+	owner.apiItemState = { [item.id]: item };
+	host.plugin.viewsManager.getNode = () => owner;
+	return build("showApiItemMenu", [view, owner, item], host);
+};
 
 beforeEach(() => {
 	Menu.shownAtPosition = [];
@@ -256,6 +262,91 @@ describe("the real openClickActionModal: Save writes through ViewsManager, stora
 		save().click();
 		expect(views.getNode("v1", "apps")!.apiItemState!["1"].clickAction).toEqual({ kind: "uri", value: "obsidian://open?vault=Notes&file=Docker" });
 		expect(views.getNode("v1", "apps")!.clickAction).toBeUndefined();
+	});
+
+	describe("an API item's Item override: None and Use source setting (G10)", () => {
+		const apiRig = (item: ApiItemState = row()) => {
+			const r = rig([folderNode({ apiSource: API_SOURCE, apiItemState: { "1": item }, apiItemOrder: ["1"] })]);
+			const open = () => {
+				const owner = r.views.getNode("v1", "apps")!;
+				r.openModal(owner, owner.apiItemState!["1"]);
+			};
+			const stored = () => r.views.getNode("v1", "apps")!.apiItemState!["1"];
+			return { ...r, open, stored };
+		};
+
+		it("offers Use source setting, None, then the three kinds, and no Default (open the interface note)", () => {
+			apiRig().open();
+			expect(Array.from(select().options).map((o) => o.textContent)).toEqual(["Use source setting", "None", "Run terminal command (desktop only)", "Run Obsidian command", "Open Obsidian URI"]);
+			expect(select().value).toBe("unset"); // the Kind default is Use source setting
+			expect(document.querySelector(".modal-title, .modal-header")?.textContent ?? "").not.toContain("Default");
+		});
+
+		it("None is stored as an explicit value, distinct from absent, and reopens as None", () => {
+			const { open, stored, persisted } = apiRig();
+			open();
+			chooseKind("none");
+			save().click();
+			expect(stored().clickAction).toEqual({ kind: "none" });
+			expect("clickAction" in stored()).toBe(true);
+			expect(persisted).toHaveBeenCalledTimes(1);
+			open();
+			expect(select().value).toBe("none");
+		});
+
+		it("Use source setting clears the override: the key is absent, not None", () => {
+			const { open, stored } = apiRig(row({ clickAction: { kind: "none" } }));
+			open();
+			expect(select().value).toBe("none");
+			chooseKind("unset");
+			save().click();
+			expect("clickAction" in stored()).toBe(false);
+		});
+
+		it("switching from a stored command to Use source setting clears it", () => {
+			const { open, stored } = apiRig(row({ clickAction: { kind: "command", value: LIVE_ID } }));
+			open();
+			chooseKind("unset");
+			save().click();
+			expect("clickAction" in stored()).toBe(false);
+		});
+
+		it("keeps the PR-2 validation on this surface: whitespace and unbalanced-quote terminal values and a bad URI block Save", () => {
+			const { open, stored, persisted } = apiRig();
+			open();
+			chooseKind("terminal");
+			typeInto("   ");
+			expect(save().disabled).toBe(true);
+			typeInto('open -a "Docker');
+			expect(save().disabled).toBe(true);
+			chooseKind("uri");
+			typeInto("not a uri");
+			expect(save().disabled).toBe(true);
+			save().click();
+			expect(stored().clickAction).toBeUndefined();
+			expect(persisted).not.toHaveBeenCalled();
+		});
+
+		it("the command kind stores the id from the picker", () => {
+			const { open, stored } = apiRig();
+			open();
+			chooseKind("command");
+			const pickers: CommandPickerModal[] = [];
+			vi.spyOn(CommandPickerModal.prototype, "open").mockImplementation(function (this: CommandPickerModal) {
+				pickers.push(this);
+			});
+			document.querySelector<HTMLButtonElement>(".atlas-click-action-choose")!.click();
+			pickers[0].onChooseSuggestion(pickers[0].getSuggestions("live")[0] as never, new MouseEvent("click"));
+			save().click();
+			expect(stored().clickAction).toEqual({ kind: "command", value: LIVE_ID });
+		});
+
+		it("a module and a Folder are never offered None, and a stored None on one opens as the default", () => {
+			const { views, openModal } = rig([moduleNode({ clickAction: { kind: "none" } as never }), folderNode()]);
+			openModal(views.getNode("v1", "live")!);
+			expect(Array.from(select().options).map((o) => o.value)).not.toContain("none");
+			expect(select().value).toBe("unset");
+		});
 	});
 
 	it("Cancel stores nothing and the modal is dropped from the view's open set", () => {

@@ -34,7 +34,7 @@ function item(overrides: Partial<ApiItemState> = {}): ApiItemState {
 
 function buildMenu(it: ApiItemState, node: ViewNode = folderNode) {
 	const fake = {
-		plugin: { viewsManager: { removeApiItem: vi.fn(), clearApiItemNoteRef: vi.fn() } },
+		plugin: { viewsManager: { removeApiItem: vi.fn(), clearApiItemNoteRef: vi.fn(), getNode: () => ({ ...node, apiItemState: { [it.id]: it } }) } },
 	};
 	let built: Menu | undefined;
 	const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
@@ -50,6 +50,84 @@ function buildMenu(it: ApiItemState, node: ViewNode = folderNode) {
 	show.mockRestore();
 	return { menu: built!, fake };
 }
+
+// Atlas-18 G10/G11/F1: the Click action… entry, and Clear click action only while an Item override is set. Built
+// by the real `showApiItemMenu` against a real `ViewsManager`, so Clear is checked by what it leaves stored.
+describe("Atlas-18 G10 — API item menu: Click action… and Clear click action", () => {
+	const API_SOURCE = { url: "https://x", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false } as unknown as ViewNode["apiSource"];
+	const owner = (over: Partial<ViewNode> = {}): ViewNode => ({ id: "folder", type: "meta", label: "Folder", children: [], apiSource: API_SOURCE, ...over });
+
+	function buildLive(it: ApiItemState, node: ViewNode) {
+		const views = new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [{ ...node, apiItemState: { [it.id]: it }, apiItemOrder: [it.id] }] }], "v1", () => {});
+		const fake = { plugin: { viewsManager: views }, openClickActionModal: vi.fn() };
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		const live = views.getNode("v1", node.id)!;
+		(AtlasExplorerView.prototype as unknown as { showApiItemMenu: (...a: unknown[]) => void }).showApiItemMenu.call(fake, new MouseEvent("contextmenu"), view, live, live.apiItemState![it.id]);
+		show.mockRestore();
+		return { menu: built!, fake, views, live };
+	}
+
+	it("an API item row offers Click action… in the top section, with every existing entry unchanged", () => {
+		const { menu } = buildLive(item({ noteRef: { kind: "file", path: "N.md" }, notFound: true }), owner());
+		expect(menu.titles()).toEqual(["Click action…", "Open attachment", "Add note", "Add block", "Add module", "Remove attachment", "Remove"]);
+	});
+
+	it("Clear click action is absent while no override is set", () => {
+		expect(buildLive(item(), owner()).menu.titles()).not.toContain("Clear click action");
+	});
+
+	it.each([
+		["a terminal override", { kind: "terminal", value: "open -a Docker" }],
+		["a command override", { kind: "command", value: "app-runner:open-docker" }],
+		["a URI override", { kind: "uri", value: "obsidian://open?vault=Notes&file=Docker" }],
+		["an explicit None", { kind: "none" }],
+	] as const)("Clear click action appears right after Click action… with %s", (_label, clickAction) => {
+		const { menu } = buildLive(item({ clickAction }), owner());
+		expect(menu.titles().slice(0, 2)).toEqual(["Click action…", "Clear click action"]);
+	});
+
+	it("one click on Clear click action removes the override (the key goes absent), and the item's other state stays", () => {
+		const note: UnitRef = { kind: "file", path: "N.md" };
+		const { menu, views } = buildLive(item({ explicitStatusId: "doing", noteRef: note, clickAction: { kind: "uri", value: "obsidian://open?file=A" } }), owner());
+		menu.items.find((i) => i.title === "Clear click action")!.clickHandler!();
+		const stored = views.getNode("v1", "folder")!.apiItemState!["1"];
+		expect("clickAction" in stored).toBe(false);
+		expect(stored.explicitStatusId).toBe("doing");
+		expect(stored.noteRef).toEqual(note);
+	});
+
+	it("Clear click action also clears an explicit None", () => {
+		const { menu, views } = buildLive(item({ clickAction: { kind: "none" } }), owner());
+		menu.items.find((i) => i.title === "Clear click action")!.clickHandler!();
+		expect("clickAction" in views.getNode("v1", "folder")!.apiItemState!["1"]).toBe(false);
+	});
+
+	it("Click action… opens the modal for exactly this row", () => {
+		const { menu, fake, live } = buildLive(item(), owner());
+		menu.items.find((i) => i.title === "Click action…")!.clickHandler!();
+		expect(fake.openClickActionModal).toHaveBeenCalledWith(view, live, live.apiItemState!["1"]);
+	});
+
+	it("Open attachment stays in the menu whatever the override is", () => {
+		for (const clickAction of [undefined, { kind: "none" }, { kind: "uri", value: "obsidian://open?file=A" }] as const) {
+			const { menu } = buildLive(item({ noteRef: { kind: "file", path: "N.md" }, ...(clickAction ? { clickAction } : {}) }), owner());
+			expect(menu.titles()).toContain("Open attachment");
+		}
+	});
+
+	it.each([
+		["a Table row", { apiSource: undefined, markdownTableSource: { path: "a.md", tableIndex: 0 } }],
+		["a CSV row", { apiSource: undefined, csvSource: { path: "a.csv" } }],
+		["a row under a removed source", { apiSource: undefined }],
+	] as const)("F1: %s has neither Click action… nor Clear click action, even with an override stored", (_label, over) => {
+		const { menu } = buildLive(item({ clickAction: { kind: "uri", value: "obsidian://open?file=A" } }), owner(over as Partial<ViewNode>));
+		expect(menu.titles()).not.toContain("Click action…");
+		expect(menu.titles()).not.toContain("Clear click action");
+	});
+});
 
 describe("G26 — Remove menu item enablement", () => {
 	it("appears only when the row is notFound", () => {
@@ -280,12 +358,12 @@ describe("PR-2 G1-G4 — Swap menu items", () => {
 	});
 
 	it("the API-row menu has no Swap item", () => {
-		const fake = { plugin: { viewsManager: { removeApiItem: vi.fn(), clearApiItemNoteRef: vi.fn() } } };
+		const row: ApiItemState = { id: "1", label: "Row", kind: "placeholder", notFound: true, noteRef: { kind: "file", path: "N.md" } };
+		const fake = { plugin: { viewsManager: { removeApiItem: vi.fn(), clearApiItemNoteRef: vi.fn(), getNode: () => ({ ...metaNode({ id: "folder" }), apiItemState: { "1": row } }) } } };
 		let built: Menu | undefined;
 		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
 			built = this;
 		});
-		const row: ApiItemState = { id: "1", label: "Row", kind: "placeholder", notFound: true, noteRef: { kind: "file", path: "N.md" } };
 		(AtlasExplorerView.prototype as unknown as { showApiItemMenu: (...a: unknown[]) => void }).showApiItemMenu.call(
 			fake,
 			new MouseEvent("contextmenu"),

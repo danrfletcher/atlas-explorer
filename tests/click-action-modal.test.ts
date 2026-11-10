@@ -96,6 +96,28 @@ describe("kind options per node type (G1, G2, G10)", () => {
 		expect(clickActionChoices("api-item", false)[0].label).toBe("Use source setting");
 	});
 
+	it("an API item also offers None, then the three kinds; no other target does", () => {
+		expect(clickActionChoices("api-item", false).map((o) => o.label)).toEqual(["Use source setting", "None", "Run terminal command (desktop only)", "Run Obsidian command", "Open Obsidian URI"]);
+		expect(clickActionChoices("api-item", false).map((o) => o.value)).toContain("none");
+		for (const target of ["module", "folder"] as const) expect(clickActionChoices(target, false).map((o) => o.value)).not.toContain("none");
+	});
+
+	it("an API item's draft opens on a stored None, and its result is exactly { kind: 'none' }", () => {
+		const draft = new ClickActionDraft("api-item", { kind: "none" }, false);
+		expect(draft.choice).toBe("none");
+		expect(draft.error()).toBeNull();
+		expect(draft.result()).toEqual({ kind: "none" });
+		draft.setChoice("unset");
+		expect(draft.result()).toBeUndefined();
+	});
+
+	it("a module's draft reads a stored None as no action, and refuses to switch to it", () => {
+		const draft = new ClickActionDraft("module", { kind: "none" }, false);
+		expect(draft.choice).toBe("unset");
+		draft.setChoice("none");
+		expect(draft.choice).toBe("unset");
+	});
+
 	it("on mobile the terminal kind is not offered for a new setting", () => {
 		for (const target of ["module", "folder", "api-item"] as const) {
 			expect(clickActionChoices(target, true).map((o) => o.value)).not.toContain("terminal");

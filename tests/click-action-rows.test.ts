@@ -531,6 +531,7 @@ describe("G14/F1: rows that get no click action", () => {
 			rig.fake.pseudoNodeForApiItem = (i: unknown) => proto.pseudoNodeForApiItem.call(rig.fake, i) as never;
 			rig.fake.renderRowIcon = vi.fn() as never;
 			const owner = { id: "owner", type: "meta", children: [], ...source, apiItemState: { "1": item } } as unknown as ViewNode;
+			(rig.fake.plugin as unknown as { viewsManager: Record<string, unknown> }).viewsManager.getNode = () => owner;
 			const container = document.createElement("div");
 			document.body.appendChild(container);
 			(proto.renderApiItemRow as (...a: unknown[]) => void).call(rig.fake, item, container, view, owner, 1, []);

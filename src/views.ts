@@ -16,6 +16,7 @@ import { listOutsideChildren, resolveOutsidePath } from "./folder-source-outside
 import {
 	ApiClickAction,
 	ApiFieldMapping,
+	ApiItemClickAction,
 	ApiItemState,
 	ApiSourceConfig,
 	ClickAction,
@@ -87,8 +88,17 @@ export function sanitizeClickAction(raw: unknown): ClickAction | undefined {
 	return { kind, value };
 }
 
-function sameClickAction(a: ClickAction | undefined, b: ClickAction | undefined): boolean {
+/** Atlas-18 (G10/G17): the same defensive load for an API item's Item override, which additionally may be
+ * the explicit `{ kind: "none" }` (kept as exactly that, distinct from absent). Anything else follows
+ * `sanitizeClickAction`. Only API items use this: a module or Folder never keeps a "none". */
+export function sanitizeApiItemClickAction(raw: unknown): ApiItemClickAction | undefined {
+	if (raw && typeof raw === "object" && !Array.isArray(raw) && (raw as { kind?: unknown }).kind === "none") return { kind: "none" };
+	return sanitizeClickAction(raw);
+}
+
+function sameClickAction(a: ApiItemClickAction | undefined, b: ApiItemClickAction | undefined): boolean {
 	if (!a || !b) return !a && !b;
+	if (a.kind === "none" || b.kind === "none") return a.kind === b.kind;
 	return a.kind === b.kind && a.value === b.value;
 }
 
@@ -114,7 +124,7 @@ export function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | 
 		sanitized.lastSeenAt = item.lastSeenAt;
 	}
 	// Atlas-18 (G17): the Item override. Set only when well-formed, so an absent one stays absent.
-	const clickAction = sanitizeClickAction(item.clickAction);
+	const clickAction = sanitizeApiItemClickAction(item.clickAction);
 	if (clickAction) sanitized.clickAction = clickAction;
 	return sanitized;
 }
@@ -1919,13 +1929,13 @@ export class ViewsManager {
 
 	/** Atlas-18 (G10 storage half): sets or clears one API item's own Click action (the Item override). Same
 	 * rules as `setClickAction`: `undefined` deletes the key, an unsaveable action is refused, an unchanged
-	 * value is a no-op. Storage only: nothing runs. */
-	setApiItemClickAction(viewId: string, nodeId: string, itemId: string, action: ClickAction | undefined): boolean {
+	 * value is a no-op. `{ kind: "none" }` is stored as is, distinct from absent. Storage only: nothing runs. */
+	setApiItemClickAction(viewId: string, nodeId: string, itemId: string, action: ApiItemClickAction | undefined): boolean {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		const item = found?.node.apiItemState?.[itemId];
 		if (!item) return false;
-		const next = action === undefined ? undefined : sanitizeClickAction(action);
+		const next = action === undefined ? undefined : sanitizeApiItemClickAction(action);
 		if (action !== undefined && !next) return false;
 		if (sameClickAction(item.clickAction, next)) return true;
 		if (next) item.clickAction = next;

@@ -315,6 +315,14 @@ export interface ClickAction {
 	value: string;
 }
 
+/** Atlas-18 (G10): an Item override can also be an explicit "None": a click runs nothing and opens no
+ * attachment, suppressing the Click function and the source click action for that row. It is its own
+ * stored shape, never a `ClickAction`, so a module or Folder can never hold one. */
+export interface NoClickAction {
+	kind: "none";
+}
+export type ApiItemClickAction = ClickAction | NoClickAction;
+
 /** PR-5 (G9b): which action to perform when an API row is clicked. */
 export type ApiClickAction = "none" | "open-attachment" | "run-command";
 
@@ -538,8 +546,9 @@ export interface ApiItemState {
 	position?: number;
 	/** Atlas-18 (G10/G17): the Item override — a Click action set on this one API row. Lives on the
 	 * item, so duplicating the owning Folder never copies it. Inert (but kept) when the row has no live
-	 * API source above it (E16). */
-	clickAction?: ClickAction;
+	 * API source above it (E16). Absent = use the source setting; `{ kind: "none" }` is an explicit
+	 * "do nothing", stored and distinct from absent. */
+	clickAction?: ApiItemClickAction;
 }
 
 /** PR 17: extends `StatusGovernance` so the view root itself can be a governor — "Statuses" on the

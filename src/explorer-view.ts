@@ -10,6 +10,7 @@ import {
 	collectOutsideFolderSourceNodeIdPairs,
 	flattenMetaFolders,
 	nodeHasApiRows,
+	resolveClickAction,
 } from "./views";
 import { outsideChildMtime, resolveOutsidePath } from "./folder-source-outside";
 import { DropDecision, DropZone, resolveDropDecision, resolveDropZone } from "./drop-zones";
@@ -41,6 +42,7 @@ import { obsidianRequestImpl } from "./api-request-obsidian";
 import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 import { executeApiCommand } from "./api-command-runner";
+import { hasActiveItemOverride, runApiItemClick } from "./api-item-click";
 import { ClickActionRunner, clickActionForEnter, clickHitsRowControl, hasModifier, rowClickAction } from "./click-action-runner";
 import { resolveArgv, tokenizeCommand } from "./command-argv";
 import { RenderTriggerKind, observeRender, renderCauseOr, withRenderCause } from "./render-log";
@@ -904,6 +906,21 @@ function paneOutput(pane: HTMLElement): string {
 	const copy = pane.cloneNode(true) as HTMLElement;
 	copy.querySelectorAll("[data-atlas-tip]").forEach((el) => el.removeAttribute("aria-label"));
 	return copy.innerHTML;
+}
+
+/** T1: an API row's `ViewNode` and `ApiItemState` captured when the row was drawn can go stale: an API refresh
+ * replaces the `apiItemState` objects, while a render whose output matches the live pane keeps the old DOM
+ * and its listeners. Row menus and clicks therefore look the owning Folder and the item up again from
+ * `ViewsManager` each time they run. Null when either is gone (the row was removed), so nothing runs. */
+function liveApiRow(
+	viewsManager: { getNode(viewId: string, nodeId: string): ViewNode | null },
+	view: View,
+	folderNode: ViewNode,
+	item: ApiItemState
+): { folderNode: ViewNode; item: ApiItemState } | null {
+	const liveFolder = viewsManager.getNode(view.id, folderNode.id);
+	const liveItem = liveFolder?.apiItemState?.[item.id];
+	return liveFolder && liveItem ? { folderNode: liveFolder, item: liveItem } : null;
 }
 
 export class AtlasExplorerView extends ItemView {
@@ -1815,12 +1832,22 @@ export class AtlasExplorerView extends ItemView {
 	 * from this menu. Status itself is set via the dot click (R5), not this menu. Remove/Remove
 	 * attachment are additive — "Open attachment"/"Add note"/"Add block"/"Add module" keep their
 	 * existing conditions and ordering. */
-	private showApiItemMenu(evt: MouseEvent, view: View, folderNode: ViewNode, item: ApiItemState): void {
+	private showApiItemMenu(evt: MouseEvent, view: View, staleFolderNode: ViewNode, staleItem: ApiItemState): void {
+		// T1: read the row as it is now, not as it was when this row was drawn (see `liveApiRow`).
+		const live = liveApiRow(this.plugin.viewsManager, view, staleFolderNode, staleItem);
+		if (!live) return;
+		const { folderNode, item } = live;
 		const menu = new Menu();
 		const isPlaceholder = item.kind === PLACEHOLDER_ROW_KIND;
 		// Atlas-18 (G15): API item rows only (a row of an API source), never a Table or CSV row.
 		if (folderNode.apiSource) {
 			menu.addItem((mi) => mi.setTitle("Click action…").setIcon("mouse-pointer-click").onClick(() => this.openClickActionModal(view, folderNode, item)));
+			// G10: only while an Item override is set (an explicit None counts); one click removes it.
+			if (item.clickAction !== undefined) {
+				menu.addItem((mi) =>
+					mi.setTitle("Clear click action").setIcon("x").onClick(() => this.plugin.viewsManager.setApiItemClickAction(view.id, folderNode.id, item.id, undefined))
+				);
+			}
 			menu.addSeparator();
 		}
 		if (item.noteRef) {
@@ -1847,43 +1874,62 @@ export class AtlasExplorerView extends ItemView {
 		menu.showAtMouseEvent(evt);
 	}
 
-	/** G9/G9b: handles click on an API item row according to the folder's configured click action. */
-	private async handleApiItemClick(folderNode: ViewNode, item: ApiItemState): Promise<void> {
-		const action = folderNode.apiSource?.action ?? folderNode.apiSource?.clickAction ?? "open-attachment";
-		if (action === "none") return;
-		if (action === "open-attachment") {
-			if (item.noteRef) await this.openApiItemAttachment(item);
+	/** G9/G9b, Atlas-18 (G11): what a click or Enter on an API item row does. Runs the precedence chain in
+	 * `runApiItemClick`: Item override, then the Click function (a seam PR-5 fills; none yet), then the
+	 * source click action, then open attachment (only ever the source's own Open attachment step). The
+	 * first layer that decides stops the chain. */
+	private async handleApiItemClick(view: View, staleFolderNode: ViewNode, staleItem: ApiItemState): Promise<void> {
+		// T1: decide from the row as it is now (see `liveApiRow`), never from the draw-time objects.
+		const live = liveApiRow(this.plugin.viewsManager, view, staleFolderNode, staleItem);
+		if (!live) return;
+		const { folderNode, item } = live;
+		await runApiItemClick(
+			{
+				item,
+				// E16: an override runs only under a live API source, never on a Table/CSV row or a removed source.
+				overrideApplies: !!folderNode.apiSource,
+				sourceAction: resolveClickAction(folderNode.apiSource),
+			},
+			{
+				// E9: debounced per row by the shared runner. The key joins the owning node and the item id, so
+				// two sources that happen to share an item id never debounce each other.
+				runOverride: (action) => this.runClickAction({ id: `${folderNode.id}:${item.id}` }, action),
+				runSourceCommand: () => this.runApiSourceCommand(folderNode, item),
+				openAttachment: () => this.openApiItemAttachment(item),
+			}
+		);
+	}
+
+	/** G9b: the source's own "Run terminal command" click action (unchanged by Atlas-18): `{field}` placeholders
+	 * resolve from the cached row. */
+	private async runApiSourceCommand(folderNode: ViewNode, item: ApiItemState): Promise<void> {
+		// G13: Click-action commands are not available on mobile
+		if (Platform.isMobile) return;
+		const command = folderNode.apiSource?.command;
+		if (!command || !command.trim()) return;
+
+		const tokenResult = tokenizeCommand(command);
+		if (!tokenResult.ok) {
+			new Notice(`Atlas: command error — ${tokenResult.error}`);
 			return;
 		}
-		if (action === "run-command") {
-			// G13: Click-action commands are not available on mobile
-			if (Platform.isMobile) return;
-			const command = folderNode.apiSource?.command;
-			if (!command || !command.trim()) return;
 
-			const tokenResult = tokenizeCommand(command);
-			if (!tokenResult.ok) {
-				new Notice(`Atlas: command error — ${tokenResult.error}`);
-				return;
-			}
+		// Read extra fields from the cached mapped row
+		const cachedRow = folderNode.apiCache?.rows.find((r) => r.id === item.id);
+		const extra = cachedRow?.extra;
 
-			// Read extra fields from the cached mapped row
-			const cachedRow = folderNode.apiCache?.rows.find((r) => r.id === item.id);
-			const extra = cachedRow?.extra;
-
-			const resolved = resolveArgv(tokenResult.tokens, extra);
-			if (!resolved.ok) {
-				new Notice(`Atlas: ${resolved.error}`);
-				return;
-			}
-
-			await executeApiCommand(resolved.argv);
+		const resolved = resolveArgv(tokenResult.tokens, extra);
+		if (!resolved.ok) {
+			new Notice(`Atlas: ${resolved.error}`);
+			return;
 		}
+
+		await executeApiCommand(resolved.argv);
 	}
 
 	/** Atlas-18 (G3): runs a Bucket row's Click action. Fire-and-forget: the runner never rejects, shows its
-	 * own failure notices and changes no state. */
-	private runClickAction(node: ViewNode, action: ClickAction): void {
+	 * own failure notices and changes no state. `node.id` is the debounce key (E9); an API item passes its own key. */
+	private runClickAction(node: Pick<ViewNode, "id">, action: ClickAction): void {
 		this.clickActionRunner ??= new ClickActionRunner({ app: this.plugin.app as unknown as ConstructorParameters<typeof ClickActionRunner>[0]["app"] });
 		void this.clickActionRunner.run(node.id, action);
 	}
@@ -1928,8 +1974,23 @@ export class AtlasExplorerView extends ItemView {
 		// G9/G9b: click opens attachment or runs terminal command per source clickAction config
 		// Middle-click on an API item row does nothing, but must not start browser autoscroll.
 		row.addEventListener("mousedown", suppressMiddleButtonAutoscroll);
-		row.addEventListener("click", () => {
-			void this.handleApiItemClick(folderNode, item);
+		row.addEventListener("click", (evt) => {
+			// T1: the override is read from the live row; the draw-time `item` may be a replaced object.
+			const live = liveApiRow(this.plugin.viewsManager, view, folderNode, item);
+			if (!live) return;
+			// F5: once a row has an Item override, a modifier-click or a click on one of its controls never
+			// runs anything. With no override the click behaves exactly as before (F8).
+			const plain = !hasModifier(evt) && !evt.defaultPrevented && !clickHitsRowControl(evt, row, false);
+			if (!plain && hasActiveItemOverride(live.item, !!live.folderNode.apiSource)) return;
+			void this.handleApiItemClick(view, folderNode, item);
+		});
+		// Atlas-18 (G16): a Bucket row like any other for the keyboard. Enter with no modifier runs the same chain
+		// as a click; a held key does not repeat the run, and Space, Delete and F2 keep doing nothing here.
+		row.tabIndex = 0;
+		row.addEventListener("keydown", (evt) => {
+			if (evt.key !== "Enter" || hasModifier(evt)) return;
+			evt.preventDefault();
+			if (!evt.repeat) void this.handleApiItemClick(view, folderNode, item);
 		});
 
 		// G9/R7: "Add note / block / module" — status is set via the dot click instead (R5).
@@ -4950,7 +5011,7 @@ export class AtlasExplorerView extends ItemView {
 		const stored = item ? viewsManager.getNode(view.id, node.id)?.apiItemState?.[item.id]?.clickAction : viewsManager.getNode(view.id, node.id)?.clickAction;
 		const modal = new ClickActionModal(this.plugin.app, target, stored, (action) => {
 			if (item) viewsManager.setApiItemClickAction(view.id, node.id, item.id, action);
-			else viewsManager.setClickAction(view.id, node.id, action);
+			else if (action?.kind !== "none") viewsManager.setClickAction(view.id, node.id, action); // "none" only exists for API items
 		});
 		this.openClickActionModals.add(modal);
 		modal.onClosed = () => this.openClickActionModals.delete(modal);

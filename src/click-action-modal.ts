@@ -1,14 +1,15 @@
 import { App, FuzzySuggestModal, Modal, Platform } from "obsidian";
 import { validateClickActionValue } from "./click-action-validation";
-import { ClickAction, ClickActionKind } from "./types";
-import { sanitizeClickAction } from "./views";
+import { ApiItemClickAction, ClickActionKind } from "./types";
+import { sanitizeApiItemClickAction, sanitizeClickAction } from "./views";
 
 /** Atlas-18 (G1/G2/G10): which kind of Bucket row a Click action is being set on. It decides what the
  * "no action" choice is called, because that choice always stores nothing (the key is absent). */
 export type ClickActionTarget = "module" | "folder" | "api-item";
 
-/** The dropdown's choices: the three kinds, plus `unset`, which stores nothing. */
-export type ClickActionChoice = "unset" | ClickActionKind;
+/** The dropdown's choices: the three kinds, plus `unset`, which stores nothing, plus (API items only)
+ * `none`, which stores an explicit "do nothing" that is distinct from nothing stored. */
+export type ClickActionChoice = "unset" | "none" | ClickActionKind;
 
 export interface ClickActionChoiceOption {
 	value: ClickActionChoice;
@@ -27,6 +28,9 @@ const UNSET_HELP: Record<ClickActionTarget, string> = {
 	"api-item": "This row follows its data source's click setting.",
 };
 
+const NONE_LABEL = "None";
+const NONE_HELP = "Clicking this row does nothing: no Click function or source click action runs for it, and no attached note opens.";
+
 const KIND_LABELS: Record<ClickActionKind, string> = {
 	terminal: "Run terminal command (desktop only)",
 	command: "Run Obsidian command",
@@ -38,8 +42,9 @@ const KIND_ORDER: ClickActionKind[] = ["terminal", "command", "uri"];
 /** The Kind dropdown's options, in order. On mobile the terminal kind is not offered for a new setting,
  * but a terminal action that is already stored (synced from desktop) keeps its option so the modal can
  * show it; it can then be changed to another kind or cleared. */
-export function clickActionChoices(target: ClickActionTarget, isMobile: boolean, stored?: ClickAction): ClickActionChoiceOption[] {
+export function clickActionChoices(target: ClickActionTarget, isMobile: boolean, stored?: ApiItemClickAction): ClickActionChoiceOption[] {
 	const options: ClickActionChoiceOption[] = [{ value: "unset", label: UNSET_LABELS[target] }];
+	if (target === "api-item") options.push({ value: "none", label: NONE_LABEL });
 	for (const kind of KIND_ORDER) {
 		if (kind === "terminal" && isMobile && stored?.kind !== "terminal") continue;
 		options.push({ value: kind, label: KIND_LABELS[kind] });
@@ -53,14 +58,15 @@ export class ClickActionDraft {
 	private active: ClickActionChoice;
 	private readonly drafts: Record<ClickActionKind, string> = { terminal: "", command: "", uri: "" };
 	/** The action this modal opened with; kept for the mobile read-only case. */
-	readonly stored: ClickAction | undefined;
+	readonly stored: ApiItemClickAction | undefined;
 
 	/** `stored` is whatever the node holds in memory. A malformed one (an unknown kind, a non-string value,
-	 * not an object at all) reads as no action rather than throwing, so the modal opens on the default. */
+	 * not an object at all) reads as no action rather than throwing, so the modal opens on the default.
+	 * Only an API item can hold an explicit "none"; on a module or Folder it too reads as no action. */
 	constructor(readonly target: ClickActionTarget, stored: unknown, readonly isMobile: boolean) {
-		this.stored = sanitizeClickAction(stored);
+		this.stored = target === "api-item" ? sanitizeApiItemClickAction(stored) : sanitizeClickAction(stored);
 		this.active = this.stored ? this.stored.kind : "unset";
-		if (this.stored) this.drafts[this.stored.kind] = this.stored.value;
+		if (this.stored && this.stored.kind !== "none") this.drafts[this.stored.kind] = this.stored.value;
 	}
 
 	get choice(): ClickActionChoice {
@@ -78,9 +84,9 @@ export class ClickActionDraft {
 		this.active = choice;
 	}
 
-	/** The active kind's draft value (empty when there is no active kind). */
+	/** The active kind's draft value (empty when there is no active kind, or the choice has no value). */
 	get value(): string {
-		return this.active === "unset" ? "" : this.drafts[this.active];
+		return this.active === "unset" || this.active === "none" ? "" : this.drafts[this.active];
 	}
 
 	/** On mobile a terminal action is shown but not editable: it only can be changed to another kind or cleared. */
@@ -90,21 +96,23 @@ export class ClickActionDraft {
 
 	/** Sets the active kind's draft. Ignored while there is no active kind or the value is read-only. */
 	setValue(value: string): void {
-		if (this.active === "unset" || this.readOnly) return;
+		if (this.active === "unset" || this.active === "none" || this.readOnly) return;
 		this.drafts[this.active] = value;
 	}
 
 	/** `null` when the draft can be saved, otherwise the inline error. "No action" always can. */
 	error(): string | null {
-		if (this.active === "unset") return null;
+		if (this.active === "unset" || this.active === "none") return null;
 		const result = validateClickActionValue(this.active, this.drafts[this.active]);
 		return result.ok ? null : result.error;
 	}
 
-	/** What Save stores: `undefined` (absent) for the no-action choice, otherwise the active kind and its
-	 * value exactly as typed. Other kinds' drafts are never part of it. */
-	result(): ClickAction | undefined {
+	/** What Save stores: `undefined` (absent) for the no-action choice, `{ kind: "none" }` for an API item's
+	 * explicit None, otherwise the active kind and its value exactly as typed. Other kinds' drafts are
+	 * never part of it. */
+	result(): ApiItemClickAction | undefined {
 		if (this.active === "unset") return undefined;
+		if (this.active === "none") return { kind: "none" };
 		return { kind: this.active, value: this.drafts[this.active] };
 	}
 }
@@ -175,7 +183,7 @@ export class ClickActionModal extends Modal {
 		app: App,
 		target: ClickActionTarget,
 		stored: unknown,
-		private onSave: (action: ClickAction | undefined) => void,
+		private onSave: (action: ApiItemClickAction | undefined) => void,
 		isMobile: boolean = Platform.isMobile
 	) {
 		super(app);
@@ -223,8 +231,8 @@ export class ClickActionModal extends Modal {
 		this.textEl = null;
 		const { choice } = this.draft;
 
-		if (choice === "unset") {
-			this.valueEl.createDiv({ cls: "atlas-click-action-help", text: UNSET_HELP[this.draft.target] });
+		if (choice === "unset" || choice === "none") {
+			this.valueEl.createDiv({ cls: "atlas-click-action-help", text: choice === "none" ? NONE_HELP : UNSET_HELP[this.draft.target] });
 		} else if (choice === "command") {
 			this.renderCommandValue();
 		} else {
