@@ -81,9 +81,9 @@ An empty box means no function. Details the helper text leaves out:
 - `{ kind: "none" }` stops everything: nothing runs and no attachment opens. Returning nothing falls through to the source click action.
 - An invalid shape (an unknown `kind`, a missing or non-string `id` or `uri`, an `argv` that is not a non-empty array of strings), a Promise return or a throw shows a notice with the reason and runs nothing, and the source click action does not run either.
 - A row whose cache was cleared, or a *not found* row, gets `extra = {}`. Its `id`, `label` and `secondary` come from the stored row, and `secondary` is `undefined` when the row has none. Guard `item.extra` before reading from it.
-- A second click on the same row within 1 second is ignored, as for any [click action](using-the-explorer.md#click-actions).
-- A click with a modifier key, or on the row's status dot, does not call the function; it does whatever the source click action does (or nothing, if the row has an Item override).
-- Save compiles the code but never runs it. A syntax error, or code that is not a function, blocks Save with an inline error.
+- A second click on the same row within 1 second is ignored, as for any [click action](using-the-explorer.md#click-actions). This is decided before the function is called, so it applies even when the first click's function returned nothing: that second click does not fall through to the source click action either.
+- A click with a modifier key, or on the row's status dot, does not call the function; it does whatever the source click action does (or nothing, if the row has an Item override). So with the source click action set to **Run terminal command in background**, a plain click runs whatever the function chose, while a shift-click runs the source's static command.
+- Save compiles the code but never runs it: the function itself is never called. While you type, the box is only syntax-checked, and a syntax error blocks Save with an inline error. Save evaluates the box once to check that it is a function, so code outside the function (an immediately-invoked function, say) runs at that one moment and never as you type; code that is not a function is refused with an inline error.
 
 **The Click function is unsandboxed and has no timeout.** It runs with Atlas's full trust, like the JavaScript mapping above, and an infinite loop in it freezes Obsidian. Only paste code you wrote or have read.
 

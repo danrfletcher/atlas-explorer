@@ -127,7 +127,7 @@ describe("click-action-fence: the Click function (F3, F4, F6, F8, no shell)", ()
 
 	it("F8: with no function the layer is never built, so a source without one takes the pre-existing path", () => {
 		const view = read("explorer-view.ts");
-		expect(view).toMatch(/if \(!source\) return undefined;/);
-		expect(view).toMatch(/allowFunction && folderNode\.apiSource\?\.clickFunction/);
+		expect(view).toMatch(/if \(!source\?\.trim\(\)\) return undefined;/);
+		expect(view).toMatch(/allowFunction && folderNode\.apiSource\?\.clickFunction\?\.trim\(\)/);
 	});
 });

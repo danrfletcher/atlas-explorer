@@ -27,7 +27,7 @@ The panel is a fixed **toolbar** above **one scroll area** holding the **Bucket*
 
 ## Rows
 
-- **Click** a row to open its note. A module opens its interface note; a module's **icon**, or pressing and holding the row, opens [Module contents](#module-contents). A Folder has no note, so a click does nothing and never folds it: its chevron and **Space** do that. Any module, Folder or [API item](data-sources.md#api) can instead run something when clicked: see [Click actions](#click-actions).
+- **Click** a row to open its note. A module opens its interface note; a module's **icon**, or pressing and holding the row, opens [Module contents](#module-contents). A Folder has no note, so a click does nothing and never folds it: its chevron and **Space** do that. Any module, Folder or [API item](data-sources.md#api) can instead run something when clicked (except a module that an Outside-Vault Folder source manages, which has no **Click action…**): see [Click actions](#click-actions).
 - **Middle-click** a bucket or inbox row's label to open it in a new, focused tab, the same as **Open in new tab**. It never changes the selection, does nothing on rows with no note to open (Folders, missing rows, data-source item rows, a module with no interface note), and is ignored when a modifier key is held.
 - The row for the note currently open in the editor carries a distinct highlight (the file row, its module's row if it's the interface note, and any of its blocks). It never scrolls or expands anything. Turn it off with **Highlight the open note** in [Settings](settings.md).
 - A parent row (any unit or Folder with something nested under it) has a chevron and folds and unfolds, with Space when focused.
@@ -103,18 +103,19 @@ To clear one, pick **Default (open the interface note)** (module) or **None** (F
 
 - **Run terminal command (desktop only)**: a command line, such as `open -a Docker`. It runs directly, without a shell, so pipes, redirects, `&&`, globbing, `~` and environment variables do not work, and a shell form such as `sh -c` is not supported. `{field}` placeholders work only in an API source's own static command (see [Data sources](data-sources.md#api)); in a module, Folder or item action a placeholder gives a notice when you click. Save is blocked on an empty value or unbalanced quotes.
 - **Run Obsidian command**: chosen from a picker of the commands registered right now, by display name. Atlas stores the command's id. If that id is not registered when you click (a plugin is off, or the setting synced to a device without it), a notice says `Atlas: command not found: <id>` and the setting is kept.
-- **Open Obsidian URI**: any URI that `new URL()` accepts and that carries a scheme (`obsidian://…`, `https://…`, `mailto:…`). It runs exactly as typed: Atlas adds nothing and rewrites nothing, not even a vault name. If it cannot be opened, a notice says `Atlas: couldn't open URI`.
+- **Open Obsidian URI**: any URI that `new URL()` accepts and that carries a scheme (`obsidian://…`, `https://…`, `mailto:…`). It runs exactly as typed: Atlas adds nothing and rewrites nothing, not even a vault name. If the open call throws, a notice says `Atlas: couldn't open URI`. Obsidian does not report whether the target app actually opened, so a URI that nothing handles fails silently.
 
 ### When it runs
 
-A plain click on the row, or **Enter** on the focused row, runs the action. Nothing else does: not cmd/ctrl-click, shift-click, drag or middle-click, and not a click on a module's icon, a status dot or the chevron. A modifier-click keeps its usual selection meaning.
+A plain click on the row, or **Enter** on the focused row, runs the action. Nothing else does: not cmd/ctrl-click, shift-click, drag or middle-click, and not a click on a module's icon, a status dot or the chevron. A modifier-click keeps its usual selection meaning. On a module with an action, an **alt-click** or **Enter** with a modifier held opens the interface note, as it did before the module had an action; it never runs the action.
 
 A long press on a module does not run it either (it opens Module contents). Only a module has that guard: a long press on a Folder or an API item counts as a click and runs the action.
 
 Only a module's icon is a control of its own (it opens Module contents). A Folder's icon and an API item's icon have no job of their own, so a click on either runs the action.
 
 - A failure shows a notice and changes nothing. Success is silent.
-- A second run of the same row within 1 second of the first is ignored, with no feedback.
+- A second run of the same row within 1 second of the first is ignored, with no feedback. This holds across every Atlas panel you have open.
+- On an API item, the same 1 second window also covers the source's own **Run terminal command in background** setting, so a click followed by **Enter** runs it once. It applies before the source's Click function is called, even if that function then returns nothing: a second click inside the second does not reach the source click action. **Open attachment** is not debounced.
 - A **Folder** click runs the action only and does not fold. The chevron and **Space** still fold, and **Enter** on a Folder runs its action.
 - A module with an action runs it instead of opening its note; the module's icon and a long press still open Module contents. A module with no action keeps opening its interface note on click and **Enter**. Either way the note stays reachable through right-click **Open** and middle-click.
 - An API item runs the first thing that applies: its own override, then the source's Click function, then the source's click setting. See [Data sources](data-sources.md#click-function).

@@ -44,7 +44,7 @@ import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 import { executeApiCommand } from "./api-command-runner";
 import { buildClickFunctionItem } from "./api-click-function";
 import { createClickFunctionLayer, hasActiveItemOverride, runApiItemClick } from "./api-item-click";
-import { ClickActionRunner, clickActionForEnter, clickHitsRowControl, hasModifier, rowClickAction } from "./click-action-runner";
+import { ClickActionRunner, ClickActionRunnerOptions, clickActionForEnter, clickHitsRowControl, hasModifier, rowClickAction, sharedClickActionRunner } from "./click-action-runner";
 import { resolveArgv, tokenizeCommand } from "./command-argv";
 import { RenderTriggerKind, observeRender, renderCauseOr, withRenderCause } from "./render-log";
 import {
@@ -967,7 +967,7 @@ function liveApiRow(
  * of an Item override (E9) and is claimed before the function is called. */
 function clickFunctionLayerFor(folderNode: ViewNode, runner: ClickActionRunner) {
 	const source = folderNode.apiSource?.clickFunction;
-	if (!source) return undefined;
+	if (!source?.trim()) return undefined;
 	return createClickFunctionLayer({
 		source,
 		buildItem: (row) => buildClickFunctionItem(row, folderNode.apiCache?.rows.find((r) => r.id === row.id)?.extra),
@@ -976,6 +976,19 @@ function clickFunctionLayerFor(folderNode: ViewNode, runner: ClickActionRunner) 
 		notify: (message) => new Notice(message),
 	});
 }
+
+/** PR-1 R3 (PR-3): the view's Click action runner, fetched lazily. It is the one runner shared by every Atlas
+ * leaf of this app (`sharedClickActionRunner`), so the 1 s debounce window (E9) holds when the same row is
+ * clicked in two open Atlas leaves. Kept on the view once fetched, so a test can hand in its own. */
+function clickRunnerFor(view: { clickActionRunner: ClickActionRunner | null }, app: unknown): ClickActionRunner {
+	view.clickActionRunner ??= sharedClickActionRunner(app as ClickActionRunnerOptions["app"]);
+	return view.clickActionRunner;
+}
+
+/** PR-1 R2 (PR-4): keyboard-focus keys for API item rows, which have no `data-select-key` (they are not
+ * selectable nodes, and a select key would put them into `bucketVisibleOrder`'s shift-click ranges). Kept off
+ * the markup (a property, not an attribute) so the row's pinned markup is unchanged. */
+const apiRowFocusKeys = new WeakMap<HTMLElement, string>();
 
 export class AtlasExplorerView extends ItemView {
 	private filterText = "";
@@ -1185,8 +1198,9 @@ export class AtlasExplorerView extends ItemView {
 	private openAddUnderPrompts = new Set<{ close(): void }>();
 	/** Atlas-18: the Click action… modals currently open (closed with the view, like every other modal). */
 	private openClickActionModals = new Set<ClickActionModal>();
-	/** Atlas-18 (E9): runs Click actions and holds the per-node 1 s debounce, so it lives as long as the view. */
-	private clickActionRunner: ClickActionRunner | null = null;
+	/** Atlas-18 (E9): runs Click actions and holds the per-node 1 s debounce. Filled lazily by `clickRunnerFor`
+	 * (module level, hence not `private`) with the runner every Atlas leaf of this app shares (PR-1 R3). */
+	clickActionRunner: ClickActionRunner | null = null;
 	private renderQueued = false;
 	/** Render log: the kind of the first trigger that queued the pending `queueRender()` timeout. Later
 	 * requests in the same tick coalesce into it and don't overwrite it. */
@@ -1938,9 +1952,8 @@ export class AtlasExplorerView extends ItemView {
 		if (!live) return;
 		const { folderNode, item } = live;
 		let functionLayer: ReturnType<typeof clickFunctionLayerFor>;
-		if (allowFunction && folderNode.apiSource?.clickFunction) {
-			this.clickActionRunner ??= new ClickActionRunner({ app: this.plugin.app as unknown as ConstructorParameters<typeof ClickActionRunner>[0]["app"] });
-			functionLayer = clickFunctionLayerFor(folderNode, this.clickActionRunner);
+		if (allowFunction && folderNode.apiSource?.clickFunction?.trim()) {
+			functionLayer = clickFunctionLayerFor(folderNode, clickRunnerFor(this, this.plugin.app));
 		}
 		await runApiItemClick(
 			{
@@ -1956,7 +1969,14 @@ export class AtlasExplorerView extends ItemView {
 				// E9: debounced per row by the shared runner. The key joins the owning node and the item id, so
 				// two sources that happen to share an item id never debounce each other.
 				runOverride: (action) => this.runClickAction({ id: `${folderNode.id}:${item.id}` }, action),
-				runSourceCommand: () => this.runApiSourceCommand(folderNode, item),
+				// PR-1 R1 (PR-4): the source's terminal command is debounced on the same per-row key, so a click
+				// followed by Enter inside 1 s runs it once. When the Click function layer is present it has
+				// already claimed the key for this very click (a fall-through reaches here), so claiming again
+				// would wrongly swallow the run. Open attachment is idempotent and stays undebounced.
+				runSourceCommand: () => {
+					if (!functionLayer && !clickRunnerFor(this, this.plugin.app).tryStart(`${folderNode.id}:${item.id}`)) return;
+					return this.runApiSourceCommand(folderNode, item);
+				},
 				openAttachment: () => this.openApiItemAttachment(item),
 			}
 		);
@@ -1992,8 +2012,7 @@ export class AtlasExplorerView extends ItemView {
 	/** Atlas-18 (G3): runs a Bucket row's Click action. Fire-and-forget: the runner never rejects, shows its
 	 * own failure notices and changes no state. `node.id` is the debounce key (E9); an API item passes its own key. */
 	private runClickAction(node: Pick<ViewNode, "id">, action: ClickAction): void {
-		this.clickActionRunner ??= new ClickActionRunner({ app: this.plugin.app as unknown as ConstructorParameters<typeof ClickActionRunner>[0]["app"] });
-		void this.clickActionRunner.run(node.id, action);
+		void clickRunnerFor(this, this.plugin.app).run(node.id, action);
 	}
 
 	/** G8: a throwaway pseudo-`ViewNode` so an API item can go through the same status-resolution
@@ -2051,6 +2070,8 @@ export class AtlasExplorerView extends ItemView {
 		// Atlas-18 (G16): a Bucket row like any other for the keyboard. Enter with no modifier runs the same chain
 		// as a click; a held key does not repeat the run, and Space, Delete and F2 keep doing nothing here.
 		row.tabIndex = 0;
+		// PR-1 R2 (PR-4): lets a render keep keyboard focus on this row (see `apiRowFocusKeys`).
+		apiRowFocusKeys.set(row, `${folderNode.id}:${item.id}`);
 		row.addEventListener("keydown", (evt) => {
 			if (evt.key !== "Enter" || hasModifier(evt)) return;
 			evt.preventDefault();
@@ -2485,7 +2506,9 @@ export class AtlasExplorerView extends ItemView {
 			// fires straight at whichever element you queried, focus state or not, so this was invisible
 			// to every synthetic test this PR ran. Same fix shape as the filter input's own focus restore
 			// just above/below: capture before the swap, restore after.
+			// An API item row has no selection key; `apiRowFocusKeys` carries one for this restore alone.
 			const activeRowKey = activeEl instanceof HTMLElement && activeEl.dataset.selectKey ? activeEl.dataset.selectKey : null;
+			const activeApiRowKey = activeEl instanceof HTMLElement ? (apiRowFocusKeys.get(activeEl) ?? null) : null;
 
 			if (this.inboxDragRowEl || this.bucketDragRowEl) {
 				// PR-1.S1 R4 hardening (PR-1 R3: now covers a bucket-node drag too, via `bucketDragRowEl`):
@@ -2535,8 +2558,10 @@ export class AtlasExplorerView extends ItemView {
 				this.filterInputEl.focus();
 				this.filterInputEl.setSelectionRange(filterSelectionStart, filterSelectionEnd);
 			}
-			if (activeRowKey) {
-				const restored = live.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
+			if (activeRowKey || activeApiRowKey) {
+				const restored = activeRowKey
+					? live.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`)
+					: (Array.from(live.querySelectorAll<HTMLElement>(".atlas-row-api-item")).find((el) => apiRowFocusKeys.get(el) === activeApiRowKey) ?? null);
 				// `preventScroll` — this row's own visible position (and the scroll position that shows
 				// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
 				// would otherwise fight that by scrolling to whatever the browser's own default
@@ -3717,12 +3742,17 @@ export class AtlasExplorerView extends ItemView {
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder());
 			// Atlas-18 (G3/E18/F5): a module with a Click action runs it in place of opening its note, but
-			// only for a clean click on the row body: a modifier-click keeps its selection meaning, and a
-			// control (chevron, status dot, the module icon, ...) keeps its own job. Whatever the click was,
-			// the note does not open (the action replaced that plain-click behaviour); right-click Open does.
+			// only for a clean click on the row body: a modifier-click keeps its selection meaning (or, for
+			// alt-click, opens the note: PR-1 R1), and a control (chevron, status dot, the module icon, ...)
+			// keeps its own job and never opens the note.
 			const action = rowClickAction(node, () => outsideManaged);
 			if (action) {
-				if (!consumed && !evt.defaultPrevented && !hasModifier(evt) && !clickHitsRowControl(evt, row, true)) this.runClickAction(node, action);
+				if (consumed || evt.defaultPrevented || clickHitsRowControl(evt, row, true)) return;
+				// PR-1 R1 (PR-3): an alt-click (selection does not take it) never runs the action, and keeps
+				// what it did before the action existed: it opens the note. Any other modifier-click is a
+				// selection gesture and does nothing more.
+				if (evt.altKey && !evt.shiftKey && !evt.metaKey && !evt.ctrlKey) void this.openRef(ref);
+				else if (!hasModifier(evt)) this.runClickAction(node, action);
 				return;
 			}
 			// R9(c): `ref.path` here is a bare name relative to the Outside source's root, never a vault
@@ -5084,12 +5114,18 @@ export class AtlasExplorerView extends ItemView {
 		const target: ClickActionTarget = item ? "api-item" : node.type === "meta" ? "folder" : "module";
 		// Read live at open time, not at menu-build time: the row may have changed since the menu was drawn.
 		const stored = item ? viewsManager.getNode(view.id, node.id)?.apiItemState?.[item.id]?.clickAction : viewsManager.getNode(view.id, node.id)?.clickAction;
-		const modal = new ClickActionModal(this.plugin.app, target, stored, (action) => {
-			if (item) viewsManager.setApiItemClickAction(view.id, node.id, item.id, action);
-			else if (action?.kind !== "none") viewsManager.setClickAction(view.id, node.id, action); // "none" only exists for API items
-		});
+		const modal: ClickActionModal = new ClickActionModal(
+			this.plugin.app,
+			target,
+			stored,
+			(action) => {
+				if (item) viewsManager.setApiItemClickAction(view.id, node.id, item.id, action);
+				else if (action?.kind !== "none") viewsManager.setClickAction(view.id, node.id, action); // "none" only exists for API items
+			},
+			Platform.isMobile,
+			() => this.openClickActionModals.delete(modal)
+		);
 		this.openClickActionModals.add(modal);
-		modal.onClosed = () => this.openClickActionModals.delete(modal);
 		modal.open();
 	}
 
@@ -5603,12 +5639,19 @@ export class AtlasExplorerView extends ItemView {
 
 	private handleRowKeydown(evt: KeyboardEvent, node: ViewNode, view: View): void {
 		// Atlas-18 (G3/E13): Enter with no modifier runs a module's or Folder's Click action (a Folder had no
-		// Enter behaviour before). With an action, Enter never opens the module's note and a held key does not
-		// repeat the run. Space, Delete, F2 and Escape, and Enter on a row with no action, are handled below.
+		// Enter behaviour before). With an action, a plain Enter never opens the module's note, and a held key
+		// does not repeat the run. Enter with a modifier opens the note instead (PR-1 R1). Space, Delete, F2
+		// and Escape, and Enter on a row with no action, are handled below.
 		const enterAction = clickActionForEnter(evt, node, () => this.isOutsideManagedUnit(view, node));
 		if (enterAction) {
 			evt.preventDefault();
-			if (!hasModifier(evt) && !evt.repeat) this.runClickAction(node, enterAction);
+			if (!hasModifier(evt)) {
+				if (!evt.repeat) this.runClickAction(node, enterAction);
+			} else if (node.type === "unit" && node.ref) {
+				// PR-1 R1 (PR-3): Enter with a modifier never runs the action; it opens the module's note, as
+				// Enter did before the action existed. (A Folder has no note, so it does nothing.)
+				void this.openRef(node.ref);
+			}
 			return;
 		}
 		// R9(c): same reasoning as the row's click handler — an Outside-Vault-managed row's `ref.path`

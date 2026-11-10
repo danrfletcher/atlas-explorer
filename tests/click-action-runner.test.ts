@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { EventEmitter } from "node:events";
 import { Platform } from "obsidian";
-import { CLICK_ACTION_DEBOUNCE_MS, ClickActionRunner, readRunnableClickAction, rowClickAction } from "../src/click-action-runner";
+import { CLICK_ACTION_DEBOUNCE_MS, ClickActionRunner, readRunnableClickAction, rowClickAction, sharedClickActionRunner } from "../src/click-action-runner";
 import type { ClickActionKind, ViewNode } from "../src/types";
 
 /** The runner is driven with explicit inputs: a fake `spawnImpl`, a recording `noticeImpl`, a fake
@@ -143,11 +143,14 @@ describe("G12: failure notices (and nothing on success)", () => {
 		expect(r.notices).toEqual(["Atlas: couldn't open URI"]);
 	});
 
-	it("window.open returning null on desktop shows 'couldn't open URI'", async () => {
+	it("window.open returning null on desktop is a successful open: no notice (Electron returns null on success)", async () => {
+		(Platform as { isMobile: boolean }).isMobile = false;
 		openSpy.mockImplementation(() => null);
 		const r = rig();
-		expect(await r.runner.run("n1", { kind: "uri", value: "https://example.com" })).toBe("failed");
-		expect(r.notices).toEqual(["Atlas: couldn't open URI"]);
+		expect(await r.runner.run("n1", { kind: "uri", value: "https://example.com/" })).toBe("ran");
+		expect(await r.runner.run("n2", { kind: "uri", value: "obsidian://open?vault=a21-pr1" })).toBe("ran");
+		expect(openSpy).toHaveBeenCalledTimes(2);
+		expect(r.notices).toEqual([]);
 	});
 
 	it("window.open returning null on mobile is not treated as a failure", async () => {
@@ -336,5 +339,30 @@ describe("F1/G14: only a module or Folder node has a runnable action", () => {
 		expect(rowClickAction({ id: "u", type: "unit", ref: { kind: "folder", path: "Mod" }, children: [] }, probe)).toBeUndefined();
 		expect(rowClickAction({ id: "u", type: "unit", ref: { kind: "folder", path: "Mod" }, children: [], clickAction: { kind: "x", value: "y" } as never }, probe)).toBeUndefined();
 		expect(probe).toHaveBeenCalledTimes(1); // only the malformed one got past the cheap checks
+	});
+});
+
+describe("PR-1 R3: sharedClickActionRunner", () => {
+	it("gives every caller on one app the same runner, and another app its own", () => {
+		const app = {};
+		expect(sharedClickActionRunner(app)).toBe(sharedClickActionRunner(app));
+		expect(sharedClickActionRunner({})).not.toBe(sharedClickActionRunner(app));
+	});
+
+	it("so one node's 1 s debounce holds across callers: the second claim inside the window is refused", () => {
+		vi.useFakeTimers();
+		try {
+			const app = {};
+			expect(sharedClickActionRunner(app).tryStart("node")).toBe(true);
+			expect(sharedClickActionRunner(app).tryStart("node")).toBe(false);
+			vi.advanceTimersByTime(CLICK_ACTION_DEBOUNCE_MS);
+			expect(sharedClickActionRunner(app).tryStart("node")).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("a missing app still gives a working runner (never shared)", () => {
+		expect(sharedClickActionRunner(undefined as never)).toBeInstanceOf(ClickActionRunner);
 	});
 });

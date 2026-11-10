@@ -1167,12 +1167,9 @@ describe("Atlas-18 G7/G8 — the Click function section", () => {
 		expect(Object.prototype.hasOwnProperty.call(savedSource(onSave), "clickFunction")).toBe(false);
 	});
 
-	it.each([
-		["a syntax error", "(item) => {"],
-		["source that does not evaluate to a function", "42"],
-	])("GP: %s blocks Save with the message inline, and typing a valid function re-enables it", (_label, bad) => {
+	it("GP: a syntax error blocks Save with the message inline, and typing a valid function re-enables it", () => {
 		const { modal, onSave } = open(validConfig());
-		box(modal).type(bad);
+		box(modal).type("(item) => {");
 		expect(saveButton(modal).disabled).toBe(true);
 		const shown = errorTexts(modal).filter((t) => t);
 		expect(shown).toHaveLength(1);
@@ -1183,6 +1180,38 @@ describe("Atlas-18 G7/G8 — the Click function section", () => {
 		box(modal).type(PLAN_FUNCTION);
 		expect(saveButton(modal).disabled).toBe(false);
 		expect(errorTexts(modal).filter((t) => t)).toEqual([]);
+	});
+
+	it("GP: source that does not evaluate to a function passes the typing check but is refused at Save, with the message inline", () => {
+		const { modal, onSave } = open(validConfig());
+		box(modal).type("42");
+		expect(saveButton(modal).disabled).toBe(false);
+		expect(errorTexts(modal).filter((t) => t)).toEqual([]);
+		saveButton(modal).simulateClick();
+		expect(onSave).not.toHaveBeenCalled();
+		const shown = errorTexts(modal).filter((t) => t);
+		expect(shown).toHaveLength(1);
+		expect(shown[0]).toContain("must be a function");
+
+		box(modal).type(PLAN_FUNCTION);
+		expect(errorTexts(modal).filter((t) => t)).toEqual([]);
+		saveButton(modal).simulateClick();
+		expect(onSave).toHaveBeenCalledTimes(1);
+	});
+
+	it("PR-1 R2: code in the box does not run while typing or on open; it is evaluated once, at Save", () => {
+		const g = globalThis as unknown as { __modalIife?: number };
+		delete g.__modalIife;
+		const iife = "(() => { globalThis.__modalIife = (globalThis.__modalIife || 0) + 1; return (item) => null; })()";
+		const { modal, onSave } = open({ ...validConfig(), clickFunction: iife });
+		expect(g.__modalIife).toBeUndefined();
+		box(modal).type(iife + " ");
+		box(modal).type(iife);
+		expect(g.__modalIife).toBeUndefined();
+		expect(saveButton(modal).disabled).toBe(false);
+		saveButton(modal).simulateClick();
+		expect(onSave).toHaveBeenCalledTimes(1);
+		expect(g.__modalIife).toBe(1);
 	});
 
 	it("blocks Save for a JS-mapped source too", () => {

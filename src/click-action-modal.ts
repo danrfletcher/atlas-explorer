@@ -184,7 +184,9 @@ export class ClickActionModal extends Modal {
 		target: ClickActionTarget,
 		stored: unknown,
 		private onSave: (action: ApiItemClickAction | undefined) => void,
-		isMobile: boolean = Platform.isMobile
+		isMobile: boolean = Platform.isMobile,
+		/** Called when this modal closes, however it closes (Save, Cancel, Escape, outside click). */
+		private onClosed?: () => void
 	) {
 		super(app);
 		this.draft = new ClickActionDraft(target, stored, isMobile);
@@ -318,9 +320,6 @@ export class ClickActionModal extends Modal {
 		this.close();
 		this.onSave(result);
 	}
-
-	/** Set by the opener to learn when this modal closes, however it closes (Save, Cancel, Escape, outside click). */
-	onClosed?: () => void;
 
 	onClose(): void {
 		this.settled = true;

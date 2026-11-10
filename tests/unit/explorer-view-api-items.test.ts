@@ -576,6 +576,67 @@ describe("Atlas-18 G11/G16: an API item row's click and keyboard behaviour", () 
 		});
 	});
 
+	describe("PR-1 R1 (PR-4): the source's terminal command shares the per-row debounce", () => {
+		const runCommandOwner = (over: Partial<ViewNode> = {}) =>
+			apiOwner({
+				apiSource: source({ action: "run-command", command: "open -a {path}" }),
+				apiCache: { ok: true, fetchedAt: "2026-11-10T00:00:00Z", rows: [{ id: "1", label: "Docker 4.34", extra: { path: "Docker" } }] } as never,
+				...over,
+			});
+
+		it("click then Enter inside 1 s runs the command once; after 1 s it runs again", async () => {
+			const { row } = draw(runCommandOwner(), rowItem());
+			click(row);
+			await flushRun();
+			press(row, "Enter");
+			await flushRun();
+			expect(apiCommand.calls).toEqual([["open", "-a", "Docker"]]);
+			await vi.advanceTimersByTimeAsync(1000);
+			press(row, "Enter");
+			await flushRun();
+			expect(apiCommand.calls).toHaveLength(2);
+		});
+
+		it("two different rows do not debounce each other", async () => {
+			const owner = runCommandOwner();
+			const a = draw(owner, rowItem({ id: "1" }));
+			const b = draw(owner, rowItem({ id: "2" }), a.host);
+			click(a.row);
+			click(b.row);
+			await flushRun();
+			// Row 2 has no cached row, so its {path} placeholder fails to resolve: it was not swallowed by row 1's debounce.
+			expect(apiCommand.calls).toEqual([["open", "-a", "Docker"]]);
+			expect(Notice.instances.map((n) => n.message)).toEqual(["Atlas: Missing value for placeholder: {path}"]);
+		});
+
+		it("Open attachment is not debounced: two quick clicks open the note twice", async () => {
+			const { host, row } = draw(apiOwner(), rowItem({ noteRef: NOTE }));
+			click(row);
+			click(row);
+			await flushRun();
+			expect(host.openRef).toHaveBeenCalledTimes(2);
+		});
+
+		it("a Click function that falls through still reaches the source command on a first click (the function's claim is not claimed twice)", async () => {
+			const fn = "(item) => undefined";
+			const { row } = draw(runCommandOwner({ apiSource: source({ clickFunction: fn, action: "run-command", command: "open -a {path}" }) }), rowItem());
+			click(row);
+			await flushRun();
+			expect(apiCommand.calls).toEqual([["open", "-a", "Docker"]]);
+			click(row); // a second click inside the second is ignored once, by the function layer's own claim
+			await flushRun();
+			expect(apiCommand.calls).toHaveLength(1);
+		});
+
+		it("PR-1 R2: a whitespace-only Click function on a source (a hand-edited data.json) is treated as absent", async () => {
+			const { row } = draw(runCommandOwner({ apiSource: source({ clickFunction: "  \n ", action: "run-command", command: "open -a {path}" }) }), rowItem());
+			click(row);
+			await flushRun();
+			expect(apiCommand.calls).toEqual([["open", "-a", "Docker"]]);
+			expect(Notice.instances.map((n) => n.message)).toEqual([]);
+		});
+	});
+
 	describe("G11: a click follows the precedence chain", () => {
 		it.each(Object.keys(OVERRIDES))("a plain click with a %s override runs it and never opens the note", async (kind) => {
 			const { host, row } = draw(apiOwner(), rowItem({ noteRef: NOTE, clickAction: OVERRIDES[kind] }));
@@ -880,7 +941,7 @@ describe("Atlas-18 G11/G16: an API item row's click and keyboard behaviour", () 
 				expect(noticeTexts()).toEqual(["Atlas: command not found: nope:missing"]);
 			});
 
-			it("a uri result goes to window.open exactly as returned; a null return shows the existing notice", async () => {
+			it("a uri result goes to window.open exactly as returned; a null return is not a failure, a throw shows the existing notice", async () => {
 				const { row } = draw(withFunction(`(item) => ({ kind: "uri", uri: "obsidian://open?vault=Notes&file=" + item.label })`), rowItem({ label: "Docker" }));
 				click(row);
 				await flushRun();
@@ -890,6 +951,14 @@ describe("Atlas-18 G11/G16: an API item row's click and keyboard behaviour", () 
 				openSpy.mockReturnValue(null);
 				const second = draw(withFunction(`(item) => ({ kind: "uri", uri: "obsidian://x" })`), rowItem({ id: "2" }));
 				click(second.row);
+				await flushRun();
+				expect(noticeTexts()).toEqual([]);
+
+				openSpy.mockImplementation(() => {
+					throw new Error("blocked");
+				});
+				const third = draw(withFunction(`(item) => ({ kind: "uri", uri: "obsidian://y" })`), rowItem({ id: "3" }));
+				click(third.row);
 				await flushRun();
 				expect(noticeTexts()).toEqual(["Atlas: couldn't open URI"]);
 			});

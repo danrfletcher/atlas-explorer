@@ -290,6 +290,20 @@ describe("the modal", () => {
 		expect(saved).toEqual([]);
 	});
 
+	it.each([["Save"], ["Cancel"], ["close()"]])("PR-1 R3: the onClosed option passed to the constructor fires once when the modal closes by %s", (how) => {
+		const closed = vi.fn();
+		const modal = new ClickActionModal(app, "module", undefined, (action) => saved.push(action), false, closed);
+		modal.open();
+		expect(closed).not.toHaveBeenCalled();
+		if (how === "Save") {
+			chooseKind("uri");
+			typeInto("obsidian://open?file=A");
+			button("Save").click();
+		} else if (how === "Cancel") button("Cancel").click();
+		else modal.close();
+		expect(closed).toHaveBeenCalledTimes(1);
+	});
+
 	it("closing after a Save does not fire a second save", () => {
 		const modal = open("module");
 		chooseKind("uri");
