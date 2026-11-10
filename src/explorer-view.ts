@@ -1,7 +1,7 @@
 import { App, FuzzyMatch, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TAbstractFile, TFile, TFolder, WorkspaceLeaf, renderResults, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import type { AtlasSettings } from "./settings";
-import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, nodeHoldsLiveDataSource, parseUnitRefKey, unitRefKey, unitRefsEqual, unitToRef } from "./types";
+import { ApiItemState, ClickAction, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, nodeHoldsLiveDataSource, parseUnitRefKey, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 import { matchesActiveFile } from "./active-highlight";
 import {
 	ApiSourceIdPair,
@@ -41,6 +41,7 @@ import { obsidianRequestImpl } from "./api-request-obsidian";
 import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 import { executeApiCommand } from "./api-command-runner";
+import { ClickActionRunner, clickActionForEnter, clickHitsRowControl, hasModifier, rowClickAction } from "./click-action-runner";
 import { resolveArgv, tokenizeCommand } from "./command-argv";
 import { RenderTriggerKind, observeRender, renderCauseOr, withRenderCause } from "./render-log";
 import {
@@ -1113,6 +1114,8 @@ export class AtlasExplorerView extends ItemView {
 	private openAddUnderPrompts = new Set<{ close(): void }>();
 	/** Atlas-18: the Click action… modals currently open (closed with the view, like every other modal). */
 	private openClickActionModals = new Set<ClickActionModal>();
+	/** Atlas-18 (E9): runs Click actions and holds the per-node 1 s debounce, so it lives as long as the view. */
+	private clickActionRunner: ClickActionRunner | null = null;
 	private renderQueued = false;
 	/** Render log: the kind of the first trigger that queued the pending `queueRender()` timeout. Later
 	 * requests in the same tick coalesce into it and don't overwrite it. */
@@ -1876,6 +1879,13 @@ export class AtlasExplorerView extends ItemView {
 
 			await executeApiCommand(resolved.argv);
 		}
+	}
+
+	/** Atlas-18 (G3): runs a Bucket row's Click action. Fire-and-forget: the runner never rejects, shows its
+	 * own failure notices and changes no state. */
+	private runClickAction(node: ViewNode, action: ClickAction): void {
+		this.clickActionRunner ??= new ClickActionRunner({ app: this.plugin.app as unknown as ConstructorParameters<typeof ClickActionRunner>[0]["app"] });
+		void this.clickActionRunner.run(node.id, action);
 	}
 
 	/** G8: a throwaway pseudo-`ViewNode` so an API item can go through the same status-resolution
@@ -3465,10 +3475,16 @@ export class AtlasExplorerView extends ItemView {
 			// uses when it recurses into `node.children` below).
 			this.renderSortIndicator(row, node, this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null);
 
-			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
-			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
-			// exactly for a plain click; only shift/cmd-click gain new meaning.
-			row.addEventListener("click", (evt) => this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder()));
+			// PR 20: a meta row's plain click has no open target — safe to bind unconditionally, since
+			// with no Click action (Atlas-18) the behavior ("nothing happens") is preserved exactly for a
+			// plain click; only shift/cmd-click gain new meaning.
+			row.addEventListener("click", (evt) => {
+				const consumed = this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder());
+				// Atlas-18 (G3/F5/F12): a Folder's plain click runs its Click action and does nothing else:
+				// it never folds (the chevron and Space do). Read live so a just-saved action applies.
+				const action = rowClickAction(node, () => false);
+				if (action && !consumed && !evt.defaultPrevented && !hasModifier(evt) && !clickHitsRowControl(evt, row, false)) this.runClickAction(node, action);
+			});
 			// Middle-click on a Folder row opens nothing, but it still must not start browser autoscroll.
 			row.addEventListener("mousedown", suppressMiddleButtonAutoscroll);
 			row.addEventListener("dragstart", () => {
@@ -3575,6 +3591,15 @@ export class AtlasExplorerView extends ItemView {
 		if (!outsideManaged) this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder());
+			// Atlas-18 (G3/E18/F5): a module with a Click action runs it in place of opening its note, but
+			// only for a clean click on the row body: a modifier-click keeps its selection meaning, and a
+			// control (chevron, status dot, the module icon, ...) keeps its own job. Whatever the click was,
+			// the note does not open (the action replaced that plain-click behaviour); right-click Open does.
+			const action = rowClickAction(node, () => outsideManaged);
+			if (action) {
+				if (!consumed && !evt.defaultPrevented && !hasModifier(evt) && !clickHitsRowControl(evt, row, true)) this.runClickAction(node, action);
+				return;
+			}
 			// R9(c): `ref.path` here is a bare name relative to the Outside source's root, never a vault
 			// path — calling `openRef` would open (or create) a same-named vault-root file/module
 			// instead of doing nothing, which is what clicking an Outside row is supposed to do.
@@ -5440,6 +5465,15 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	private handleRowKeydown(evt: KeyboardEvent, node: ViewNode, view: View): void {
+		// Atlas-18 (G3/E13): Enter with no modifier runs a module's or Folder's Click action (a Folder had no
+		// Enter behaviour before). With an action, Enter never opens the module's note and a held key does not
+		// repeat the run. Space, Delete, F2 and Escape, and Enter on a row with no action, are handled below.
+		const enterAction = clickActionForEnter(evt, node, () => this.isOutsideManagedUnit(view, node));
+		if (enterAction) {
+			evt.preventDefault();
+			if (!hasModifier(evt) && !evt.repeat) this.runClickAction(node, enterAction);
+			return;
+		}
 		// R9(c): same reasoning as the row's click handler — an Outside-Vault-managed row's `ref.path`
 		// is root-relative, not a vault path, so Enter must no-op here too rather than opening (or
 		// creating) a same-named vault-root file/module.
