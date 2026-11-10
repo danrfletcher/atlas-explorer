@@ -3,6 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { executeApiCommand } from "../../src/api-command-runner";
+import { buildClickFunctionItem, evaluateClickFunction } from "../../src/api-click-function";
+import { createClickFunctionLayer } from "../../src/api-item-click";
+import { ClickActionRunner } from "../../src/click-action-runner";
 import { resolveArgv, tokenizeCommand } from "../../src/command-argv";
 
 describe("click-action-run — G9b/E10: Background command execution and hostile values", () => {
@@ -135,5 +138,98 @@ process.exit(0);
 			await runIfDesktop(fakePlatform);
 			expect(fs.existsSync(logPath)).toBe(false); // Nothing executed on mobile
 		});
+	});
+});
+
+/** Atlas-18 G9 (GP8): the Click function's result reaches a REAL child process through the real compiler,
+ * validator, layer and `ClickActionRunner`. Only the Obsidian command registry is a stand-in. */
+describe("click-action-run: the Click function path (GP8, GP10)", () => {
+	let tmpDir: string;
+	let stubPath: string;
+	let logPath: string;
+	let notices: string[];
+	let ranCommands: string[];
+
+	beforeEach(() => {
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "atlas-click-function-test-"));
+		stubPath = path.join(tmpDir, "record-args");
+		logPath = path.join(tmpDir, "args.json");
+		notices = [];
+		ranCommands = [];
+		fs.writeFileSync(stubPath, `#!/usr/bin/env node\nrequire('fs').writeFileSync(process.env.STUB_LOG, JSON.stringify(process.argv.slice(2)));\nprocess.exit(0);\n`, { mode: 0o755 });
+		process.env.STUB_LOG = logPath;
+	});
+
+	afterEach(() => {
+		delete process.env.STUB_LOG;
+		fs.rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	/** One click on a row through the same layer the explorer builds: claim, evaluate, run. */
+	async function click(source: string, row: { id: string; label: string }, extra: Record<string, unknown> | undefined, runner: ClickActionRunner) {
+		const layer = createClickFunctionLayer({
+			source,
+			buildItem: (r) => buildClickFunctionItem(r as { id: string; label: string }, extra),
+			claim: (r) => runner.tryStart(`apps:${r.id}`),
+			run: (outcome) => runner.runFunctionOutcome(outcome),
+			notify: (m) => notices.push(m),
+		});
+		return layer({ ...row, kind: "placeholder" } as never);
+	}
+
+	const newRunner = () =>
+		new ClickActionRunner({
+			app: { commands: { executeCommandById: (id: string) => (ranCommands.push(id), true) } },
+			noticeImpl: (m) => notices.push(m),
+		});
+
+	it("GP8: the argv a function returns reaches the process exactly, with no placeholder resolution or shell", async () => {
+		const marker = path.join(tmpDir, "pwn");
+		const source = `(item) => ({ kind: "terminal", argv: [${JSON.stringify(stubPath)}, "{path}", item.extra.path, '; touch ${marker}', "$(touch ${marker})"] })`;
+		const decided = await click(source, { id: "docker", label: "Docker 4.34" }, { path: "/Applications/Docker.app" }, newRunner());
+		expect(decided).toEqual({ kind: "handled" });
+		expect(JSON.parse(fs.readFileSync(logPath, "utf8"))).toEqual(["{path}", "/Applications/Docker.app", `; touch ${marker}`, `$(touch ${marker})`]);
+		expect(fs.existsSync(marker)).toBe(false);
+		expect(notices).toEqual([]);
+	});
+
+	it("GP8: the plan's function takes the command branch for a row with no path, and spawns nothing", async () => {
+		const plan = `(item) => item.extra.path ? { kind: "terminal", argv: [${JSON.stringify(stubPath)}, item.extra.path] } : { kind: "command", id: "app-runner:open-" + item.id }`;
+		await click(plan, { id: "build-dashboard", label: "Build Dashboard" }, {}, newRunner());
+		expect(ranCommands).toEqual(["app-runner:open-build-dashboard"]);
+		expect(fs.existsSync(logPath)).toBe(false);
+	});
+
+	it("GP10: a row added later (New App, no per-item setting) runs through the same function", async () => {
+		const plan = `(item) => ({ kind: "command", id: "app-runner:open-" + item.id })`;
+		await click(plan, { id: "new-app", label: "New App" }, undefined, newRunner());
+		expect(ranCommands).toEqual(["app-runner:open-new-app"]);
+	});
+
+	it("E10: a failing process from the function shows the existing failure notice", async () => {
+		const failing = path.join(tmpDir, "does-not-exist");
+		await click(`(item) => ({ kind: "terminal", argv: [${JSON.stringify(failing)}] })`, { id: "x", label: "X" }, {}, newRunner());
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("ENOENT");
+	});
+
+	it("E2/E3: an invalid return spawns nothing and shows one notice", async () => {
+		await click(`(item) => ({ kind: "terminal", argv: [${JSON.stringify(stubPath)}, 1] })`, { id: "x", label: "X" }, {}, newRunner());
+		expect(notices).toHaveLength(1);
+		expect(fs.existsSync(logPath)).toBe(false);
+	});
+
+	it("E9: two rapid clicks run the process once", async () => {
+		const runner = newRunner();
+		const source = `(item) => ({ kind: "terminal", argv: [${JSON.stringify(stubPath)}, "once"] })`;
+		await click(source, { id: "x", label: "X" }, {}, runner);
+		fs.unlinkSync(logPath);
+		await click(source, { id: "x", label: "X" }, {}, runner);
+		expect(fs.existsSync(logPath)).toBe(false);
+	});
+
+	it("evaluating alone never runs anything: a pure result for a valid function", () => {
+		expect(evaluateClickFunction(`(item) => ({ kind: "terminal", argv: [${JSON.stringify(stubPath)}] })`, { id: "x", label: "X", secondary: undefined, extra: {} }).ok).toBe(true);
+		expect(fs.existsSync(logPath)).toBe(false);
 	});
 });

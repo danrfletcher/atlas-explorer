@@ -4,19 +4,61 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resolveOutsidePath } from "../../src/folder-source-outside";
-import { FolderSourceOutsideWatchers } from "../../src/folder-source-outside-watcher";
+import { FolderSourceOutsideWatchers, type OutsideWatchFn } from "../../src/folder-source-outside-watcher";
 import { ViewsManager } from "../../src/views";
 import { FolderSourceConfig, ViewNode, unitRefKey } from "../../src/types";
 
-/** PR-2 (G6/G9, GP5): end to end against a real temp folder and the real `fs.watch`. Events are async, so
- * these tests wait on the real debounce (about 1 s) rather than faking timers. Only the rows are
+/** PR-2 (G6/G9, GP5): end to end against a real temp folder, with a polling stand-in for `fs.watch` (see
+ * `pollingWatch`). Events are async, so these tests wait on the real debounce (about 1 s) rather than faking timers. Only the rows are
  * asserted, with the same `ViewsManager` the plugin uses. */
 
 const WAIT_MS = 6000;
 
-/** T3/T4 (PR-1.B1): under load from the rest of the suite, a real `fs.watch`/FSEvents change was
- * observed not just late but never delivered at all — a wait exhausted its whole window with no sign
- * the OS ever told us about the write. Raising the timeout alone doesn't fix a dropped event. Per the
+/** Why the OS layer is replaced here (PR-2 slice 2/6, T3). The real macOS `fs.watch` was measured on the
+ * dev Mac under ordinary host load: first event 4.8-10.9 s after the watch opened, and only 6-12 events
+ * delivered for ~100 writes in 30 s, in a plain Node script with no Atlas code involved. A change made
+ * before the FSEvents stream registers is never delivered, so these tests failed even when run alone and
+ * no wait/retry bound was reliable. This stand-in keeps everything else real (a real temp folder on disk,
+ * real writes/renames/deletes, `FolderSourceOutsideWatchers` with its real debounce, `ViewsManager`) and
+ * replaces only the OS notification with a poll of the folder's direct children every 50 ms. Its baseline
+ * is taken synchronously when the watch opens, so no change can fall in a startup gap. Like a
+ * non-recursive `fs.watch`, a subfolder is tracked by name only: a change inside it is not reported.
+ * The one line this leaves untested is `defaultWatch` (`fs.watch(path, listener)`) in the watcher module. */
+const POLL_MS = 50;
+const pollingWatch: OutsideWatchFn = (watchPath, listener) => {
+	const signature = (): Map<string, string> => {
+		const out = new Map<string, string>();
+		for (const entry of fs.readdirSync(watchPath, { withFileTypes: true })) {
+			if (entry.isDirectory()) {
+				out.set(entry.name, "dir");
+				continue;
+			}
+			const st = fs.statSync(path.join(watchPath, entry.name));
+			out.set(entry.name, `${st.size}|${st.mtimeMs}`);
+		}
+		return out;
+	};
+	let before = signature();
+	const timer = setInterval(() => {
+		let after: Map<string, string>;
+		try {
+			after = signature();
+		} catch {
+			return; // the folder is mid-removal; the next tick or `close` settles it
+		}
+		for (const [name, sig] of after) {
+			if (!before.has(name)) listener("rename", name);
+			else if (before.get(name) !== sig) listener("change", name);
+		}
+		for (const name of before.keys()) if (!after.has(name)) listener("rename", name);
+		before = after;
+	}, POLL_MS);
+	return { on: () => undefined, close: () => clearInterval(timer) };
+};
+
+/** T3/T4 (PR-1.B1): `retryingTrigger` was added when a real `fs.watch`/FSEvents change was observed
+ * never delivered at all under load. The tests now run on `pollingWatch` above, which cannot drop an
+ * event, so the retry is a harmless safety net rather than the thing keeping them stable. Raising the timeout alone doesn't fix a dropped event. Per the
  * documented fix for this exact risk ("retry within a bound"), `retryingTrigger` re-runs the same,
  * idempotent filesystem action a few times if the assertion hasn't settled yet. If the first run of
  * `action` was the one that got lost, a later run is a fresh, genuine OS event the watcher can catch;
@@ -73,6 +115,7 @@ beforeEach(() => {
 	vm = new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view" as const, root: [ownerNode()] }], "v1", () => {});
 	vm.refreshFolderSource("v1", "owner", dir);
 	registry = new FolderSourceOutsideWatchers({
+		watch: pollingWatch,
 		isResolved: (p) => resolveOutsidePath(p),
 		onRescan: (nodeId) => {
 			rescans.push(nodeId);
