@@ -1,3 +1,4 @@
+import { ClickFunctionItem, evaluateClickFunction } from "./api-click-function";
 import { readRunnableClickAction } from "./click-action-runner";
 import { ApiClickAction, ApiItemState, ClickAction } from "./types";
 
@@ -6,7 +7,9 @@ import { ApiClickAction, ApiItemState, ClickAction } from "./types";
  *
  *   1. the Item override (`item.clickAction`): a terminal / command / URI action runs, and an explicit
  *      `{ kind: "none" }` runs nothing and opens nothing;
- *   2. the Click function layer (a seam: PR-5 fills it; with none supplied this layer is skipped);
+ *   2. the source's Click function (`createClickFunctionLayer`): it may run something, stop the chain
+ *      (`{ kind: "none" }`, an invalid return or a throw) or, returning nothing, fall through. A row whose
+ *      source has no function, or one whose Item override decided above, never calls it;
  *   3. the source click action: None does nothing, Run terminal command runs the source's command;
  *   4. open attachment, which is only ever the source click action's own "Open attachment" (or unset) step.
  *
@@ -15,12 +18,12 @@ import { ApiClickAction, ApiItemState, ClickAction } from "./types";
 
 /** What the Click function layer reports back when it decides. It runs whatever it chose itself (through
  * the same runner), so the chain only needs to know whether to stop: `none` (nothing runs and no attachment
- * opens) or `handled` (it ran something). Returning `null` or `undefined` instead falls through to the
- * source click action. */
+ * opens) or `handled` (it ran something, was ignored by the debounce, or failed with a notice). Returning
+ * `null` or `undefined` instead falls through to the source click action. */
 export type ApiClickLayerResult = { kind: "none" } | { kind: "handled" };
 
 /** The Click function layer: asked for a row only when no Item override decided first. */
-export type ApiClickFunctionLayer = (item: ApiItemState) => ApiClickLayerResult | null | undefined;
+export type ApiClickFunctionLayer = (item: ApiItemState) => ApiClickLayerResult | null | undefined | Promise<ApiClickLayerResult | null | undefined>;
 
 /** Which layer decided. `nothing` means every layer passed: the source click action was Open attachment
  * (or unset) and the row has no attached note, or the source click action is a value this build doesn't know. */
@@ -67,7 +70,7 @@ export async function runApiItemClick(input: ApiItemClickInput, handlers: ApiIte
 	}
 
 	if (input.functionLayer) {
-		const result = input.functionLayer(item);
+		const result = await input.functionLayer(item);
 		if (result) return "function";
 	}
 
@@ -81,4 +84,38 @@ export async function runApiItemClick(input: ApiItemClickInput, handlers: ApiIte
 		return "attachment";
 	}
 	return "nothing";
+}
+
+/** What the Click function layer needs from the outside. */
+export interface ClickFunctionLayerDeps {
+	/** The source's stored function source (non-empty). */
+	source: string;
+	/** Builds the `item` argument for a row (extra from the cache, `{}` when not found or no cached row). */
+	buildItem(row: ApiItemState): ClickFunctionItem;
+	/** E9: claims the debounce for this row; false when a run of it started under a second ago. Checked
+	 * before the function is evaluated, so a rapid second click never calls it. */
+	claim(row: ApiItemState): boolean;
+	/** Runs a checked terminal / command / URI result through the shared runners. */
+	run(outcome: { kind: "terminal"; argv: string[] } | { kind: "command"; id: string } | { kind: "uri"; uri: string }): void | Promise<unknown>;
+	notify(message: string): void;
+}
+
+/** Atlas-18 (G9): the Click function layer. Evaluates the stored function for the row and acts on the
+ * checked result. Never throws and never changes any stored state: a compile error, throw, Promise or
+ * invalid shape is a notice carrying the reason, and nothing runs (the chain stops: no source action, no
+ * attachment). */
+export function createClickFunctionLayer(deps: ClickFunctionLayerDeps): ApiClickFunctionLayer {
+	return async (row) => {
+		if (!deps.claim(row)) return { kind: "handled" };
+		const result = evaluateClickFunction(deps.source, deps.buildItem(row));
+		if (!result.ok) {
+			deps.notify(`Atlas: ${result.error}`);
+			return { kind: "none" };
+		}
+		const { outcome } = result;
+		if (outcome.kind === "fall-through") return undefined;
+		if (outcome.kind === "none") return { kind: "none" };
+		await deps.run(outcome);
+		return { kind: "handled" };
+	};
 }

@@ -1047,3 +1047,29 @@ input.atlas-name-input.atlas-name-invalid[type="text"]:not(:disabled) {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
+
+/* Atlas-18 (G7): the API Click function box and its helper text. The code box takes the modal's full
+ * width and wraps nothing, so a long one-liner scrolls inside the box instead of widening the modal;
+ * the helper paragraphs wrap normally. Scoped to these two classes only. */
+.atlas-api-click-function-setting {
+	flex-wrap: wrap;
+}
+
+.atlas-api-click-function-setting .setting-item-control {
+	flex: 1 1 100%;
+	min-width: 0;
+}
+
+.atlas-api-click-function-setting textarea.atlas-api-click-function {
+	width: 100%;
+	min-height: 96px;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	white-space: pre;
+	overflow: auto;
+}
+
+.atlas-api-click-function-help p {
+	margin: 0 0 6px;
+	overflow-wrap: anywhere;
+}

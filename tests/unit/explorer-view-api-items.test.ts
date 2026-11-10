@@ -811,4 +811,490 @@ describe("Atlas-18 G11/G16: an API item row's click and keyboard behaviour", () 
 			expect(host.openRef).toHaveBeenCalledExactlyOnceWith(NOTE);
 		});
 	});
+
+	// -----------------------------------------------------------------------------------------------------------
+	// Atlas-18 G7-G9: the source's Click function sits between the Item override and the source click action.
+	// The REAL `renderApiItemRow` and `handleApiItemClick` run, with the real `ClickActionRunner` and the real
+	// function compiler. Faked, as above: the vault (`openRef`), `spawn`, the command registry, `window.open`.
+	// -----------------------------------------------------------------------------------------------------------
+	describe("G9: the Click function layer", () => {
+		type Seen = { id: string; label: string; secondary: string | undefined; extra: Record<string, unknown>; keys: string[] };
+		const sink = globalThis as unknown as { __clickSeen?: Seen[] };
+		beforeEach(() => {
+			sink.__clickSeen = [];
+		});
+		afterEach(() => {
+			delete sink.__clickSeen;
+		});
+
+		/** A function that records what it was called with, then returns `ret` (JS source for an expression). */
+		const fnReturning = (ret: string) =>
+			`(item) => { globalThis.__clickSeen.push({ id: item.id, label: item.label, secondary: item.secondary, extra: item.extra, keys: Object.keys(item) }); return ${ret}; }`;
+		const calls = () => sink.__clickSeen ?? [];
+		const withFunction = (clickFunction: string | undefined, over: Partial<ViewNode> = {}, sourceOver: Record<string, unknown> = {}) =>
+			apiOwner({ apiSource: source({ clickFunction, ...sourceOver }), ...over });
+		const cache = (...rows: { id: string; label: string; extra?: Record<string, unknown> }[]) => ({ ok: true, fetchedAt: 1, error: null, rows, skippedCount: 0, truncated: false }) as never;
+		const PLAN = `(item) => item.extra.path ? { kind: "terminal", argv: ["open", "-a", item.extra.path] } : { kind: "command", id: "app-runner:open-" + item.id }`;
+		const noticeTexts = () => Notice.instances.map((n) => n.message);
+
+		describe("what the function returns", () => {
+			it("GP8: a row with extra.path spawns `open -a <path>` with no shell, and the note does not open", async () => {
+				const owner = withFunction(PLAN, { apiCache: cache({ id: "docker", label: "Docker 4.34", extra: { path: "/Applications/Docker.app" } }) });
+				const { host, row } = draw(owner, rowItem({ id: "docker", noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(spawnCalls.map((c) => [c.executable, ...c.args])).toEqual([["open", "-a", "/Applications/Docker.app"]]);
+				expect(spawnCalls[0].options.shell).toBe(false);
+				expect(executeCommandById).not.toHaveBeenCalled();
+				expect(host.openRef).not.toHaveBeenCalled();
+				expect(noticeTexts()).toEqual([]);
+			});
+
+			it("GP8: a row with no path calls executeCommandById with the id built by the function, and spawns nothing", async () => {
+				const owner = withFunction(PLAN, { apiCache: cache({ id: "build-dashboard", label: "Build Dashboard", extra: {} }) });
+				const { row } = draw(owner, rowItem({ id: "build-dashboard", label: "Build Dashboard" }));
+				click(row);
+				await flushRun();
+				expect(executeCommandById).toHaveBeenCalledExactlyOnceWith("app-runner:open-build-dashboard");
+				expect(spawnCalls).toEqual([]);
+			});
+
+			it("a terminal argv goes to the spawner untouched: no tokenizing, no {field} resolution", async () => {
+				const owner = withFunction(`(item) => ({ kind: "terminal", argv: ["tool", "{path}", "two words", "a;b"] })`, { apiCache: cache({ id: "1", label: "x", extra: { path: "/p" } }) });
+				const { row } = draw(owner, rowItem());
+				click(row);
+				await flushRun();
+				expect(spawnCalls).toHaveLength(1);
+				expect(spawnCalls[0].executable).toBe("tool");
+				expect(spawnCalls[0].args).toEqual(["{path}", "two words", "a;b"]);
+				expect(spawnCalls[0].options.shell).toBe(false);
+				expect(apiCommand.calls).toEqual([]); // not the source's static command path
+			});
+
+			it("a command result goes to the shared command runner; an unknown id shows the existing notice", async () => {
+				const { row } = draw(withFunction(`(item) => ({ kind: "command", id: "nope:missing" })`), rowItem());
+				executeCommandById.mockReturnValue(false);
+				click(row);
+				await flushRun();
+				expect(executeCommandById).toHaveBeenCalledExactlyOnceWith("nope:missing");
+				expect(noticeTexts()).toEqual(["Atlas: command not found: nope:missing"]);
+			});
+
+			it("a uri result goes to window.open exactly as returned; a null return shows the existing notice", async () => {
+				const { row } = draw(withFunction(`(item) => ({ kind: "uri", uri: "obsidian://open?vault=Notes&file=" + item.label })`), rowItem({ label: "Docker" }));
+				click(row);
+				await flushRun();
+				expect(openSpy).toHaveBeenCalledExactlyOnceWith("obsidian://open?vault=Notes&file=Docker");
+				expect(noticeTexts()).toEqual([]);
+
+				openSpy.mockReturnValue(null);
+				const second = draw(withFunction(`(item) => ({ kind: "uri", uri: "obsidian://x" })`), rowItem({ id: "2" }));
+				click(second.row);
+				await flushRun();
+				expect(noticeTexts()).toEqual(["Atlas: couldn't open URI"]);
+			});
+
+			it("a terminal result on mobile shows the desktop-only notice and spawns nothing", async () => {
+				(Platform as { isMobile: boolean }).isMobile = true;
+				const { row } = draw(withFunction(`(item) => ({ kind: "terminal", argv: ["open"] })`), rowItem());
+				click(row);
+				await flushRun();
+				expect(noticeTexts()).toEqual(["Atlas: terminal actions are desktop only"]);
+				expect(spawnCalls).toEqual([]);
+			});
+
+			it.each([["open-attachment"], ["none"], ["run-command"]])(
+				"{ kind: none } stops everything, even with the source on %s and a note attached",
+				async (action) => {
+					const owner = withFunction(fnReturning(`({ kind: "none" })`), {}, { action, command: "open -a Docker" });
+					const { host, row } = draw(owner, rowItem({ noteRef: NOTE }));
+					click(row);
+					await flushRun();
+					expect(calls()).toHaveLength(1);
+					expectNothingRan(host);
+					expect(noticeTexts()).toEqual([]);
+				}
+			);
+		});
+
+		describe("falling through to the source click action", () => {
+			it.each([["undefined", "undefined"], ["null", "null"]])("a %s return with source Open attachment opens the note", async (_label, ret) => {
+				const { host, row } = draw(withFunction(fnReturning(ret)), rowItem({ noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(calls()).toHaveLength(1);
+				expect(host.openRef).toHaveBeenCalledExactlyOnceWith(NOTE);
+			});
+
+			it("a function with no return statement falls through too", async () => {
+				const { host, row } = draw(withFunction("(item) => {}"), rowItem({ noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(host.openRef).toHaveBeenCalledExactlyOnceWith(NOTE);
+			});
+
+			it("falling through with the source on None runs nothing", async () => {
+				const { host, row } = draw(withFunction(fnReturning("undefined"), {}, { action: "none" }), rowItem({ noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(calls()).toHaveLength(1);
+				expectNothingRan(host);
+			});
+
+			it("falling through with no attachment and the default source action runs nothing", async () => {
+				const { host, row } = draw(withFunction(fnReturning("undefined")), rowItem());
+				click(row);
+				await flushRun();
+				expectNothingRan(host);
+				expect(noticeTexts()).toEqual([]);
+			});
+
+			it("falling through with the source on Run terminal command runs its static command with {field} resolved", async () => {
+				const owner = withFunction(
+					fnReturning("undefined"),
+					{ apiCache: cache({ id: "1", label: "Docker 4.34", extra: { path: "Docker" } }) },
+					{ action: "run-command", command: "open -a {path}" }
+				);
+				const { host, row } = draw(owner, rowItem({ noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(apiCommand.calls).toEqual([["open", "-a", "Docker"]]);
+				expect(spawnCalls).toEqual([]);
+				expect(host.openRef).not.toHaveBeenCalled();
+			});
+		});
+
+		describe("every invalid return, and a throw, is a notice and runs nothing (E2, E3)", () => {
+			const cases: [string, string, RegExp][] = [
+				["an unknown kind", `({ kind: "shell", cmd: "ls" })`, /unknown kind "shell"/],
+				["a command with no id", `({ kind: "command" })`, /string "id"/],
+				["a command with a numeric id", `({ kind: "command", id: 5 })`, /string "id"/],
+				["a uri with no uri", `({ kind: "uri" })`, /string "uri"/],
+				["a terminal with a string argv", `({ kind: "terminal", argv: "open -a Docker" })`, /array of strings/],
+				["a terminal with an empty argv", `({ kind: "terminal", argv: [] })`, /must not be empty/],
+				["E3: a number in argv", `({ kind: "terminal", argv: ["open", 1] })`, /element 1 must be a string/],
+				["E3: null in argv", `({ kind: "terminal", argv: [null] })`, /element 0 must be a string/],
+				["E3: a nested array in argv", `({ kind: "terminal", argv: ["open", ["-a"]] })`, /element 1 must be a string/],
+				["a bare string", `"open -a Docker"`, /not string/],
+				["an array", `[{ kind: "none" }]`, /not an array/],
+				["a Promise return", `Promise.resolve({ kind: "command", id: "a:b" })`, /synchronous/],
+				["a throw", `(() => { throw new Error("boom"); })()`, /threw: boom/],
+			];
+
+			it.each(cases)("%s", async (_label, ret, message) => {
+				const owner = withFunction(fnReturning(ret), { apiCache: cache({ id: "1", label: "Docker 4.34", extra: { a: 1 } }) });
+				const { host, row, item } = draw(owner, rowItem({ noteRef: NOTE, explicitStatusId: "doing" }));
+				const stateBefore = JSON.stringify(owner.apiItemState);
+				const cacheBefore = JSON.stringify(owner.apiCache);
+				expect(() => click(row)).not.toThrow();
+				await flushRun();
+				expectNothingRan(host); // not even the attachment: an error stops the chain
+				expect(noticeTexts()).toHaveLength(1);
+				expect(noticeTexts()[0]).toMatch(/^Atlas: Click function/);
+				expect(noticeTexts()[0]).toMatch(message);
+				expect(JSON.stringify(owner.apiItemState)).toBe(stateBefore);
+				expect(JSON.stringify(owner.apiCache)).toBe(cacheBefore);
+				expect(item.clickAction).toBeUndefined();
+			});
+
+			it("an async function gives the invalid-shape notice and is never called", async () => {
+				const owner = withFunction(`async (item) => { globalThis.__clickSeen.push({}); return { kind: "command", id: "a:b" }; }`);
+				const { host, row } = draw(owner, rowItem({ noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(calls()).toEqual([]);
+				expectNothingRan(host);
+				expect(noticeTexts()).toEqual(["Atlas: Click function must be synchronous (it is an async function)"]);
+			});
+
+			it("a rejected Promise return is contained: one notice, no unhandled rejection", async () => {
+				const seen: unknown[] = [];
+				const onUnhandled = (reason: unknown) => seen.push(reason);
+				process.on("unhandledRejection", onUnhandled);
+				try {
+					const { host, row } = draw(withFunction(`(item) => Promise.reject(new Error("late"))`), rowItem({ noteRef: NOTE }));
+					click(row);
+					await flushRun();
+					vi.useRealTimers();
+					await new Promise((resolve) => setTimeout(resolve, 10));
+					expect(seen).toEqual([]);
+					expect(noticeTexts()).toHaveLength(1);
+					expectNothingRan(host);
+				} finally {
+					process.off("unhandledRejection", onUnhandled);
+				}
+			});
+
+			it("a stored source that no longer compiles (hand-edited data.json) is a notice, not an exception", async () => {
+				const { host, row } = draw(withFunction("(item) => {"), rowItem({ noteRef: NOTE }));
+				expect(() => click(row)).not.toThrow();
+				await flushRun();
+				expectNothingRan(host);
+				expect(noticeTexts()).toHaveLength(1);
+			});
+		});
+
+		describe("the item the function receives (E6, E15)", () => {
+			it("is { id, label, secondary, extra } and nothing else, with extra from the cached row", async () => {
+				const owner = withFunction(fnReturning("undefined"), { apiCache: cache({ id: "1", label: "stale", extra: { path: "/p", n: 2 } }) });
+				const { row } = draw(owner, rowItem({ label: "Docker 4.34", secondary: "v4" }));
+				click(row);
+				await flushRun();
+				expect(calls()).toEqual([{ id: "1", label: "Docker 4.34", secondary: "v4", extra: { path: "/p", n: 2 }, keys: ["id", "label", "secondary", "extra"] }]);
+			});
+
+			it("E15: with the cache cleared, extra is {} and id/label/secondary come from the stored item state", async () => {
+				const owner = withFunction(fnReturning("undefined"), { apiCache: undefined });
+				const { row } = draw(owner, rowItem({ id: "7", label: "Seven", secondary: "sub" }));
+				click(row);
+				await flushRun();
+				expect(calls()).toEqual([{ id: "7", label: "Seven", secondary: "sub", extra: {}, keys: ["id", "label", "secondary", "extra"] }]);
+			});
+
+			it("E15: secondary is undefined when the stored item has none", async () => {
+				const { row } = draw(withFunction(fnReturning("undefined")), rowItem());
+				click(row);
+				await flushRun();
+				expect(calls()[0].secondary).toBeUndefined();
+			});
+
+			it("E6: a not-found row gets extra = {}, so item.extra.path is undefined and the plan's function takes the command branch", async () => {
+				const owner = withFunction(PLAN, { apiCache: cache({ id: "1", label: "Docker 4.34", extra: { path: "/stale" } }) });
+				const { row } = draw(owner, rowItem({ id: "1", notFound: true, lastSeenAt: "2026-11-01T00:00:00Z" }));
+				click(row);
+				await flushRun();
+				expect(spawnCalls).toEqual([]);
+				expect(executeCommandById).toHaveBeenCalledExactlyOnceWith("app-runner:open-1");
+				expect(noticeTexts()).toEqual([]);
+			});
+
+			it("E6: the source's static command still resolves as today for a not-found row when the function falls through", async () => {
+				const owner = withFunction(fnReturning("undefined"), {}, { action: "run-command", command: "open -a {path}" });
+				const { row } = draw(owner, rowItem({ notFound: true }));
+				click(row);
+				await flushRun();
+				expect(apiCommand.calls).toEqual([]);
+				expect(noticeTexts()).toEqual(["Atlas: Missing value for placeholder: {path}"]);
+			});
+
+			it("the function cannot change the cache by changing item.extra", async () => {
+				const owner = withFunction(`(item) => { item.extra.path = "hacked"; item.label = "x"; return undefined; }`, { apiCache: cache({ id: "1", label: "L", extra: { path: "/p" } }) });
+				const { row, item } = draw(owner, rowItem());
+				click(row);
+				await flushRun();
+				expect((owner.apiCache as unknown as { rows: { extra: unknown }[] }).rows[0].extra).toEqual({ path: "/p" });
+				expect(item.label).toBe("Docker 4.34");
+			});
+		});
+
+		describe("precedence", () => {
+			it.each(Object.keys(OVERRIDES))("an Item override of %s: the function is not called at all", async (kind) => {
+				const owner = withFunction(fnReturning(`({ kind: "command", id: "from:function" })`));
+				const { row } = draw(owner, rowItem({ noteRef: NOTE, clickAction: OVERRIDES[kind] }));
+				click(row);
+				await flushRun();
+				expect(calls()).toEqual([]);
+				expect(executeCommandById).not.toHaveBeenCalledWith("from:function");
+			});
+
+			it("an Item override of None: the function is not called, and nothing runs", async () => {
+				const owner = withFunction(fnReturning(`({ kind: "command", id: "from:function" })`));
+				const { host, row } = draw(owner, rowItem({ noteRef: NOTE, clickAction: { kind: "none" } }));
+				click(row);
+				press(row, "Enter");
+				await flushRun();
+				expect(calls()).toEqual([]);
+				expectNothingRan(host);
+			});
+
+			it("with no override the function beats the source click action and the attachment", async () => {
+				const owner = withFunction(fnReturning(`({ kind: "command", id: "from:function" })`), {}, { action: "run-command", command: "open -a Docker" });
+				const { host, row } = draw(owner, rowItem({ noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(executeCommandById).toHaveBeenCalledExactlyOnceWith("from:function");
+				expect(apiCommand.calls).toEqual([]);
+				expect(host.openRef).not.toHaveBeenCalled();
+			});
+
+			it("clearing the override returns the row to the function", async () => {
+				const owner = withFunction(fnReturning(`({ kind: "command", id: "from:function" })`));
+				const { row, item } = draw(owner, rowItem({ clickAction: OVERRIDES.uri }));
+				click(row);
+				await flushRun();
+				expect(calls()).toEqual([]);
+				delete item.clickAction;
+				await vi.advanceTimersByTimeAsync(1000);
+				click(row);
+				await flushRun();
+				expect(executeCommandById).toHaveBeenCalledExactlyOnceWith("from:function");
+			});
+
+			it("F8: a source with no Click function takes the path it always did, and the layer is skipped", async () => {
+				const { host, row } = draw(withFunction(undefined), rowItem({ noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(host.openRef).toHaveBeenCalledExactlyOnceWith(NOTE);
+				expect(noticeTexts()).toEqual([]);
+			});
+
+			it("F8: an empty stored function counts as no function", async () => {
+				const { host, row } = draw(withFunction(""), rowItem({ noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(host.openRef).toHaveBeenCalledExactlyOnceWith(NOTE);
+			});
+		});
+
+		describe("only API sources get the function", () => {
+			const csv = { path: "a.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false } as never;
+			const table = { path: "a.md", tableIndex: 0, mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false } as never;
+			it.each([
+				["CSV", () => folderGovernor({ apiSource: undefined, csvSource: csv })],
+				["Table", () => folderGovernor({ apiSource: undefined, markdownTableSource: table })],
+			])("a %s row never calls a function and still opens its attachment as before", async (_label, makeOwner) => {
+				const { host, row } = draw(makeOwner(), rowItem({ noteRef: NOTE }));
+				click(row);
+				await flushRun();
+				expect(calls()).toEqual([]);
+				expect(host.openRef).toHaveBeenCalledExactlyOnceWith(NOTE);
+				expect(noticeTexts()).toEqual([]);
+			});
+		});
+
+		describe("E9: the debounce runs before evaluation", () => {
+			it("two rapid clicks on the same item call the function once", async () => {
+				const { row } = draw(withFunction(fnReturning(`({ kind: "command", id: "a:b" })`)), rowItem());
+				click(row);
+				await flushRun();
+				await vi.advanceTimersByTimeAsync(500);
+				click(row);
+				await flushRun();
+				expect(calls()).toHaveLength(1);
+				expect(executeCommandById).toHaveBeenCalledTimes(1);
+			});
+
+			it("a click 1 s after the start of the previous one calls it again", async () => {
+				const { row } = draw(withFunction(fnReturning(`({ kind: "command", id: "a:b" })`)), rowItem());
+				click(row);
+				await flushRun();
+				await vi.advanceTimersByTimeAsync(1000);
+				click(row);
+				await flushRun();
+				expect(calls()).toHaveLength(2);
+				expect(executeCommandById).toHaveBeenCalledTimes(2);
+			});
+
+			it("a click then Enter inside 1 s call it once", async () => {
+				const { row } = draw(withFunction(fnReturning("undefined")), rowItem());
+				click(row);
+				press(row, "Enter");
+				await flushRun();
+				expect(calls()).toHaveLength(1);
+			});
+
+			it("the debounce also holds when the function falls through or returns None", async () => {
+				const { row } = draw(withFunction(fnReturning(`({ kind: "none" })`)), rowItem({ noteRef: NOTE }));
+				click(row);
+				click(row);
+				await flushRun();
+				expect(calls()).toHaveLength(1);
+			});
+
+			it("a rapid failing click is not repeated as a second notice", async () => {
+				const { row } = draw(withFunction(fnReturning("5")), rowItem());
+				click(row);
+				click(row);
+				await flushRun();
+				expect(noticeTexts()).toHaveLength(1);
+			});
+
+			it("two different rows do not debounce each other", async () => {
+				const owner = withFunction(fnReturning(`({ kind: "command", id: "a:b" })`));
+				const a = draw(owner, rowItem({ id: "a" }));
+				const b = draw(owner, rowItem({ id: "b" }), a.host);
+				click(a.row);
+				click(b.row);
+				await flushRun();
+				expect(calls().map((c) => c.id)).toEqual(["a", "b"]);
+			});
+		});
+
+		describe("Enter and other gestures", () => {
+			it("Enter evaluates the function with the same result as a click", async () => {
+				const owner = withFunction(PLAN, { apiCache: cache({ id: "docker", label: "Docker 4.34", extra: { path: "/Applications/Docker.app" } }) });
+				const { row } = draw(owner, rowItem({ id: "docker" }));
+				const evt = press(row, "Enter");
+				await flushRun();
+				expect(evt.defaultPrevented).toBe(true);
+				expect(spawnCalls.map((c) => [c.executable, ...c.args])).toEqual([["open", "-a", "/Applications/Docker.app"]]);
+			});
+
+			it("Enter with an Item override never calls the function", async () => {
+				const { row } = draw(withFunction(fnReturning("undefined")), rowItem({ clickAction: OVERRIDES.command }));
+				press(row, "Enter");
+				await flushRun();
+				expect(calls()).toEqual([]);
+				expect(executeCommandById).toHaveBeenCalledExactlyOnceWith("app-runner:open-docker");
+			});
+
+			it("a held Enter does not repeat the function", async () => {
+				const { row } = draw(withFunction(fnReturning("undefined")), rowItem());
+				press(row, "Enter", { repeat: true });
+				await flushRun();
+				expect(calls()).toEqual([]);
+			});
+
+			it.each([["shiftKey"], ["metaKey"], ["ctrlKey"], ["altKey"]])("a %s-click does not call the function, and carries on as it did before (opens the attachment)", async (modifier) => {
+				const { host, row } = draw(withFunction(fnReturning(`({ kind: "command", id: "a:b" })`)), rowItem({ noteRef: NOTE }));
+				click(row.querySelector(".atlas-row-text")!, { [modifier]: true });
+				await flushRun();
+				expect(calls()).toEqual([]);
+				expect(executeCommandById).not.toHaveBeenCalled();
+				expect(host.openRef).toHaveBeenCalledExactlyOnceWith(NOTE);
+			});
+
+			it("a click on the status dot does not call the function", async () => {
+				const { row } = draw(withFunction(fnReturning(`({ kind: "command", id: "a:b" })`)), rowItem({ explicitStatusId: "doing" }));
+				click(row.querySelector(".atlas-status-dot-circle")!);
+				await flushRun();
+				expect(calls()).toEqual([]);
+				expect(executeCommandById).not.toHaveBeenCalled();
+			});
+
+			it("Enter with a modifier does not call it", async () => {
+				const { row } = draw(withFunction(fnReturning("undefined")), rowItem());
+				press(row, "Enter", { shiftKey: true });
+				await flushRun();
+				expect(calls()).toEqual([]);
+			});
+		});
+
+		describe("GP10: a row a refresh adds works through the function with nothing set per item", () => {
+			it.each([["merge"], ["overwrite"]] as const)("%s refresh adds New App, and clicking it runs the function's command", async (mode) => {
+				const owner = apiOwner({ id: "apps", apiSource: source({ mode, clickFunction: PLAN }) });
+				const views = new ViewsManager({} as App, [{ id: view.id, name: "Default", inboxMode: "view", root: [{ ...owner, apiItemState: { "1": rowItem() }, apiItemOrder: ["1"] }] }], view.id, () => {});
+				const host = rig(views.getNode(view.id, "apps")!);
+				(host as unknown as { plugin: { viewsManager: unknown } }).plugin.viewsManager = views;
+
+				vi.useRealTimers();
+				await new ApiSourceController().refresh(views.getNode(view.id, "apps")!, source({ mode, clickFunction: PLAN }), [], () => {}, {
+					requestImpl: async () => ({ status: 200, text: JSON.stringify([{ id: "1", name: "Docker 4.34" }, { id: "new-app", name: "New App" }]) }),
+				});
+				vi.useFakeTimers();
+
+				const live = views.getNode(view.id, "apps")!;
+				const added = live.apiItemState!["new-app"];
+				expect(added).toBeTruthy();
+				expect(added.clickAction).toBeUndefined(); // nothing set by hand
+
+				const container = document.createElement("div");
+				document.body.appendChild(container);
+				callRenderApiItemRow(host, added, container, view, live, 1, [live]);
+				click(container.querySelector<HTMLElement>(".atlas-row-api-item")!);
+				await flushRun();
+				expect(executeCommandById).toHaveBeenCalledExactlyOnceWith("app-runner:open-new-app");
+			});
+		});
+	});
 });

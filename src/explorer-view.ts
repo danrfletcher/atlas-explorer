@@ -42,7 +42,8 @@ import { obsidianRequestImpl } from "./api-request-obsidian";
 import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 import { executeApiCommand } from "./api-command-runner";
-import { hasActiveItemOverride, runApiItemClick } from "./api-item-click";
+import { buildClickFunctionItem } from "./api-click-function";
+import { createClickFunctionLayer, hasActiveItemOverride, runApiItemClick } from "./api-item-click";
 import { ClickActionRunner, clickActionForEnter, clickHitsRowControl, hasModifier, rowClickAction } from "./click-action-runner";
 import { resolveArgv, tokenizeCommand } from "./command-argv";
 import { RenderTriggerKind, observeRender, renderCauseOr, withRenderCause } from "./render-log";
@@ -921,6 +922,22 @@ function liveApiRow(
 	const liveFolder = viewsManager.getNode(view.id, folderNode.id);
 	const liveItem = liveFolder?.apiItemState?.[item.id];
 	return liveFolder && liveItem ? { folderNode: liveFolder, item: liveItem } : null;
+}
+
+/** Atlas-18 (G9): the Click function layer for a Folder's API source, or undefined when it has none (so a
+ * source without a function takes exactly the path it always did). `item.extra` comes from the cached mapped
+ * row (`{}` when the row is not found or the cache has been cleared). The debounce shares the runner and key
+ * of an Item override (E9) and is claimed before the function is called. */
+function clickFunctionLayerFor(folderNode: ViewNode, runner: ClickActionRunner) {
+	const source = folderNode.apiSource?.clickFunction;
+	if (!source) return undefined;
+	return createClickFunctionLayer({
+		source,
+		buildItem: (row) => buildClickFunctionItem(row, folderNode.apiCache?.rows.find((r) => r.id === row.id)?.extra),
+		claim: (row) => runner.tryStart(`${folderNode.id}:${row.id}`),
+		run: (outcome) => runner.runFunctionOutcome(outcome),
+		notify: (message) => new Notice(message),
+	});
 }
 
 export class AtlasExplorerView extends ItemView {
@@ -1875,20 +1892,28 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** G9/G9b, Atlas-18 (G11): what a click or Enter on an API item row does. Runs the precedence chain in
-	 * `runApiItemClick`: Item override, then the Click function (a seam PR-5 fills; none yet), then the
-	 * source click action, then open attachment (only ever the source's own Open attachment step). The
-	 * first layer that decides stops the chain. */
-	private async handleApiItemClick(view: View, staleFolderNode: ViewNode, staleItem: ApiItemState): Promise<void> {
+	 * `runApiItemClick`: Item override, then the source's Click function (only when it has one, and only for
+	 * a plain click or Enter: `allowFunction`), then the source click action, then open attachment (only
+	 * ever the source's own Open attachment step). The first layer that decides stops the chain. */
+	private async handleApiItemClick(view: View, staleFolderNode: ViewNode, staleItem: ApiItemState, allowFunction = true): Promise<void> {
 		// T1: decide from the row as it is now (see `liveApiRow`), never from the draw-time objects.
 		const live = liveApiRow(this.plugin.viewsManager, view, staleFolderNode, staleItem);
 		if (!live) return;
 		const { folderNode, item } = live;
+		let functionLayer: ReturnType<typeof clickFunctionLayerFor>;
+		if (allowFunction && folderNode.apiSource?.clickFunction) {
+			this.clickActionRunner ??= new ClickActionRunner({ app: this.plugin.app as unknown as ConstructorParameters<typeof ClickActionRunner>[0]["app"] });
+			functionLayer = clickFunctionLayerFor(folderNode, this.clickActionRunner);
+		}
 		await runApiItemClick(
 			{
 				item,
 				// E16: an override runs only under a live API source, never on a Table/CSV row or a removed source.
 				overrideApplies: !!folderNode.apiSource,
 				sourceAction: resolveClickAction(folderNode.apiSource),
+				// Only an API source has a Click function (never Table/CSV rows), and an Item override that
+				// decided first never reaches it. A modifier-click or a click on a row control never runs it.
+				functionLayer,
 			},
 			{
 				// E9: debounced per row by the shared runner. The key joins the owning node and the item id, so
@@ -1982,7 +2007,9 @@ export class AtlasExplorerView extends ItemView {
 			// runs anything. With no override the click behaves exactly as before (F8).
 			const plain = !hasModifier(evt) && !evt.defaultPrevented && !clickHitsRowControl(evt, row, false);
 			if (!plain && hasActiveItemOverride(live.item, !!live.folderNode.apiSource)) return;
-			void this.handleApiItemClick(view, folderNode, item);
+			// The Click function is an action too (F5): a modifier-click or a control click skips it and
+			// carries on with the source click action exactly as it did before the function existed.
+			void this.handleApiItemClick(view, folderNode, item, plain);
 		});
 		// Atlas-18 (G16): a Bucket row like any other for the keyboard. Enter with no modifier runs the same chain
 		// as a click; a held key does not repeat the run, and Space, Delete and F2 keep doing nothing here.

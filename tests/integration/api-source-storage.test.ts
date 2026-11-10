@@ -483,3 +483,49 @@ describe("R20/E9 — corrupt individual apiItemState entries never crash on load
 		expect(sanitized.apiItemOrder).toEqual(["1", "3"]);
 	});
 });
+
+describe("Atlas-18 (G7): the source's clickFunction through save, reload and duplicate", () => {
+	const FN = `(item) => item.extra.path ? { kind: "terminal", argv: ["open", "-a", item.extra.path] } : { kind: "command", id: "app-runner:open-" + item.id }`;
+	const reload = (views: View[]) => new ViewsManager({} as App, JSON.parse(JSON.stringify(views)) as View[], views[0].id, () => {});
+
+	function withSource(source: ApiSourceConfig) {
+		const vm = new ViewsManager({} as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "My Apps")!;
+		vm.setApiSource(view.id, folder.id, source);
+		return { vm, view, folder };
+	}
+
+	it("a saved function round-trips through data.json unchanged, and a duplicate keeps it", () => {
+		const { vm, view, folder } = withSource({ ...makeSource(), clickFunction: FN });
+		const reloaded = reload(vm.getViews());
+		expect(reloaded.getNode(view.id, folder.id)!.apiSource!.clickFunction).toBe(FN);
+
+		const copy = reloaded.duplicateNode(view.id, folder.id)!;
+		expect(copy.apiSource!.clickFunction).toBe(FN);
+		expect(JSON.stringify(reloaded.getViews())).toContain("app-runner:open-");
+	});
+
+	it("a source saved with no function has no clickFunction key in the persisted JSON", () => {
+		const { vm } = withSource(makeSource());
+		expect(JSON.stringify(vm.getViews())).not.toContain("clickFunction");
+	});
+
+	it("a non-string stored value is dropped on load; the rest of the source is kept", () => {
+		const { vm, view, folder } = withSource(makeSource());
+		const raw = JSON.parse(JSON.stringify(vm.getViews())) as View[];
+		(raw[0].root[0].apiSource as unknown as Record<string, unknown>).clickFunction = { not: "a string" };
+		const reloaded = new ViewsManager({} as App, raw, view.id, () => {});
+		const source = reloaded.getNode(view.id, folder.id)!.apiSource!;
+		expect(source.clickFunction).toBeUndefined();
+		expect(source.url).toBe("https://api.example.com/items");
+	});
+
+	it("a data.json from before this field loads as today", () => {
+		const { vm, view, folder } = withSource(makeSource());
+		const reloaded = reload(vm.getViews());
+		const source = reloaded.getNode(view.id, folder.id)!.apiSource!;
+		expect(source.clickFunction).toBeUndefined();
+		expect(source.url).toBe("https://api.example.com/items");
+	});
+});

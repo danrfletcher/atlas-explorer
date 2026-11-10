@@ -91,15 +91,39 @@ export class ClickActionRunner {
 	async run(nodeId: string, raw: unknown): Promise<ClickActionOutcome> {
 		const action = readRunnableClickAction(raw);
 		if (!action) return "no-action";
+		if (!this.tryStart(nodeId)) return "debounced";
+		return this.dispatch(action);
+	}
 
+	/** E9: claims `nodeId` for a run starting now. False when its previous run started less than the window
+	 * ago (the caller ignores the click, with no feedback). Entries older than the window are dropped here. */
+	tryStart(nodeId: string): boolean {
 		const now = Date.now();
 		for (const [id, startedAt] of this.lastStart) {
 			if (now - startedAt >= CLICK_ACTION_DEBOUNCE_MS) this.lastStart.delete(id);
 		}
 		const previous = this.lastStart.get(nodeId);
-		if (previous !== undefined && now - previous < CLICK_ACTION_DEBOUNCE_MS) return "debounced";
+		if (previous !== undefined && now - previous < CLICK_ACTION_DEBOUNCE_MS) return false;
 		this.lastStart.set(nodeId, now);
+		return true;
+	}
 
+	/** Atlas-18 (G9): runs what an API source's Click function returned, after the caller has claimed the
+	 * debounce with `tryStart`. `command` and `uri` go through the same runners as a stored action. A
+	 * terminal `argv` is spawned as given: no tokenizing and no `{field}` resolution, so an element such as
+	 * `"{path}"` reaches the process literally (still `shell: false`). Never rejects. */
+	async runFunctionOutcome(outcome: { kind: "terminal"; argv: string[] } | { kind: "command"; id: string } | { kind: "uri"; uri: string }): Promise<ClickActionOutcome> {
+		try {
+			if (outcome.kind === "terminal") return await this.spawnArgv(outcome.argv);
+			if (outcome.kind === "command") return await this.runCommand(outcome.id);
+			return this.runUri(outcome.uri);
+		} catch (err: unknown) {
+			console.error("Atlas: click function action failed", err);
+			return "failed";
+		}
+	}
+
+	private async dispatch(action: ClickAction): Promise<ClickActionOutcome> {
 		try {
 			if (action.kind === "terminal") return await this.runTerminal(action.value);
 			if (action.kind === "command") return await this.runCommand(action.value);
@@ -129,7 +153,16 @@ export class ClickActionRunner {
 			this.notify(`Atlas: ${resolved.error}`);
 			return "failed";
 		}
-		const result = await executeApiCommand(resolved.argv, { noticeImpl: (msg) => this.notify(msg), spawnImpl: this.options.spawnImpl });
+		return this.spawnArgv(resolved.argv);
+	}
+
+	/** Desktop only (G13). `shell: false` is `executeApiCommand`'s own rule. */
+	private async spawnArgv(argv: string[]): Promise<ClickActionOutcome> {
+		if (Platform.isMobile) {
+			this.notify("Atlas: terminal actions are desktop only");
+			return "failed";
+		}
+		const result = await executeApiCommand(argv, { noticeImpl: (msg) => this.notify(msg), spawnImpl: this.options.spawnImpl });
 		return result.ok ? "ran" : "failed";
 	}
 
