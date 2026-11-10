@@ -49,8 +49,23 @@ export function compileClickFunction(source: string): { ok: true; fn: CompiledCl
 	}
 }
 
+/** Typing-time check (PR-1 R2 polish): a parse-only syntax check. It builds the wrapper with `new Function`
+ * but never calls it, so nothing the box contains runs: an IIFE, a side effect or an infinite loop in the
+ * box stays inert while the user types. It cannot tell whether the source evaluates to a function; that is
+ * checked once, at Save, by `validateClickFunctionSource`. */
+export function checkClickFunctionSyntax(source: string): { ok: true } | { ok: false; error: string } {
+	try {
+		const trimmed = source.trim().replace(/;\s*$/, "");
+		new Function(`"use strict";\nreturn (\n${trimmed}\n);`);
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: errorMessage(err) };
+	}
+}
+
 /** G8: the Save-time check. Compiles only; the function is never called, so a function with a side
- * effect leaves no trace after Save. */
+ * effect leaves no trace after Save. Evaluates the box's top-level expression once (to confirm it is a
+ * function), so it runs only when the user presses Save, never per keystroke (see `checkClickFunctionSyntax`). */
 export function validateClickFunctionSource(source: string): { ok: true } | { ok: false; error: string } {
 	const compiled = compileClickFunction(source);
 	return compiled.ok ? { ok: true } : { ok: false, error: compiled.error };

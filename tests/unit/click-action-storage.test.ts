@@ -228,6 +228,14 @@ describe("ApiSourceConfig.clickFunction on load", () => {
 		expect(loadedSource("")?.clickFunction).toBeUndefined();
 	});
 
+	it.each([[" "], ["\n\t  \n"]])("PR-1 R2: stores a whitespace-only string (%j) as absent, like an empty box", (raw) => {
+		expect(loadedSource(raw)?.clickFunction).toBeUndefined();
+	});
+
+	it("PR-1 R2: keeps a function whose own text has surrounding whitespace, unchanged", () => {
+		expect(loadedSource(`  ${SRC}\n`)?.clickFunction).toBe(`  ${SRC}\n`);
+	});
+
 	it("is absent on a source that never had one, and leaves the source click action alone", () => {
 		const src = loadedSource(undefined)!;
 		expect(src.clickFunction).toBeUndefined();

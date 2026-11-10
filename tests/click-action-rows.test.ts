@@ -170,6 +170,22 @@ describe("G3/GP3: a module with an action", () => {
 		expect(rig.fake.clickActionRunner).toBeInstanceOf(ClickActionRunner);
 	});
 
+	it("PR-1 R3: two Atlas leaves on one app share the debounce: the same row clicked in both runs once", async () => {
+		const first = makeRig(app);
+		const second = makeRig(app); // the same app; its command registry replaces the first's
+		first.fake.clickActionRunner = null;
+		second.fake.clickActionRunner = null;
+		const rowA = await render(first, moduleNode());
+		const rowB = await render(second, moduleNode());
+		click(label(rowA));
+		click(label(rowB));
+		expect(second.executeCommandById).toHaveBeenCalledTimes(1);
+		expect(first.fake.clickActionRunner).toBe(second.fake.clickActionRunner);
+		vi.advanceTimersByTime(1000);
+		click(label(rowB));
+		expect(second.executeCommandById).toHaveBeenCalledTimes(2);
+	});
+
 	it("a plain click still selects the row", async () => {
 		const rig = makeRig(app);
 		const row = await render(rig, moduleNode());
@@ -287,13 +303,40 @@ describe("GP4: right-click and middle-click never run the action", () => {
 });
 
 describe("E18/F5: modifier clicks keep their selection meaning and never run", () => {
-	it.each([["shift"], ["meta"], ["ctrl"], ["alt"]])("%s-click on a module", async (mod) => {
+	it.each([["shift"], ["meta"], ["ctrl"]])("%s-click on a module", async (mod) => {
 		const rig = makeRig(app);
 		rig.fake.selectionAnchor = "other";
 		const row = await render(rig, moduleNode());
 		click(label(row), { [`${mod}Key`]: true });
 		expectNothingRan(rig, openSpy);
 		expect(rig.fake.openRef).not.toHaveBeenCalled();
+	});
+
+	it("PR-1 R1: alt-click on a module never runs the action; it opens the note, as it did before the action existed", async () => {
+		const rig = makeRig(app);
+		const row = await render(rig, moduleNode());
+		click(label(row), { altKey: true });
+		expectNothingRan(rig, openSpy);
+		expect(rig.fake.openRef).toHaveBeenCalledExactlyOnceWith(moduleRef);
+	});
+
+	it("PR-1 R1: alt-click on a module's icon (a control) opens nothing and runs nothing", async () => {
+		const rig = makeRig(app);
+		const row = await render(rig, moduleNode());
+		click(row.querySelector(".atlas-icon")!, { altKey: true });
+		expectNothingRan(rig, openSpy);
+		expect(rig.fake.openRef).not.toHaveBeenCalled();
+	});
+
+	it.each([["shiftKey"], ["metaKey"], ["ctrlKey"], ["altKey"]])("PR-1 R1: Enter with %s on a module opens its note and does not run the action; on a Folder it does nothing", async (mod) => {
+		const rig = makeRig(app);
+		const moduleRow = await render(rig, moduleNode());
+		const folderRow = await render(rig, folderNode());
+		key(moduleRow, "Enter", { [mod]: true });
+		expect(rig.fake.openRef).toHaveBeenCalledExactlyOnceWith(moduleRef);
+		key(folderRow, "Enter", { [mod]: true });
+		expect(rig.fake.openRef).toHaveBeenCalledTimes(1);
+		expectNothingRan(rig, openSpy);
 	});
 
 	it.each([["shift"], ["meta"], ["ctrl"], ["alt"]])("%s-click on a Folder", async (mod) => {

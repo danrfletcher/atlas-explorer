@@ -15,6 +15,9 @@ const README = "README.md";
 const USING = "docs/using-the-explorer.md";
 const SOURCES = "docs/data-sources.md";
 const DOC_FILES = [README, USING, SOURCES];
+/** PR-1 R2 (PR-6): every file that links to the click-action docs, so each link is checked. `concepts.md` links
+ * to `using-the-explorer.md#click-actions` but is not scanned for the wording rules `DOC_FILES` carries. */
+const LINK_FILES = [...DOC_FILES, "docs/concepts.md"];
 
 /** The text of a `##`/`###` section: from its heading to the next heading of the same or a higher level. */
 function section(markdown: string, heading: string): string {
@@ -201,7 +204,7 @@ describe("G18: links and anchors resolve", () => {
 		for (const id of ["api", "click-function", "item-override", "source-click-action"]) expect(sources.has(id)).toBe(true);
 	});
 
-	it.each(DOC_FILES)("every relative link in %s points at an existing file and heading", (file) => {
+	it.each(LINK_FILES)("every relative link in %s points at an existing file and heading", (file) => {
 		const text = read(file);
 		const links = [...text.matchAll(/\]\(([^)\s]+)\)/g)].map((m) => m[1]).filter((href) => !/^[a-z][a-z0-9+.-]*:/i.test(href));
 		expect(links.length).toBeGreaterThan(0);
@@ -318,5 +321,37 @@ describe("G18: the docs do not promise what the fence rules out", () => {
 				expect(line, `${file}:${i + 1}`).not.toMatch(/(CSV|Markdown table|Folder) sources? (can|may) have a Click function/i);
 			});
 		}
+	});
+});
+
+describe("PR-1 polish: the docs state the behaviour the polish changes made", () => {
+	const using = () => read(USING);
+	const sources = () => read(SOURCES);
+
+	it("R3 (PR-6): says a module managed by an Outside-Vault source has no Click action", () => {
+		expect(using()).toContain("except a module that an Outside-Vault Folder source manages, which has no **Click action…**");
+	});
+
+	it("R1 (PR-3): alt-click and a modified Enter open the module's note and never run the action", () => {
+		expect(section(using(), "Click actions")).toContain("**alt-click** or **Enter** with a modifier held opens the interface note");
+	});
+
+	it("R1 (PR-4): the debounce covers the source's terminal command and not Open attachment", () => {
+		const text = section(using(), "Click actions");
+		expect(text).toContain("covers the source's own **Run terminal command in background** setting");
+		expect(text).toContain("**Open attachment** is not debounced");
+	});
+
+	it("R1 (PR-5): a debounced click does not fall through, even when the function returned nothing", () => {
+		expect(section(sources(), "Click function")).toContain("it applies even when the first click's function returned nothing");
+	});
+
+	it("R3 (PR-5): a modifier-click skips the function but still runs the source's static command", () => {
+		expect(section(sources(), "Click function")).toContain("a shift-click runs the source's static command");
+	});
+
+	it("R2 (PR-5): typing only syntax-checks the box, and Save evaluates it once", () => {
+		expect(section(sources(), "Click function")).toContain("While you type, the box is only syntax-checked");
+		expect(section(sources(), "Click function")).toContain("Save evaluates the box once to check that it is a function");
 	});
 });

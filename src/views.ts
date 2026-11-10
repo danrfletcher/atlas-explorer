@@ -180,8 +180,9 @@ export function sanitizeApiFields(node: ViewNode): void {
 			const action: ApiClickAction | undefined =
 				rawAction === "none" || rawAction === "run-command" || rawAction === "open-attachment" ? rawAction : undefined;
 			const command = typeof raw.command === "string" ? raw.command : undefined;
-			// Atlas-18 (G7/G17): an empty box means no function, so an empty string is stored as absent.
-			const clickFunction = typeof raw.clickFunction === "string" && raw.clickFunction !== "" ? raw.clickFunction : undefined;
+			// Atlas-18 (G7/G17): an empty box means no function, so an empty or whitespace-only string is stored as
+			// absent (PR-1 R2: the same rule the Data source modal applies on Save).
+			const clickFunction = typeof raw.clickFunction === "string" && raw.clickFunction.trim() !== "" ? raw.clickFunction : undefined;
 			node.apiSource = {
 				// PR-3 R1 fix: stamp the discriminant on every load, not only when the modal builds a
 				// fresh config — without it, every API source had `type === undefined` after a reload,

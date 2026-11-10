@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	buildClickFunctionItem,
 	ClickFunctionItem,
+	checkClickFunctionSyntax,
 	compileClickFunction,
 	evaluateClickFunction,
 	validateClickFunctionResult,
@@ -224,5 +225,28 @@ describe("buildClickFunctionItem: E6 and E15", () => {
 
 	it("an extra that cannot be copied (a function value) becomes {} rather than throwing", () => {
 		expect(buildClickFunctionItem({ id: "a", label: "A" }, { fn: () => 1 }).extra).toEqual({});
+	});
+});
+
+describe("checkClickFunctionSyntax (the typing-time, parse-only check)", () => {
+	it("accepts valid source and a trailing semicolon, and rejects a syntax error with its message", () => {
+		expect(checkClickFunctionSyntax("(item) => item.id")).toEqual({ ok: true });
+		expect(checkClickFunctionSyntax("(item) => undefined;")).toEqual({ ok: true });
+		const bad = checkClickFunctionSyntax("(item) => {");
+		expect(bad.ok).toBe(false);
+		if (!bad.ok) expect(bad.error).toMatch(/Unexpected end of input|SyntaxError|Unexpected/i);
+	});
+
+	it("does not evaluate the source: an IIFE leaves no trace, and an infinite loop in it returns at once", () => {
+		const g = globalThis as unknown as { __syntaxOnly?: number };
+		delete g.__syntaxOnly;
+		expect(checkClickFunctionSyntax("(() => { globalThis.__syntaxOnly = 1; return (item) => null; })()")).toEqual({ ok: true });
+		expect(checkClickFunctionSyntax("(() => { while (true) {} })()")).toEqual({ ok: true });
+		expect(g.__syntaxOnly).toBeUndefined();
+	});
+
+	it("cannot tell a non-function apart (that is the Save-time check's job)", () => {
+		expect(checkClickFunctionSyntax("42")).toEqual({ ok: true });
+		expect(validateClickFunctionSource("42").ok).toBe(false);
 	});
 });

@@ -196,19 +196,29 @@ export class ClickActionRunner {
 	}
 
 	/** G6/F10: `window.open` gets the stored value byte for byte, with no vault name added or rewritten.
-	 * A throw, or a null return on desktop, is a failure; on mobile a null return is not (unverified), only a throw is. */
+	 * Only a throw is a failure. A null return is NOT: Obsidian's desktop (Electron) window-open handler
+	 * hands the URL to the OS or browser and returns null even when that succeeded (verified live in
+	 * Obsidian 1.15.0 for https:// and obsidian:// URIs), so null cannot tell success from failure. */
 	private runUri(uri: string): ClickActionOutcome {
-		let opened: unknown;
 		try {
-			opened = window.open(uri);
+			window.open(uri);
 		} catch {
-			this.notify("Atlas: couldn't open URI");
-			return "failed";
-		}
-		if (opened === null && !Platform.isMobile) {
 			this.notify("Atlas: couldn't open URI");
 			return "failed";
 		}
 		return "ran";
 	}
+}
+
+/** PR-1 R3 (PR-3): one runner per Obsidian app, so every Atlas leaf shares the same E9 debounce window. */
+const sharedRunners = new WeakMap<object, ClickActionRunner>();
+
+export function sharedClickActionRunner(app: ClickActionRunnerOptions["app"]): ClickActionRunner {
+	if (typeof app !== "object" || app === null) return new ClickActionRunner({ app });
+	let runner = sharedRunners.get(app);
+	if (!runner) {
+		runner = new ClickActionRunner({ app });
+		sharedRunners.set(app, runner);
+	}
+	return runner;
 }
