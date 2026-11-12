@@ -1,7 +1,7 @@
 import { App } from "obsidian";
 import { describe, expect, it, vi } from "vitest";
-import { ViewsManager } from "../../src/views";
-import { ApiItemState, PLACEHOLDER_ROW_KIND, ViewNode } from "../../src/types";
+import { ViewsManager, cloneApiItemState, sanitizeApiItemClickAction, sanitizeApiItemState } from "../../src/views";
+import { ApiItemState, ClickAction, PLACEHOLDER_ROW_KIND, ViewNode } from "../../src/types";
 
 function setupNode(apiItemState: Record<string, ApiItemState>, apiItemOrder: string[]) {
 	const persist = vi.fn();
@@ -107,5 +107,113 @@ describe("G29: load-time sanitization always assigns the shared placeholder kind
 		const vm = new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [legacyRaw] }], "v1", vi.fn());
 		const node = vm.getNode("v1", "root")!;
 		expect(node.apiItemState!["1"].kind).toBe(PLACEHOLDER_ROW_KIND);
+	});
+});
+
+describe("Atlas-18 G10/G17/E10: an Item override (clickAction) on an API item", () => {
+	const ACTION: ClickAction = { kind: "uri", value: "obsidian://open?vault=Notes&file=Docker" };
+	const base = { id: "ignored", label: "Docker 4.34", kind: PLACEHOLDER_ROW_KIND };
+
+	it("survives sanitizeApiItemState", () => {
+		expect(sanitizeApiItemState({ ...base, clickAction: { ...ACTION } }, "1")).toEqual({ id: "1", label: "Docker 4.34", kind: PLACEHOLDER_ROW_KIND, clickAction: ACTION });
+	});
+
+	it("survives cloneApiItemState as a new object", () => {
+		const state: Record<string, ApiItemState> = { "1": { id: "1", label: "Docker 4.34", kind: PLACEHOLDER_ROW_KIND, clickAction: { ...ACTION } } };
+		const out = cloneApiItemState(state);
+		expect(out["1"].clickAction).toEqual(ACTION);
+		expect(out["1"].clickAction).not.toBe(state["1"].clickAction);
+	});
+
+	it("None round-trips through sanitize and clone as an explicit value, distinct from absent", () => {
+		const loaded = sanitizeApiItemState({ ...base, clickAction: { kind: "none" } }, "1")!;
+		expect(loaded.clickAction).toEqual({ kind: "none" });
+		expect("clickAction" in loaded).toBe(true);
+
+		const cloned = cloneApiItemState({ "1": loaded });
+		expect(cloned["1"].clickAction).toEqual({ kind: "none" });
+		expect(cloned["1"].clickAction).not.toBe(loaded.clickAction);
+
+		const absent = sanitizeApiItemState(base, "1")!;
+		expect("clickAction" in absent).toBe(false);
+		expect(cloneApiItemState({ "1": absent })["1"].clickAction).toBeUndefined();
+	});
+
+	it("None strips extra keys, and a None with junk beside it is still None", () => {
+		expect(sanitizeApiItemClickAction({ kind: "none", value: "x", junk: 1 })).toEqual({ kind: "none" });
+	});
+
+	it("absent loads as absent", () => {
+		expect("clickAction" in sanitizeApiItemState(base, "1")!).toBe(false);
+	});
+
+	it.each<[string, unknown]>([
+		["an unknown kind", { kind: "shell", value: "x" }],
+		["a differently cased None", { kind: "None" }],
+		["a non-string kind", { kind: 5, value: "x" }],
+		["a missing value", { kind: "terminal" }],
+		["a whitespace-only value", { kind: "terminal", value: "   " }],
+		["a non-string value", { kind: "uri", value: 5 }],
+		["a string", "none"],
+		["an array", [{ kind: "none" }]],
+		["null", null],
+	])("drops a malformed stored override (%s) and keeps the rest of the item", (_name, raw) => {
+		const out = sanitizeApiItemState({ ...base, secondary: "sec", explicitStatusId: "doing", clickAction: raw }, "1")!;
+		expect(out).toEqual({ id: "1", label: "Docker 4.34", kind: PLACEHOLDER_ROW_KIND, secondary: "sec", explicitStatusId: "doing" });
+		expect("clickAction" in out).toBe(false);
+	});
+
+	it("loads an older data.json with no clickAction on any item exactly as before (E10)", () => {
+		const root = { id: "root", type: "meta" as const, label: "Folder", children: [], apiItemState: { "1": { id: "1", label: "One" }, "2": { id: "2", label: "Two", noteRef: { kind: "file", path: "N.md" } } } as unknown as Record<string, ApiItemState>, apiItemOrder: ["1", "2"] };
+		const vm = new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [root] }], "v1", vi.fn());
+		const state = vm.getNode("v1", "root")!.apiItemState!;
+		expect(JSON.stringify(state)).not.toContain("clickAction");
+		expect(state["2"].noteRef).toEqual({ kind: "file", path: "N.md" });
+	});
+
+	it("loads a stored None and a malformed one on sibling items through the real load path", () => {
+		const root = { id: "root", type: "meta" as const, label: "Folder", children: [], apiItemState: { "1": { id: "1", label: "One", clickAction: { kind: "none" } }, "2": { id: "2", label: "Two", clickAction: { kind: "shell", value: 5 } } } as unknown as Record<string, ApiItemState>, apiItemOrder: ["1", "2"] };
+		const vm = new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [root] }], "v1", vi.fn());
+		const state = vm.getNode("v1", "root")!.apiItemState!;
+		expect(state["1"].clickAction).toEqual({ kind: "none" });
+		expect(state["2"].clickAction).toBeUndefined();
+		expect(state["2"].label).toBe("Two");
+	});
+});
+
+describe("Atlas-18 G10: ViewsManager.setApiItemClickAction and None", () => {
+	const row = (): Record<string, ApiItemState> => ({ "1": { id: "1", label: "One", kind: PLACEHOLDER_ROW_KIND } });
+
+	it("stores None as an explicit value, and persists it", () => {
+		const { vm, viewId, nodeId, persist } = setupNode(row(), ["1"]);
+		expect(vm.setApiItemClickAction(viewId, nodeId, "1", { kind: "none" })).toBe(true);
+		expect(vm.getNode(viewId, nodeId)!.apiItemState!["1"].clickAction).toEqual({ kind: "none" });
+		expect(persist).toHaveBeenCalled();
+	});
+
+	it("setting None again is a no-op that does not persist; None to terminal and back to absent each persist", () => {
+		const { vm, viewId, nodeId, persist } = setupNode(row(), ["1"]);
+		vm.setApiItemClickAction(viewId, nodeId, "1", { kind: "none" });
+		persist.mockClear();
+		vm.setApiItemClickAction(viewId, nodeId, "1", { kind: "none" });
+		expect(persist).not.toHaveBeenCalled();
+		vm.setApiItemClickAction(viewId, nodeId, "1", { kind: "terminal", value: "open -a Docker" });
+		expect(vm.getNode(viewId, nodeId)!.apiItemState!["1"].clickAction).toEqual({ kind: "terminal", value: "open -a Docker" });
+		vm.setApiItemClickAction(viewId, nodeId, "1", undefined);
+		expect("clickAction" in vm.getNode(viewId, nodeId)!.apiItemState!["1"]).toBe(false);
+		expect(persist).toHaveBeenCalledTimes(2);
+	});
+
+	it("refuses an unsaveable action and leaves a stored None alone", () => {
+		const { vm, viewId, nodeId } = setupNode(row(), ["1"]);
+		vm.setApiItemClickAction(viewId, nodeId, "1", { kind: "none" });
+		expect(vm.setApiItemClickAction(viewId, nodeId, "1", { kind: "shell", value: "x" } as never)).toBe(false);
+		expect(vm.getNode(viewId, nodeId)!.apiItemState!["1"].clickAction).toEqual({ kind: "none" });
+	});
+
+	it("a module or Folder can never be given a None (setClickAction refuses it)", () => {
+		const { vm, viewId, nodeId } = setupNode(row(), ["1"]);
+		expect(vm.setClickAction(viewId, nodeId, { kind: "none" } as never)).toBe(false);
+		expect(vm.getNode(viewId, nodeId)!.clickAction).toBeUndefined();
 	});
 });

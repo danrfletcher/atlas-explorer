@@ -121,7 +121,7 @@ function buildFixture(
 	app.metadataCache.getFileCache = ((f: TFile) => caches[f.path] ?? null) as App["metadataCache"]["getFileCache"];
 	app.metadataCache.getFirstLinkpathDest = ((linkpath: string) =>
 		(app.vault.getAbstractFileByPath(`${linkpath}.md`) ?? app.vault.getAbstractFileByPath(linkpath)) as TFile | null) as App["metadataCache"]["getFirstLinkpathDest"];
-	const settings: AtlasSettings = { ...DEFAULT_SETTINGS, noAutoPromoteFolders: [], ...settingsOverride };
+	const settings: AtlasSettings = { ...DEFAULT_SETTINGS, autoPromotion: true, noAutoPromoteFolders: [], ...settingsOverride };
 	const index = new UnitIndex(app, settings, manualPromotions, {}, [], addedItems);
 	index.rebuild();
 	const views = new ViewsManager(app, [], "", () => {});
@@ -150,7 +150,7 @@ function buildBlockAndFolderFixture(noAutoPromoteFolders: string[]) {
 	app.metadataCache.getFileCache = ((f: TFile) => caches[f.path] ?? null) as App["metadataCache"]["getFileCache"];
 	app.metadataCache.getFirstLinkpathDest = ((linkpath: string) =>
 		(app.vault.getAbstractFileByPath(`${linkpath}.md`) ?? app.vault.getAbstractFileByPath(linkpath)) as TFile | null) as App["metadataCache"]["getFirstLinkpathDest"];
-	const settings: AtlasSettings = { ...DEFAULT_SETTINGS, noAutoPromoteFolders };
+	const settings: AtlasSettings = { ...DEFAULT_SETTINGS, autoPromotion: true, noAutoPromoteFolders };
 	const index = new UnitIndex(app, settings, [], {}, [], []);
 	index.rebuild();
 	const views = new ViewsManager(app, [], "", () => {});

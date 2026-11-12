@@ -49,7 +49,7 @@ describe("G29 — menu gating reads the shared kind tag itself, not just notFoun
 	const folderNode: ViewNode = { id: "folder", type: "meta", label: "Folder", children: [] };
 
 	function buildMenu(item: ApiItemState) {
-		const fake = { plugin: { viewsManager: { removeApiItem: vi.fn(), clearApiItemNoteRef: vi.fn() } } };
+		const fake = { plugin: { viewsManager: { removeApiItem: vi.fn(), clearApiItemNoteRef: vi.fn(), getNode: () => ({ ...folderNode, apiItemState: { [item.id]: item } }) } } };
 		let built: Menu | undefined;
 		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
 			built = this;

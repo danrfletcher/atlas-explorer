@@ -704,7 +704,7 @@ describe("renderInboxSection — dismiss wins over re-promotion, end to end (G10
 			return destPath ? (app.vault.getAbstractFileByPath(destPath) as TFile) : null;
 		}) as App["metadataCache"]["getFirstLinkpathDest"];
 
-		const index = new UnitIndex(app, DEFAULT_SETTINGS, []);
+		const index = new UnitIndex(app, { ...DEFAULT_SETTINGS, autoPromotion: true }, []);
 		index.rebuild();
 		const targetRef = file("ModuleB/Target.md");
 		index.setDismissed(targetRef, "global", true);

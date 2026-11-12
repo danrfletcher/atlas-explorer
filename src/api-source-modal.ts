@@ -2,6 +2,7 @@ import { App, ButtonComponent, Modal, Notice, Platform, Setting, TFile, TFolder,
 import { collectFrontmatterKeys, filterYamlKeySuggestions } from "./yaml-key-suggest";
 import { sanitizeFolderFilters } from "./views";
 import { canSaveApiSource, findArrayFields, isMapError, isValidExtraFieldName, mapResponseRows, sampleFieldsForArrayField } from "./api-mapping";
+import { checkClickFunctionSyntax, validateClickFunctionSource } from "./api-click-function";
 import { generateJsFromMapping, runJsMapping, validateJsSource } from "./api-js-mapping";
 import { httpGetJson } from "./api-http";
 import { obsidianRequestImpl } from "./api-request-obsidian";
@@ -47,6 +48,14 @@ export const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "folder", label: "Folder" },
 	{ value: "markdown-table", label: "Markdown table" },
 	{ value: "csv", label: "CSV" },
+];
+
+/** Atlas-18 (G7): the Click function helper text. Each line is one paragraph; together they state the whole contract. */
+export const CLICK_FUNCTION_HELP: string[] = [
+	"Runs when you click a row (or press Enter on it), unless the row has its own Click action. It decides what the row does, so rows added by a refresh work with nothing set by hand.",
+	"item is { id, label, secondary, extra }. extra holds the row's extra mapped fields and is empty on a not-found row, so guard it (item.extra.path may be undefined).",
+	'Return { kind: "terminal", argv: [...] } to run a command (no shell, no {field} placeholders), { kind: "command", id } to run an Obsidian command, { kind: "uri", uri } to open a URI, { kind: "none" } to do nothing, or return nothing to fall through to the click action above.',
+	"The function must be synchronous: an async function or a returned Promise is rejected with a notice. Any other return value, or an error thrown, also shows a notice and runs nothing.",
 ];
 
 const MAPPING_TARGETS: { key: "idField" | "labelField" | "secondaryField"; label: string; required: boolean }[] = [
@@ -96,6 +105,12 @@ export class ApiSourceModal extends Modal {
 	 * side's state until the user actually confirms discarding it. */
 	private mappingMode: "drag" | "js";
 	private jsSource: string;
+	/** Atlas-18 (G7): the Click function's source, API sources only. Empty means no function; Save then
+	 * stores `clickFunction` as absent. */
+	private clickFunction = "";
+	/** The Click function section's inline error line (null until rendered); `save()` writes the Save-time
+	 * "is not a function" error here. */
+	private clickFunctionErrorEl: HTMLElement | null = null;
 	/** Test button output (row/skip/truncate summary or the mapping error) — mode-aware, never saves
 	 * or touches the cache. Persists across re-renders until the next Test run, a mode switch, or a
 	 * fresh Fetch sample. */
@@ -181,6 +196,7 @@ export class ApiSourceModal extends Modal {
 			this.mappingMode = initial.mappingMode === "js" ? "js" : "drag";
 			this.jsSource = initial.jsSource ?? "";
 			this.action = initial.action ?? initial.clickAction ?? "open-attachment";
+			this.clickFunction = initial.clickFunction ?? "";
 			this.command = initial.command ?? "";
 			const rawExtras = initial.mapping?.extraFields;
 			if (rawExtras && typeof rawExtras === "object") {
@@ -240,6 +256,7 @@ export class ApiSourceModal extends Modal {
 		this.extraFields = [];
 		this.mappingMode = "drag";
 		this.jsSource = "";
+		this.clickFunction = "";
 		this.action = "open-attachment";
 		this.command = "";
 		this.sampleFields = [];
@@ -482,6 +499,41 @@ export class ApiSourceModal extends Modal {
 			commandErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
 			updateCommandValidity();
 		}
+
+		this.renderClickFunctionSection(contentEl);
+	}
+
+	/** Atlas-18 (G7/G8): the Click function section, shown for every API source (drag-mapped or JS-mapped)
+	 * and only for API sources. Typing only mutates the error line and the Save button, never re-renders,
+	 * so the modal's scroll position is untouched. Typing parses the source only (nothing in the box runs);
+	 * Save evaluates it once to check that it is a function, and never calls that function. */
+	private renderClickFunctionSection(contentEl: HTMLElement): void {
+		new Setting(contentEl).setName("Click function").setHeading();
+		contentEl.createEl("p", {
+			cls: "atlas-api-js-warning atlas-api-click-function-warning",
+			text: "JavaScript runs with Atlas's full trust — there is no sandbox. An infinite loop in this function has no timeout of its own and will freeze Obsidian.",
+		});
+
+		let errorEl: HTMLElement | null = null;
+		const updateValidity = () => {
+			const validation = this.clickFunction.trim() === "" ? ({ ok: true } as const) : checkClickFunctionSyntax(this.clickFunction);
+			errorEl?.setText(validation.ok ? "" : validation.error);
+			this.updateSaveButton();
+		};
+		const setting = new Setting(contentEl).setName("Function").addTextArea((text) => {
+			text.inputEl.addClass("atlas-api-click-function");
+			text.setPlaceholder('(item) => item.extra.path ? { kind: "terminal", argv: ["open", "-a", item.extra.path] } : undefined');
+			text.setValue(this.clickFunction).onChange((value) => {
+				this.clickFunction = value;
+				updateValidity();
+			});
+		});
+		setting.settingEl.addClass("atlas-api-click-function-setting");
+		const help = contentEl.createDiv({ cls: "atlas-api-click-function-help setting-item-description" });
+		for (const line of CLICK_FUNCTION_HELP) help.createEl("p", { text: line });
+		errorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
+		this.clickFunctionErrorEl = errorEl;
+		updateValidity();
 	}
 
 	/** PR-3/PR-7: the mapping-mode dropdown, JS textarea, Test button, array-field dropdown, and
@@ -1313,6 +1365,10 @@ export class ApiSourceModal extends Modal {
 			return false;
 		}
 		if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
+		// Atlas-18 (G8): a Click function with a syntax error blocks Save. An empty box is fine (no function).
+		// Parse-only here: canSave runs on every keystroke, so the box's code must not run. `save()` does the
+		// full check (does it evaluate to a function?) once.
+		if (this.clickFunction.trim() !== "" && !checkClickFunctionSyntax(this.clickFunction).ok) return false;
 
 		// Check extra fields validity: valid identifier, unique
 		for (let i = 0; i < this.extraFields.length; i++) {
@@ -1474,6 +1530,15 @@ export class ApiSourceModal extends Modal {
 			return;
 		}
 		// canSave() above guarantees selectedType === "api" by this point.
+		// The one place the Click function box is evaluated (to check that it is a function): once, on Save.
+		if (this.clickFunction.trim() !== "") {
+			const compiled = validateClickFunctionSource(this.clickFunction);
+			if (!compiled.ok) {
+				this.clickFunctionErrorEl?.setText(compiled.error);
+				new Notice(`Atlas: Click function — ${compiled.error}`);
+				return;
+			}
+		}
 		const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
 		const extraFieldsRecord = this.buildExtraFieldsRecord();
 		const source: ApiSourceConfig = {
@@ -1496,6 +1561,8 @@ export class ApiSourceModal extends Modal {
 			clickAction: this.action,
 			command: this.action === "run-command" ? this.command.trim() : undefined,
 		};
+		// G7: an empty (or whitespace-only) box stores no function at all: the key is absent, not "".
+		if (this.clickFunction.trim() !== "") source.clickFunction = this.clickFunction;
 		this.close();
 		this.onSave({ type: "api", source, headers: this.headers.filter((h) => h.key.trim().length > 0) });
 	}

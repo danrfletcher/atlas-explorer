@@ -45,6 +45,11 @@ vi.mock("obsidian", () => {
 				this.textContent = t;
 			},
 			setAttr() {},
+			/** Atlas-18: the Click function section tags its textarea and setting row with classes. */
+			classes: [] as string[],
+			addClass(cls: string) {
+				this.classes.push(cls);
+			},
 			__listeners: {} as Record<string, ((evt: any) => void)[]>,
 			addEventListener(type: string, cb: (evt: any) => void) {
 				(this.__listeners[type] ??= []).push(cb);
@@ -83,6 +88,12 @@ vi.mock("obsidian", () => {
 			this.value = v;
 			this.changeCb?.(v);
 		}
+	}
+
+	/** Atlas-18: `addTextArea` (the Click function box). Same typing contract as `FakeTextComponent`, plus the
+	 * `inputEl` the section styles. */
+	class FakeTextAreaComponent extends FakeTextComponent {
+		inputEl: any = createFakeElement();
 	}
 
 	class FakeToggleComponent {
@@ -177,6 +188,7 @@ vi.mock("obsidian", () => {
 		name = "";
 		components: unknown[] = [];
 		controlEl: any = createFakeElement();
+		settingEl: any = createFakeElement();
 		constructor(public containerEl: any) {
 			if (!containerEl.__settings) containerEl.__settings = [];
 			containerEl.__settings.push(this);
@@ -193,6 +205,12 @@ vi.mock("obsidian", () => {
 		}
 		addText(cb: (t: FakeTextComponent) => void) {
 			const t = new FakeTextComponent();
+			cb(t);
+			this.components.push(t);
+			return this;
+		}
+		addTextArea(cb: (t: FakeTextAreaComponent) => void) {
+			const t = new FakeTextAreaComponent();
 			cb(t);
 			this.components.push(t);
 			return this;
@@ -284,7 +302,7 @@ vi.mock("obsidian", () => {
 });
 
 import { TFile, TFolder } from "obsidian";
-import { ApiSourceModal } from "../../src/api-source-modal";
+import { ApiSourceModal, CLICK_FUNCTION_HELP } from "../../src/api-source-modal";
 import { ApiSourceConfig } from "../../src/types";
 
 function settingNamed(modal: unknown, name: string): any {
@@ -1036,5 +1054,214 @@ describe("PR-1 (G1) — refresh toggles per source type", () => {
 
 		expect(onSave).toHaveBeenCalledTimes(1);
 		expect(JSON.stringify(onSave.mock.calls[0][0])).not.toMatch(/refreshEveryMinutes|refreshOnViewLoad/);
+	});
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Atlas-18 G7/G8: the Click function section of the Data source modal.
+// ---------------------------------------------------------------------------------------------------------------
+describe("Atlas-18 G7/G8 — the Click function section", () => {
+	const PLAN_FUNCTION = `(item) => item.extra.path ? { kind: "terminal", argv: ["open", "-a", item.extra.path] } : { kind: "command", id: "app-runner:open-" + item.id }`;
+	const jsConfig = (): ApiSourceConfig => ({ ...validConfig(), mappingMode: "js", jsSource: "(response) => []" });
+	const open = (config: ApiSourceConfig | null, onSave = vi.fn()) => {
+		const modal = new ApiSourceModal({} as any, config, [], onSave);
+		(modal as any).onOpen();
+		return { modal: modal as any, onSave };
+	};
+	const box = (modal: any) => settingNamed(modal, "Function").components[0];
+	const saveButton = (modal: any) => modal.saveButton;
+	const errorTexts = (modal: any) => findAllByClass(modal.contentEl, "atlas-api-field-error").map((e) => e.textContent);
+	const savedSource = (onSave: ReturnType<typeof vi.fn>): ApiSourceConfig => onSave.mock.calls[0][0].source;
+	/** Heading names in render order. */
+	const headings = (modal: any) => modal.contentEl.__settings.map((s: any) => s.name);
+
+	it.each([
+		["a drag-mapped source", validConfig()],
+		["a JS-mapped source", jsConfig()],
+	])("is shown for %s, with a code box", (_label, config) => {
+		const { modal } = open(config);
+		expect(settingNamed(modal, "Click function")).toBeTruthy();
+		expect(box(modal)).toBeTruthy();
+	});
+
+	it("is shown for a brand-new API source once the type is chosen", () => {
+		const { modal } = open(null);
+		expect(settingNamed(modal, "Click function")).toBeUndefined();
+		settingNamed(modal, "Source type").components[0].select("api");
+		expect(settingNamed(modal, "Click function")).toBeTruthy();
+	});
+
+	it.each(["folder", "csv", "markdown-table"] as const)("is not shown for a %s source (only API sources get it)", (type) => {
+		const { modal } = open(null);
+		settingNamed(modal, "Source type").components[0].select(type);
+		expect(settingNamed(modal, "Click function")).toBeUndefined();
+	});
+
+	it("sits under the Click action section: its heading comes right after the Click action controls", () => {
+		const { modal } = open(validConfig());
+		const names = headings(modal);
+		const clickAction = names.indexOf("Click action");
+		expect(clickAction).toBeGreaterThan(-1);
+		expect(names[clickAction + 1]).toBe("Action on click");
+		expect(names.indexOf("Click function")).toBe(clickAction + 2);
+		expect(names[names.indexOf("Click function") + 1]).toBe("Function");
+	});
+
+	it("with the run-command source action chosen, the Click function heading still follows the command field", () => {
+		const { modal } = open(validConfig());
+		settingNamed(modal, "Action on click").components[0].select("run-command");
+		const names = headings(modal);
+		expect(names.slice(names.indexOf("Click action"), names.indexOf("Click function") + 1)).toEqual(["Click action", "Action on click", "Command", "Click function"]);
+	});
+
+	it("helper text states the whole contract", () => {
+		const { modal } = open(validConfig());
+		const [help] = findAllByClass(modal.contentEl, "atlas-api-click-function-help");
+		const text = help.children.map((c: any) => c.textContent).join("\n");
+		expect(text).toBe(CLICK_FUNCTION_HELP.join("\n"));
+		expect(text).toContain("Runs when you click a row");
+		expect(text).toContain("item is { id, label, secondary, extra }");
+		expect(text).toContain('{ kind: "terminal", argv: [...] }');
+		expect(text).toContain('{ kind: "command", id }');
+		expect(text).toContain('{ kind: "uri", uri }');
+		expect(text).toContain('{ kind: "none" }');
+		expect(text).toContain("return nothing to fall through");
+		expect(text).toContain("must be synchronous");
+		expect(text).toMatch(/guard it/);
+		expect(text).toContain("empty on a not-found row");
+	});
+
+	it("shows the trust warning (no sandbox, no timeout) in the same style as the JS mapping warning", () => {
+		const { modal } = open(validConfig());
+		const [warning] = findAllByClass(modal.contentEl, "atlas-api-click-function-warning");
+		expect(warning.cls.split(/\s+/)).toContain("atlas-api-js-warning");
+		expect(warning.textContent).toContain("no sandbox");
+		expect(warning.textContent).toContain("no timeout");
+	});
+
+	it("shows the warning for a JS-mapped source too (twice: mapping's and the function's)", () => {
+		const { modal } = open(jsConfig());
+		expect(findAllByClass(modal.contentEl, "atlas-api-js-warning")).toHaveLength(2);
+	});
+
+	it("an empty box stores clickFunction as absent (no key at all)", () => {
+		const { modal, onSave } = open(validConfig());
+		saveButton(modal).simulateClick();
+		expect(onSave).toHaveBeenCalledTimes(1);
+		expect(Object.prototype.hasOwnProperty.call(savedSource(onSave), "clickFunction")).toBe(false);
+	});
+
+	it("a whitespace-only box also stores it as absent", () => {
+		const { modal, onSave } = open(validConfig());
+		box(modal).type("  \n ");
+		expect(saveButton(modal).disabled).toBe(false);
+		saveButton(modal).simulateClick();
+		expect(Object.prototype.hasOwnProperty.call(savedSource(onSave), "clickFunction")).toBe(false);
+	});
+
+	it("clearing a stored function and saving removes it", () => {
+		const { modal, onSave } = open({ ...validConfig(), clickFunction: PLAN_FUNCTION });
+		expect(box(modal).value).toBe(PLAN_FUNCTION);
+		box(modal).type("");
+		saveButton(modal).simulateClick();
+		expect(Object.prototype.hasOwnProperty.call(savedSource(onSave), "clickFunction")).toBe(false);
+	});
+
+	it("GP: a syntax error blocks Save with the message inline, and typing a valid function re-enables it", () => {
+		const { modal, onSave } = open(validConfig());
+		box(modal).type("(item) => {");
+		expect(saveButton(modal).disabled).toBe(true);
+		const shown = errorTexts(modal).filter((t) => t);
+		expect(shown).toHaveLength(1);
+		expect(shown[0].length).toBeGreaterThan(0);
+		saveButton(modal).simulateClick();
+		expect(onSave).not.toHaveBeenCalled();
+
+		box(modal).type(PLAN_FUNCTION);
+		expect(saveButton(modal).disabled).toBe(false);
+		expect(errorTexts(modal).filter((t) => t)).toEqual([]);
+	});
+
+	it("GP: source that does not evaluate to a function passes the typing check but is refused at Save, with the message inline", () => {
+		const { modal, onSave } = open(validConfig());
+		box(modal).type("42");
+		expect(saveButton(modal).disabled).toBe(false);
+		expect(errorTexts(modal).filter((t) => t)).toEqual([]);
+		saveButton(modal).simulateClick();
+		expect(onSave).not.toHaveBeenCalled();
+		const shown = errorTexts(modal).filter((t) => t);
+		expect(shown).toHaveLength(1);
+		expect(shown[0]).toContain("must be a function");
+
+		box(modal).type(PLAN_FUNCTION);
+		expect(errorTexts(modal).filter((t) => t)).toEqual([]);
+		saveButton(modal).simulateClick();
+		expect(onSave).toHaveBeenCalledTimes(1);
+	});
+
+	it("PR-1 R2: code in the box does not run while typing or on open; it is evaluated once, at Save", () => {
+		const g = globalThis as unknown as { __modalIife?: number };
+		delete g.__modalIife;
+		const iife = "(() => { globalThis.__modalIife = (globalThis.__modalIife || 0) + 1; return (item) => null; })()";
+		const { modal, onSave } = open({ ...validConfig(), clickFunction: iife });
+		expect(g.__modalIife).toBeUndefined();
+		box(modal).type(iife + " ");
+		box(modal).type(iife);
+		expect(g.__modalIife).toBeUndefined();
+		expect(saveButton(modal).disabled).toBe(false);
+		saveButton(modal).simulateClick();
+		expect(onSave).toHaveBeenCalledTimes(1);
+		expect(g.__modalIife).toBe(1);
+	});
+
+	it("blocks Save for a JS-mapped source too", () => {
+		const { modal } = open(jsConfig());
+		box(modal).type("(item) => {");
+		expect(saveButton(modal).disabled).toBe(true);
+	});
+
+	it("GP7: the plan's function saves, and reopening the modal shows it unchanged", () => {
+		const first = open(validConfig());
+		box(first.modal).type(PLAN_FUNCTION);
+		saveButton(first.modal).simulateClick();
+		const saved = savedSource(first.onSave);
+		expect(saved.clickFunction).toBe(PLAN_FUNCTION);
+
+		const reopened = open(saved);
+		expect(box(reopened.modal).value).toBe(PLAN_FUNCTION);
+	});
+
+	it("Save compiles but never calls the function", () => {
+		const g = globalThis as unknown as { __modalSideEffect?: number };
+		delete g.__modalSideEffect;
+		const { modal, onSave } = open(validConfig());
+		box(modal).type("(item) => { globalThis.__modalSideEffect = 1; return null; }");
+		saveButton(modal).simulateClick();
+		expect(onSave).toHaveBeenCalledTimes(1);
+		expect(g.__modalSideEffect).toBeUndefined();
+	});
+
+	it("typing does not re-render the modal (so its scroll position is untouched)", () => {
+		const { modal } = open(validConfig());
+		modal.modalEl.scrollTop = 240;
+		box(modal).type("(item) => {");
+		box(modal).type(PLAN_FUNCTION);
+		expect(modal.modalEl.scrollTop).toBe(240);
+	});
+
+	it("switching the source type away and back to API discards the typed function", () => {
+		const { modal } = open({ ...validConfig(), clickFunction: PLAN_FUNCTION });
+		const type = settingNamed(modal, "Source type").components[0];
+		type.select("csv");
+		type.select("api");
+		expect(box(modal).value).toBe("");
+	});
+
+	it("the existing run-command Save payload is unchanged when there is no function", () => {
+		const { modal, onSave } = open({ ...validConfig(), mapping: { idField: "id", labelField: "name", extraFields: { path: "p" } } });
+		settingNamed(modal, "Action on click").components[0].select("run-command");
+		settingNamed(modal, "Command").components[0].type("echo {path}");
+		saveButton(modal).simulateClick();
+		expect(savedSource(onSave)).not.toHaveProperty("clickFunction");
 	});
 });

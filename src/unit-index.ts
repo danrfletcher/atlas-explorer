@@ -1,6 +1,6 @@
 import { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AtlasSettings, isCoveredByNoAutoPromote, normalizeNoAutoPromoteFolders } from "./settings";
-import { AddedItem, DismissScope, Unit, UnitRef, rewriteRefPath, unitRefKey, unitRefsEqual, unitToRef } from "./types";
+import { AddedItem, DismissScope, Unit, UnitRef, rewritePathString, rewriteRefPath, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 
 /** PR-2: adds or removes `ref` from `list` by `unitRefKey` equality, returning a new array only when
  * membership actually changes (so callers can skip a no-op persist). */
@@ -22,6 +22,24 @@ function isUsableAddedItem(item: AddedItem): boolean {
  * longer an addable item — it already surfaces as a `folder-unit` with its own placement. */
 function isRootFolderPath(path: string): boolean {
 	return !path.includes("/");
+}
+
+/** True when `itemPath` is `hiddenPath` or lives under it (hiding a folder hides what it holds). */
+function isPathHiddenBy(itemPath: string, hiddenPath: string): boolean {
+	return itemPath === hiddenPath || itemPath.startsWith(`${hiddenPath}/`);
+}
+
+/** `data.json` is hand-editable: keeps only string-array values under string keys, dropping anything
+ * else (and duplicate or empty entries) rather than letting a bad shape throw later. */
+export function sanitizeHiddenModuleItems(raw: unknown): Record<string, string[]> {
+	const out: Record<string, string[]> = {};
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+	for (const [modulePath, items] of Object.entries(raw as Record<string, unknown>)) {
+		if (!Array.isArray(items)) continue;
+		const paths = Array.from(new Set(items.filter((item): item is string => typeof item === "string" && item.length > 0)));
+		if (paths.length > 0) out[modulePath] = paths;
+	}
+	return out;
 }
 
 /**
@@ -54,6 +72,10 @@ export class UnitIndex {
 	private dismissedGlobal: UnitRef[];
 	/** PR-2: units manually added to the inbox via "+" — distinct from `manualPromotions`. */
 	private addedItems: AddedItem[];
+	/** PR-2 (G2): per module path, the vault paths of items inside it that the user has hidden from the
+	 * Module Contents modal. Pure plugin state: nothing on disk changes, and placed units are untouched.
+	 * A hidden item that only a link promoted is kept out of the inbox (`isSuppressedFromInbox`). */
+	private hiddenModuleItems: Record<string, string[]>;
 	private changeListeners = new Set<() => void>();
 	/** Paths whose units are kept out of `getUnits` (a count each, so overlapping holds are safe). */
 	private held = new Map<string, number>();
@@ -70,9 +92,11 @@ export class UnitIndex {
 		manualPromotions: UnitRef[],
 		dismissedByView: Record<string, UnitRef[]> = {},
 		dismissedGlobal: UnitRef[] = [],
-		addedItems: AddedItem[] = []
+		addedItems: AddedItem[] = [],
+		hiddenModuleItems: Record<string, string[]> = {}
 	) {
 		this.manualPromotions = manualPromotions;
+		this.hiddenModuleItems = sanitizeHiddenModuleItems(hiddenModuleItems);
 		this.dismissedByView = new Map(Object.entries(dismissedByView));
 		this.dismissedGlobal = dismissedGlobal;
 		this.addedItems = addedItems;
@@ -267,13 +291,136 @@ export class UnitIndex {
 
 	/** True when `unit` is promoted only because a link or embed reaches it, and its path sits under a
 	 * folder listed in `noAutoPromoteFolders`. Manual promotions and "added" items are never blocked.
-	 * Read by the inbox lists only: promotion itself is unchanged, so placed items keep resolving. */
+	 * The inbox lists read it through `isSuppressedFromInbox`: promotion itself is unchanged, so
+	 * placed items keep resolving. */
 	isLinkOnlyInNoAutoPromoteFolder(unit: Unit): boolean {
-		if (unit.type !== "promoted-file" && unit.type !== "promoted-folder" && unit.type !== "promoted-block") return false;
 		if (!isCoveredByNoAutoPromote(unit.path, this.getNormalizedNoAutoPromoteFolders())) return false;
+		return this.isLinkOnlyPromotion(unit);
+	}
+
+	/** PR-1 (G1): the classification helper. True when `unit` is a promoted-* unit that no user choice
+	 * backs: not in `manualPromotions` and not an `addedItems` entry, so only a link or embed (or a
+	 * Folder source's managed ref) put it in the index. Never true for base units (folders, root
+	 * files, free blocks) or for `added-*` units. */
+	isLinkOnlyPromotion(unit: Unit): boolean {
+		if (unit.type !== "promoted-file" && unit.type !== "promoted-folder" && unit.type !== "promoted-block") return false;
 		const ref = unitToRef(unit);
 		if (this.isAdded(ref)) return false;
 		return !this.manualPromotions.some((manual) => unitRefsEqual(manual, ref));
+	}
+
+	/** PR-1 (G1): the one inbox rule both inbox lists read. While `settings.autoPromotion` is off every
+	 * link-only promoted unit is kept out, whatever folder it sits in (this global suppression takes
+	 * precedence over `noAutoPromoteFolders`). While it is on, link-only units under a
+	 * `noAutoPromoteFolders` entry are kept out, and so is a link-only unit the user hid inside a module
+	 * (PR-2, `isModuleItemHidden`). Manual promotions, "added" items and placed units are never kept out
+	 * by a hide. Read live on every call, so flipping the setting or a hide takes effect on the next
+	 * render with no index rebuild; promotion itself is unchanged, so placed units keep resolving. */
+	isSuppressedFromInbox(unit: Unit): boolean {
+		if (!this.settings.autoPromotion) return this.isLinkOnlyPromotion(unit);
+		if (this.isLinkOnlyPromotion(unit) && this.isModuleItemHidden(unit.path)) return true;
+		return this.isLinkOnlyInNoAutoPromoteFolder(unit);
+	}
+
+	/** PR-2 (G2): a copy of the hidden-item record, one path list per module that has any. */
+	getHiddenModuleItems(): Record<string, string[]> {
+		return Object.fromEntries(Object.entries(this.hiddenModuleItems).map(([modulePath, items]) => [modulePath, [...items]]));
+	}
+
+	/** PR-2 (G2): whether `path` is itself hidden in some module, or sits under a hidden folder. */
+	isModuleItemHidden(path: string): boolean {
+		return Object.values(this.hiddenModuleItems).some((items) => items.some((hidden) => isPathHiddenBy(path, hidden)));
+	}
+
+	/** The hidden-list entry (in any module) that hides `path`: `path` itself or the nearest folder above
+	 * it, or null when nothing does. This is the `isModuleItemHidden` rule with its reason attached, so
+	 * a module opened directly can say why everything in it is kept out of the inbox. */
+	findHiddenCover(path: string): string | null {
+		let best: string | null = null;
+		for (const items of Object.values(this.hiddenModuleItems)) {
+			for (const hidden of items) {
+				if (isPathHiddenBy(path, hidden) && (best === null || hidden.length > best.length)) best = hidden;
+			}
+		}
+		return best;
+	}
+
+	/** Whether `itemPath` itself is on the hidden list of any module. This is what the eye button shows:
+	 * the flags are stored per module, but a hide made while viewing `Mod` also applies to the same item
+	 * seen through its added sub-folder module `Mod/sub` (`isModuleItemHidden` reads every module), so the
+	 * eye must read every module too or it would disagree with the inbox. */
+	isItemHiddenInAnyModule(itemPath: string): boolean {
+		return Object.values(this.hiddenModuleItems).some((items) => items.includes(itemPath));
+	}
+
+	/** Unhides `itemPath` in every module that lists it, in one change notification. Returns whether
+	 * anything changed; the caller persists. */
+	unhideItemEverywhere(itemPath: string): boolean {
+		let changed = false;
+		for (const [modulePath, items] of Object.entries(this.hiddenModuleItems)) {
+			if (!items.includes(itemPath)) continue;
+			changed = true;
+			const next = items.filter((path) => path !== itemPath);
+			if (next.length === 0) delete this.hiddenModuleItems[modulePath];
+			else this.hiddenModuleItems[modulePath] = next;
+		}
+		if (changed) this.notifyChange();
+		return changed;
+	}
+
+	/** PR-2 (G2): hides or unhides `itemPath` inside `modulePath` (exact path, not its descendants). Only
+	 * the in-memory record changes; the caller persists. Listeners are told, so the inbox redraws.
+	 * Returns whether anything changed — an unhide of a path that was not hidden is a no-op. */
+	setModuleItemHidden(modulePath: string, itemPath: string, hidden: boolean): boolean {
+		const current = this.hiddenModuleItems[modulePath] ?? [];
+		const present = current.includes(itemPath);
+		if (present === hidden) return false;
+		const next = hidden ? [...current, itemPath] : current.filter((path) => path !== itemPath);
+		if (next.length === 0) delete this.hiddenModuleItems[modulePath];
+		else this.hiddenModuleItems[modulePath] = next;
+		this.notifyChange();
+		return true;
+	}
+
+	/** PR-2 (G2): a deleted file or folder (and everything under it) leaves the hidden record, and so
+	 * does a deleted module's whole entry. Returns whether anything was removed; the caller persists. */
+	pruneHiddenModuleItems(deletedPath: string): boolean {
+		let changed = false;
+		const next: Record<string, string[]> = {};
+		for (const [modulePath, items] of Object.entries(this.hiddenModuleItems)) {
+			if (isPathHiddenBy(modulePath, deletedPath)) {
+				changed = true;
+				continue;
+			}
+			const kept = items.filter((path) => !isPathHiddenBy(path, deletedPath));
+			if (kept.length !== items.length) changed = true;
+			if (kept.length > 0) next[modulePath] = kept;
+		}
+		if (changed) this.hiddenModuleItems = next;
+		return changed;
+	}
+
+	/** PR-2 (G2): follows a rename or move — the module key and every hidden path are rewritten by exact
+	 * path or `oldPath/` prefix. An item that is moved out of its module no longer belongs to it, so its
+	 * entry is dropped rather than left pointing outside. Exception: a child's rename event can arrive
+	 * before its parent folder's, so the module key is still the old one here. A module folder that no
+	 * longer exists at its key was renamed (its own event follows and re-keys it), so the item is kept at
+	 * its rewritten path rather than treated as moved out. Returns whether anything changed; the caller
+	 * persists. */
+	rewriteHiddenModuleItems(oldPath: string, newPath: string): boolean {
+		let changed = false;
+		const next: Record<string, string[]> = {};
+		for (const [modulePath, items] of Object.entries(this.hiddenModuleItems)) {
+			const newModule = rewritePathString(modulePath, oldPath, newPath);
+			const rewritten = items.map((path) => rewritePathString(path, oldPath, newPath));
+			const moduleRenamedAway = !this.app.vault.getAbstractFileByPath(newModule);
+			const kept = Array.from(new Set(rewritten.filter((path) => moduleRenamedAway || path.startsWith(`${newModule}/`))));
+			if (newModule !== modulePath || kept.length !== items.length || kept.some((path, i) => path !== items[i])) changed = true;
+			if (kept.length === 0) continue;
+			next[newModule] = [...(next[newModule] ?? []), ...kept.filter((path) => !(next[newModule] ?? []).includes(path))];
+		}
+		if (changed) this.hiddenModuleItems = next;
+		return changed;
 	}
 
 	/** R2: the memoised read side of `noAutoPromoteFoldersCache` — recomputes only when the settings
@@ -530,11 +677,12 @@ export class UnitIndex {
 	}
 
 	/** Points every dismissed/added ref at `oldPath` (or under it) to `newPath`, the same way
-	 * `rewriteManualPromotions` does; true if any changed. Independent of `rebuild()`, which only
+	 * `rewriteManualPromotions` does, and follows the same rename in the hidden Module Contents record
+	 * (`rewriteHiddenModuleItems`); true if any changed. Independent of `rebuild()`, which only
 	 * recomputes `Unit` classification and never touches this state — must run even on a folder
 	 * rename, where `onVaultRename` takes the full-rebuild branch below. */
 	rewriteDismissedAndAddedPaths(oldPath: string, newPath: string): boolean {
-		let changed = false;
+		let changed = this.rewriteHiddenModuleItems(oldPath, newPath); // PR-2: same rename hook, same persist trigger
 
 		for (const [viewId, refs] of this.dismissedByView) {
 			const rewritten = refs.map((ref) => rewriteRefPath(ref, oldPath, newPath));
@@ -576,7 +724,7 @@ export class UnitIndex {
 		return changed;
 	}
 
-	/** Returns whether any manual promotion's, dismissed, or added-item path was rewritten, so
+	/** Returns whether any manual promotion's, dismissed, added-item or hidden-module-item path was rewritten, so
 	 * callers know to persist. */
 	onVaultRename(file: TAbstractFile, oldPath: string): boolean {
 		const start = performance.now();

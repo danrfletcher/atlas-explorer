@@ -220,11 +220,11 @@ describe("PR-2 (GP1, GP2, E9) — the pane repaints once per user action, and no
 		vi.useRealTimers();
 	});
 
-	async function open() {
+	async function open(settingsOverride: Partial<typeof DEFAULT_SETTINGS> = {}) {
 		const app = new MockApp();
 		app.vault.seedFile("Alpha.md");
 		app.vault.seedFile("Beta.md");
-		const unitIndex = new UnitIndex(app as unknown as App, { ...DEFAULT_SETTINGS }, [], {}, [], []);
+		const unitIndex = new UnitIndex(app as unknown as App, { ...DEFAULT_SETTINGS, ...settingsOverride }, [], {}, [], []);
 		unitIndex.rebuild();
 		const views = new ViewsManager(app as unknown as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [] }], "v1", () => {});
 		app.vault.on("create", (f: TAbstractFile) => unitIndex.onVaultCreate(f));
@@ -305,7 +305,8 @@ describe("PR-2 (GP1, GP2, E9) — the pane repaints once per user action, and no
 	 * mock metadata cache answers from `cache`, so adding or removing a link and editing the block's
 	 * text go through the real `computePromotions`, `resolveUnit` and `render()`. */
 	async function openWithBlockLink() {
-		const { app, unitIndex, views, resolved } = await open();
+		// A link promoting a block into the inbox only happens with auto-promotion on (PR-1, G1).
+		const { app, unitIndex, views, resolved } = await open({ autoPromotion: true });
 		const caches = new Map<string, { links?: { link: string }[]; blocks?: Record<string, { position: { start: { line: number } } }> }>();
 		const metadata = app.metadataCache as unknown as {
 			getFileCache: (f: TFile) => unknown;

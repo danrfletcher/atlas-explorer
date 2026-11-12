@@ -16,8 +16,10 @@ import { listOutsideChildren, resolveOutsidePath } from "./folder-source-outside
 import {
 	ApiClickAction,
 	ApiFieldMapping,
+	ApiItemClickAction,
 	ApiItemState,
 	ApiSourceConfig,
+	ClickAction,
 	CsvSourceConfig,
 	DEFAULT_VIEW_NAME,
 	FolderSourceConfig,
@@ -71,6 +73,35 @@ function isValidUnitRef(value: unknown): value is UnitRef {
 	return false;
 }
 
+/** Atlas-18 (G17): a `clickAction` loaded from `data.json` can be any JSON value. Keeps it only when
+ * `kind` is one of the three known kinds and `value` is a non-blank string; anything else (a non-object,
+ * an array, a missing/unknown kind, a non-string or blank value) is dropped, so the field becomes absent
+ * and the row falls back to today's behaviour. Extra keys are stripped by rebuilding the object. The
+ * value is kept exactly as stored (not trimmed). Never throws, and deliberately takes no account of the
+ * platform: a `terminal` action must survive a load on mobile, where running it is a runtime notice
+ * (E17/G13). */
+export function sanitizeClickAction(raw: unknown): ClickAction | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const { kind, value } = raw as { kind?: unknown; value?: unknown };
+	if (kind !== "terminal" && kind !== "command" && kind !== "uri") return undefined;
+	if (typeof value !== "string" || value.trim() === "") return undefined;
+	return { kind, value };
+}
+
+/** Atlas-18 (G10/G17): the same defensive load for an API item's Item override, which additionally may be
+ * the explicit `{ kind: "none" }` (kept as exactly that, distinct from absent). Anything else follows
+ * `sanitizeClickAction`. Only API items use this: a module or Folder never keeps a "none". */
+export function sanitizeApiItemClickAction(raw: unknown): ApiItemClickAction | undefined {
+	if (raw && typeof raw === "object" && !Array.isArray(raw) && (raw as { kind?: unknown }).kind === "none") return { kind: "none" };
+	return sanitizeClickAction(raw);
+}
+
+function sameClickAction(a: ApiItemClickAction | undefined, b: ApiItemClickAction | undefined): boolean {
+	if (!a || !b) return !a && !b;
+	if (a.kind === "none" || b.kind === "none") return a.kind === b.kind;
+	return a.kind === b.kind && a.value === b.value;
+}
+
 /** R20/E9: `apiItemState` entries come straight from `data.json` and can each be malformed
  * independently of the container being a well-shaped object — e.g. `{"1": {"id": "1"}}` (no label) or
  * `{"1": 5}`. Left unchecked, a missing/non-string `label` crashes `apiItemMatchesFilter` and
@@ -79,7 +110,7 @@ function isValidUnitRef(value: unknown): value is UnitRef {
  * repair (not an object, or no string `label`); everything else is dropped field-by-field rather than
  * discarding the whole row. `id` is always retaken from the state map's own key, since that's the
  * value every other lookup (by id) actually keys on. */
-function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
+export function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
 	if (!raw || typeof raw !== "object") return null;
 	const item = raw as Partial<ApiItemState>;
 	if (typeof item.label !== "string") return null;
@@ -92,6 +123,9 @@ function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
 	if (typeof item.lastSeenAt === "string" && !isNaN(new Date(item.lastSeenAt).getTime())) {
 		sanitized.lastSeenAt = item.lastSeenAt;
 	}
+	// Atlas-18 (G17): the Item override. Set only when well-formed, so an absent one stays absent.
+	const clickAction = sanitizeApiItemClickAction(item.clickAction);
+	if (clickAction) sanitized.clickAction = clickAction;
 	return sanitized;
 }
 
@@ -106,7 +140,7 @@ function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
  * `apiItemOrder` too: a Folder can legitimately have rows with no source at all (source removed, or a
  * `data.json` that dropped just the `apiSource` object by hand), and those rows are sanitized on their
  * own merits below, independent of whether `apiSource` survived. */
-function sanitizeApiFields(node: ViewNode): void {
+export function sanitizeApiFields(node: ViewNode): void {
 	if (node.apiSource) {
 		const raw = node.apiSource as Partial<ApiSourceConfig> & { mapping?: Partial<ApiFieldMapping> };
 		const mapping = raw.mapping;
@@ -146,6 +180,9 @@ function sanitizeApiFields(node: ViewNode): void {
 			const action: ApiClickAction | undefined =
 				rawAction === "none" || rawAction === "run-command" || rawAction === "open-attachment" ? rawAction : undefined;
 			const command = typeof raw.command === "string" ? raw.command : undefined;
+			// Atlas-18 (G7/G17): an empty box means no function, so an empty or whitespace-only string is stored as
+			// absent (PR-1 R2: the same rule the Data source modal applies on Save).
+			const clickFunction = typeof raw.clickFunction === "string" && raw.clickFunction.trim() !== "" ? raw.clickFunction : undefined;
 			node.apiSource = {
 				// PR-3 R1 fix: stamp the discriminant on every load, not only when the modal builds a
 				// fresh config — without it, every API source had `type === undefined` after a reload,
@@ -171,9 +208,17 @@ function sanitizeApiFields(node: ViewNode): void {
 				action,
 				clickAction: action,
 				command,
+				clickFunction,
 			};
 		}
 	}
+
+	// Atlas-18 (G17): a node's own Click action. Sanitised on every node (module, Folder or otherwise)
+	// because the field is plain data; whether a given node kind acts on it is the explorer's call. The key
+	// is deleted, not set to undefined, when there is nothing valid, so a load never adds a key.
+	const clickAction = sanitizeClickAction(node.clickAction);
+	if (clickAction) node.clickAction = clickAction;
+	else delete node.clickAction;
 
 	// G4: rows survive a source's removal as plain static rows — sanitize `apiItemState`/`apiItemOrder`
 	// whenever either is actually present (or a source exists to have produced them), rather than only
@@ -506,11 +551,14 @@ export function collectOutsideFolderSourceNodeIdPairs(original: ViewNode, clone:
 
 /** G7 (extended to G4's static rows): a deep copy of a Folder's per-id row state — `noteRef` is itself
  * an object, so a shallow copy of the map would still leave both copies' rows pointing at (and able to
- * mutate) the very same `UnitRef`. */
-function cloneApiItemState(state: Record<string, ApiItemState>): Record<string, ApiItemState> {
+ * mutate) the very same `UnitRef`. Atlas-18 (G17): the same goes for an Item override's `clickAction`,
+ * which is copied as a new object here; `cloneNode` then strips it, since an override lives on the item
+ * and is never carried across by a duplicate (E7). */
+export function cloneApiItemState(state: Record<string, ApiItemState>): Record<string, ApiItemState> {
 	const out: Record<string, ApiItemState> = {};
 	for (const [id, item] of Object.entries(state)) {
 		out[id] = { ...item, noteRef: item.noteRef ? { ...item.noteRef } : item.noteRef };
+		if (item.clickAction) out[id].clickAction = { ...item.clickAction };
 	}
 	return out;
 }
@@ -1210,10 +1258,16 @@ export class ViewsManager {
 			clone.apiItemOrder = [];
 		} else if (node.apiItemState) {
 			clone.apiItemState = cloneApiItemState(node.apiItemState);
+			// Atlas-18 (E7): an Item override is not copied by a duplicate; every other row field is.
+			for (const row of Object.values(clone.apiItemState)) delete row.clickAction;
 			clone.apiItemOrder = node.apiItemOrder ? [...node.apiItemOrder] : [];
 		}
 		clone.apiCache = undefined;
 		clone.apiAwaitingConfirmation = undefined;
+
+		// Atlas-18 (G17/E7): the node's own Click action is carried over, as a new object, so editing
+		// one copy's action never edits the other's (`{ ...node }` above shares the reference).
+		if (node.clickAction) clone.clickAction = { ...node.clickAction };
 
 		// PR-4: same reference-sharing hazard as `apiSource` above — a shallow `{...node}` spread
 		// would leave both nodes' `folderSource` pointing at the very same object.
@@ -1282,7 +1336,10 @@ export class ViewsManager {
 	 * OR-check `UnitIndex.isDismissed` already implements: global mode only ever reads the global
 	 * dismiss set (so a non-Global dismiss never hides a row from Global, per G4's "no over-broad
 	 * write"), while view mode reads that view's own set OR'd with the global set (so a Global-view
-	 * dismiss cascades here without this method needing to enumerate views itself). */
+	 * dismiss cascades here without this method needing to enumerate views itself).
+	 * PR-1 (G1): link-only promoted units are also left out whenever `UnitIndex.isSuppressedFromInbox`
+	 * says so, which is every one of them while `settings.autoPromotion` is off. Manual promotions,
+	 * "added" items and placed units are unaffected. */
 	getInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex?: UnitIndex): Unit[] {
 		let placed: Unit[];
 		if (mode === "global") {
@@ -1294,7 +1351,7 @@ export class ViewsManager {
 		if (!unitIndex) return placed;
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
-			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
+			if (unitIndex.isSuppressedFromInbox(u)) return false;
 			return mode === "global" ? !unitIndex.isDismissed(ref, "global") : !unitIndex.isDismissed(ref, "view", viewId);
 		});
 	}
@@ -1303,7 +1360,8 @@ export class ViewsManager {
 	 * dismissed for this scope, so "Show Dismissed" can reveal exactly the rows the plain inbox
 	 * excludes. Shares the same mode semantics as `getInboxUnits` (global reads only the global
 	 * dismiss set; view reads that view's own set OR'd with global), so toggling never reveals a row
-	 * that `getInboxUnits` wouldn't otherwise have hidden for the same `(viewId, mode)`. */
+	 * that `getInboxUnits` wouldn't otherwise have hidden for the same `(viewId, mode)`. Link-only units
+	 * `UnitIndex.isSuppressedFromInbox` keeps out of the inbox are left out here too. */
 	getDismissedInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex: UnitIndex): Unit[] {
 		let placed: Unit[];
 		if (mode === "global") {
@@ -1314,7 +1372,7 @@ export class ViewsManager {
 		}
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
-			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
+			if (unitIndex.isSuppressedFromInbox(u)) return false;
 			return mode === "global" ? unitIndex.isDismissed(ref, "global") : unitIndex.isDismissed(ref, "view", viewId);
 		});
 	}
@@ -1849,6 +1907,42 @@ export class ViewsManager {
 		if (!item) return;
 		item.noteRef = noteRef;
 		this.save();
+	}
+
+	/** Atlas-18 (G1/G2): sets or clears a module's or Folder's Click action from the Click action… modal.
+	 * `undefined` clears it (the key is deleted, so the node stores nothing: absent = today's behaviour).
+	 * Only a Folder (`meta`) or a module (`unit` whose ref is a folder) can hold one; any other node, and
+	 * an action the load-time sanitiser would drop, is refused (`false`) and changes nothing. Saving the
+	 * stored value again is a no-op that neither persists nor notifies. Storage only: nothing runs. */
+	setClickAction(viewId: string, nodeId: string, action: ClickAction | undefined): boolean {
+		const view = this.getView(viewId);
+		const node = view && this.findNode(view.root, nodeId)?.node;
+		if (!node) return false;
+		if (node.type !== "meta" && !(node.type === "unit" && node.ref?.kind === "folder")) return false;
+		const next = action === undefined ? undefined : sanitizeClickAction(action);
+		if (action !== undefined && !next) return false;
+		if (sameClickAction(node.clickAction, next)) return true;
+		if (next) node.clickAction = next;
+		else delete node.clickAction;
+		this.save();
+		return true;
+	}
+
+	/** Atlas-18 (G10 storage half): sets or clears one API item's own Click action (the Item override). Same
+	 * rules as `setClickAction`: `undefined` deletes the key, an unsaveable action is refused, an unchanged
+	 * value is a no-op. `{ kind: "none" }` is stored as is, distinct from absent. Storage only: nothing runs. */
+	setApiItemClickAction(viewId: string, nodeId: string, itemId: string, action: ApiItemClickAction | undefined): boolean {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		const item = found?.node.apiItemState?.[itemId];
+		if (!item) return false;
+		const next = action === undefined ? undefined : sanitizeApiItemClickAction(action);
+		if (action !== undefined && !next) return false;
+		if (sameClickAction(item.clickAction, next)) return true;
+		if (next) item.clickAction = next;
+		else delete item.clickAction;
+		this.save();
+		return true;
 	}
 
 	/** G26/G29: removes a placeholder row's `apiItemState` entry outright — gated by the caller on

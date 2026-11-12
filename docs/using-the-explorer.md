@@ -27,18 +27,22 @@ The panel is a fixed **toolbar** above **one scroll area** holding the **Bucket*
 
 ## Rows
 
-- **Click** a row to open its note. A module opens its interface note; a module's **icon** opens [Module contents](#module-contents). A Folder row just folds and unfolds.
+- **Click** a row to open its note. A module opens its interface note; a module's **icon**, or pressing and holding the row, opens [Module contents](#module-contents). A Folder has no note, so a click does nothing and never folds it: its chevron and **Space** do that. Any module, Folder or [API item](data-sources.md#api) can instead run something when clicked (except a module that an Outside-Vault Folder source manages, which has no **Click action…**): see [Click actions](#click-actions).
 - **Middle-click** a bucket or inbox row's label to open it in a new, focused tab, the same as **Open in new tab**. It never changes the selection, does nothing on rows with no note to open (Folders, missing rows, data-source item rows, a module with no interface note), and is ignored when a modifier key is held.
 - The row for the note currently open in the editor carries a distinct highlight (the file row, its module's row if it's the interface note, and any of its blocks). It never scrolls or expands anything. Turn it off with **Highlight the open note** in [Settings](settings.md).
 - A parent row (any unit or Folder with something nested under it) has a chevron and folds and unfolds, with Space when focused.
 
 ### Right-click a unit row (a block, file or module in the bucket)
 
-**Open**, **Open in new tab**, **Reveal in native explorer**, **View module contents** (modules), **Copy link**, then **Sort children…**, **Statuses**, **Data source…** (plus **Refresh now** and **Remove data source** when one is set), **Add under…**, **Duplicate (Meta)**, **Swap with…**, **Swap for Atlas folder**, **Remove from view**, **Place in view…**, and **Create Module** (on a note directly in the vault root).
+**Open**, **Open in new tab**, **Click action…** (modules only), **Reveal in native explorer**, **View module contents** (modules), **Copy link**, then **Sort children…**, **Statuses**, **Data source…** (plus **Refresh now** and **Remove data source** when one is set), **Add under…**, **Duplicate (Meta)**, **Swap with…**, **Swap for Atlas folder**, **Remove from view**, **Place in view…**, and **Create Module** (on a note directly in the vault root).
 
 ### Right-click a Folder row
 
-**Rename folder** (or F2), **Add under…**, **Replace with…**, **Swap with…**, **Sort children…**, **Statuses**, **Data source…**, **Duplicate (Meta)** and **Delete folder** (its children move up one level).
+**Click action…**, **Rename folder** (or F2), **Add under…**, **Replace with…**, **Swap with…**, **Sort children…**, **Statuses**, **Data source…**, **Duplicate (Meta)** and **Delete folder** (its children move up one level).
+
+### Right-click an API item row
+
+A row that an [API source](data-sources.md#api) filled in: **Click action…** (and **Clear click action** once one is set), then the row's note and attachment items described on the [Data sources](data-sources.md#api) page. Rows from a Table, CSV or Folder source have no **Click action…**.
 
 ### Right-click the Bucket header
 
@@ -75,20 +79,66 @@ In the bucket or the inbox (selecting in one clears the other): **shift-click** 
 
 ## Keyboard
 
-With a row focused: **Enter** opens it, **Space** folds or unfolds it, **F2** renames a Folder, **Delete** removes the unit from the view (no confirmation, except for a unit holding a data source, which confirms first), **Escape** clears the selection. In the name dialog, Enter confirms and Escape cancels.
+With a row focused: **Enter** does what a click does (opens a module's or file's note, or runs the row's [Click action](#click-actions) if it has one, including on a Folder or an API item), **Space** folds or unfolds it, **F2** renames a Folder, **Delete** removes the unit from the view (no confirmation, except for a unit holding a data source, which confirms first), **Escape** clears the selection. In the name dialog, Enter confirms and Escape cancels.
+
+## Click actions
+
+A **Click action** makes a row run something when you click it: a terminal command, an Obsidian command or an Obsidian URI. Only modules, Folders and API items (rows filled in by an [API source](data-sources.md#api)) can have one, and only in the Bucket. Inbox rows, Module contents rows and the native explorer are unchanged.
+
+Which kinds each row offers in the **Kind** dropdown:
+
+| Row | Kinds |
+|---|---|
+| Module | **Default (open the interface note)**, **Run terminal command (desktop only)**, **Run Obsidian command**, **Open Obsidian URI** |
+| Folder | **None**, **Run terminal command (desktop only)**, **Run Obsidian command**, **Open Obsidian URI** |
+| API item | **Use source setting**, **None**, **Run terminal command (desktop only)**, **Run Obsidian command**, **Open Obsidian URI** |
+
+### Set one
+
+Right-click the row, choose **Click action…**, pick a **Kind**, enter or pick a value, and press **Save**. For example, to start an app from a module: right-click the module, choose **Click action…** (the Kind reads **Default (open the interface note)**), pick **Run Obsidian command**, press **Choose command…**, search for the command, choose it, and **Save**. Clicking the module now runs that command and its note does not open. For a Folder, the same steps with **Run terminal command (desktop only)** and the value `open -a Docker` make a click open Docker, and the Folder stays folded or unfolded as it was.
+
+To clear one, pick **Default (open the interface note)** (module) or **None** (Folder) and Save. On an API item, **Clear click action** on its right-click menu removes the override (it appears only while one is set). An API item's **None** is different: it is an action that does nothing, and it stops the source's Click function and click setting from running for that row. See [Data sources](data-sources.md#item-override).
+
+### What each kind needs
+
+- **Run terminal command (desktop only)**: a command line, such as `open -a Docker`. It runs directly, without a shell, so pipes, redirects, `&&`, globbing, `~` and environment variables do not work, and a shell form such as `sh -c` is not supported. `{field}` placeholders work only in an API source's own static command (see [Data sources](data-sources.md#api)); in a module, Folder or item action a placeholder gives a notice when you click. Save is blocked on an empty value or unbalanced quotes.
+- **Run Obsidian command**: chosen from a picker of the commands registered right now, by display name. Atlas stores the command's id. If that id is not registered when you click (a plugin is off, or the setting synced to a device without it), a notice says `Atlas: command not found: <id>` and the setting is kept.
+- **Open Obsidian URI**: any URI that `new URL()` accepts and that carries a scheme (`obsidian://…`, `https://…`, `mailto:…`). It runs exactly as typed: Atlas adds nothing and rewrites nothing, not even a vault name. If the open call throws, a notice says `Atlas: couldn't open URI`. Obsidian does not report whether the target app actually opened, so a URI that nothing handles fails silently.
+
+### When it runs
+
+A plain click on the row, or **Enter** on the focused row, runs the action. Nothing else does: not cmd/ctrl-click, shift-click, drag or middle-click, and not a click on a module's icon, a status dot or the chevron. A modifier-click keeps its usual selection meaning. On a module with an action, an **alt-click** or **Enter** with a modifier held opens the interface note, as it did before the module had an action; it never runs the action.
+
+A long press on a module does not run it either (it opens Module contents). Only a module has that guard: a long press on a Folder or an API item counts as a click and runs the action.
+
+Only a module's icon is a control of its own (it opens Module contents). A Folder's icon and an API item's icon have no job of their own, so a click on either runs the action.
+
+- A failure shows a notice and changes nothing. Success is silent.
+- A second run of the same row within 1 second of the first is ignored, with no feedback. This holds across every Atlas panel you have open.
+- On an API item, the same 1 second window also covers the source's own **Run terminal command in background** setting, so a click followed by **Enter** runs it once. It applies before the source's Click function is called, even if that function then returns nothing: a second click inside the second does not reach the source click action. **Open attachment** is not debounced.
+- A **Folder** click runs the action only and does not fold. The chevron and **Space** still fold, and **Enter** on a Folder runs its action.
+- A module with an action runs it instead of opening its note; the module's icon and a long press still open Module contents. A module with no action keeps opening its interface note on click and **Enter**. Either way the note stays reachable through right-click **Open** and middle-click.
+- An API item runs the first thing that applies: its own override, then the source's Click function, then the source's click setting. See [Data sources](data-sources.md#click-function).
+
+### On mobile
+
+Terminal commands are desktop only. The terminal kind is hidden when you set a new action on mobile. A terminal action that synced from desktop is shown read-only, and clicking it shows `Atlas: terminal actions are desktop only`; the setting is kept. The command and URI kinds work.
 
 ## The inbox
 
-The inbox lists every unit not placed in the current view.
+The inbox lists every unit not placed in the current view. With **Auto-promote linked items** off (the default), items that only a link or embed promoted are left out; see [Settings](settings.md).
 
 - **This view / Global** toggles between the view's own inbox and the global one (units placed in no view at all).
-- **+** adds any file or sub-folder from the vault, found with a fuzzy-search box. Added items carry an **added** tag; an added sub-folder is a module. Added items are kept until you remove them.
+- **+** adds any file or sub-folder from the vault, found with a fuzzy-search box. That includes a linked item that **Auto-promote linked items** (or a hide in Module contents) keeps out of the inbox; items already in the inbox, placed in a view or dismissed are left out of the list. To get a dismissed linked item back, turn **Auto-promote linked items** on, choose **Show Dismissed** and **Unhide** it, then turn the switch off again: while the switch is off, **Show Dismissed** doesn't list items the switch keeps out. Added items carry an **added** tag; an added sub-folder is a module. Added items are kept until you remove them.
 - **Dismiss** hides an inbox row. Dismissing in a single view hides it in that view; dismissing while the inbox is on **Global** hides it everywhere. A dismissed row stays dismissed even if something later links to it. Right-click the inbox header and choose **Show Dismissed** (or **Hide Dismissed**) to reveal dismissed rows inline, and **Unhide** on one to bring it back. Dismissing never affects manual promotions.
 - Status dots can't be assigned to inbox rows. Place the unit in the bucket first.
 
 ## Module contents
 
-Click a module's icon (or choose **View module contents**) to see its internals. Internals aren't units until promoted. Right-click an item there for **Reveal in native explorer** or **Promote and place in view…**.
+Click a module's icon (or choose **View module contents**) to see its internals, or press and hold anywhere on a module row for half a second. Moving the pointer more than 5 pixels, or releasing early, cancels the hold; a right-click never starts one. Internals aren't units until promoted. Right-click an item there for **Reveal in native explorer**, **Promote and place in view…** or **Promote to inbox**.
+
+- **Hide / unhide**: the eye button on each row hides that item (a folder hides what's under it). Hidden rows are dimmed, and the choice is remembered per module. An item hidden from one module also shows as hidden when you reach it through an added sub-folder's own module, and unhiding it from either place unhides it everywhere. If the added sub-folder itself (or a folder above it) is hidden, its module opens dimmed with a notice and an **Unhide** button. A hidden item that only a link promoted stays out of the inbox; items you promoted, added or placed yourself are not affected. Nothing on disk changes, and links to the item still resolve.
+- **Drag out**: drag an item out of the modal and the modal fades so what's behind it can take the drop. Drop it on the Inbox to add it there (with the **added** pill), or on the view to promote and place it. Dropping anywhere else, or back inside the modal, cancels and changes nothing, and so does pressing **Escape** mid-drag: the modal returns to full opacity and stays open.
 
 ## Writing links: the `[[` suggester
 

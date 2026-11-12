@@ -22,7 +22,7 @@ You capture a thing at the largest level where it's self-contained. A chat trans
 
 So `Bets/steps/step-3.md` isn't a unit today. The day something outside `Bets/` links to it, it is. A link from inside the same module never promotes anything, and neither do self-links, links from excluded folders, unresolved links, or links inside code fences.
 
-You can also promote by hand: **Promote and place in view…** in a module's contents (see [Module contents](using-the-explorer.md#module-contents)), or the **+** button on the inbox. Manual promotions are permanent; nothing removes them. To stop a folder's files being promoted by links at all, list it under **Never auto-promote from these folders** in [Settings](settings.md).
+You can also promote by hand: **Promote and place in view…** in a module's contents (see [Module contents](using-the-explorer.md#module-contents)), or the **+** button on the inbox. Manual promotions are permanent; nothing removes them. A promoted item reaches the inbox only if **Auto-promote linked items** is on in [Settings](settings.md), which is off by default; with it off the inbox holds just your manual promotions and **+** additions, and anything you placed in a view stays placed. To stop a folder's files being promoted by links at all while it is on, list it under **Never auto-promote from these folders**.
 
 ## Free blocks
 
@@ -35,7 +35,7 @@ If you rename a free block to a real name, it **graduates**: it moves out of the
 Every folder is a unit: a **module** whose **interface** is a note saying what the folder is and what it's responsible for, with everything else inside as internals. (The code still calls this a "folder-unit"; the UI says "Module".)
 
 - The interface note is `<Folder>/<Folder>.md` by default. In [Settings](settings.md) you can also accept `index.md` / `README.md`. A module without an interface note is still a unit: an inbox row's menu offers **Create interface note**, and picking the module from the `[[` suggester creates one.
-- Clicking a module's name opens its interface note. Clicking its icon opens **Module contents**, a view of its internals.
+- Clicking a module's name opens its interface note, unless you give the module a [Click action](using-the-explorer.md#click-actions). Clicking its icon, or pressing and holding the row, opens **Module contents**, a view of its internals.
 - A module's properties are its interface note's properties.
 - Only folders directly in the vault root are modules at capture. A nested folder appears only if it is promoted, or added with the inbox's **+** (an added sub-folder is a module too).
 

@@ -73,8 +73,8 @@ type FakeThis = {
 	plugin: {
 		app: App;
 		settings: { poolFolder: string; excludedFolders: string[] };
-		unitIndex: { getUnits: () => Unit[]; markAdded: ReturnType<typeof vi.fn> };
-		viewsManager: { placedRefKeys: () => Set<string> };
+		unitIndex: { getUnits: () => Unit[]; isSuppressedFromInbox: () => boolean; isDismissed: () => boolean; markAdded: ReturnType<typeof vi.fn> };
+		viewsManager: { placedRefKeys: () => Set<string>; getActiveView: () => { id: string; inboxMode: "view" | "global" } };
 		flushSave: ReturnType<typeof vi.fn>;
 	};
 	render: ReturnType<typeof vi.fn>;
@@ -85,8 +85,8 @@ function openAddModalFor(app: App, units: Unit[] = [], placed: string[] = []): {
 		plugin: {
 			app,
 			settings: { poolFolder: "_pool", excludedFolders: [] },
-			unitIndex: { getUnits: () => units, markAdded: vi.fn() },
-			viewsManager: { placedRefKeys: () => new Set(placed) },
+			unitIndex: { getUnits: () => units, isSuppressedFromInbox: () => false, isDismissed: () => false, markAdded: vi.fn() },
+			viewsManager: { placedRefKeys: () => new Set(placed), getActiveView: () => ({ id: "v1", inboxMode: "view" }) },
 			flushSave: vi.fn(async () => {}),
 		},
 		render: vi.fn(async () => {}),

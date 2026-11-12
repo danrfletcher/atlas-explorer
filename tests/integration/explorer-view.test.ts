@@ -843,7 +843,7 @@ describe("PR-1.F2 — R1: the real settings-tab onChange drives refreshExplorerV
 				},
 			},
 			settings: sharedSettings,
-			unitIndex: { getManualPromotions: () => [], getDismissedByView: () => ({}), getDismissedGlobal: () => [], getAddedItems: () => [] },
+			unitIndex: { getManualPromotions: () => [], getDismissedByView: () => ({}), getDismissedGlobal: () => [], getAddedItems: () => [], getHiddenModuleItems: () => ({}) },
 			viewsManager: { getViews: () => [], getActiveViewId: () => "default" },
 			statusesManager: { getStatusSets: () => [], getColorPalette: () => [] },
 			expandedModuleFolders: new Set<string>(),
@@ -1599,6 +1599,39 @@ describe("Atlas #15 PR-3 (GP4) — clicking an inbox row produces one swap, and 
 		expect(focusSpy.mock.contexts).toContain(replacement);
 		const call = focusSpy.mock.calls[focusSpy.mock.contexts.indexOf(replacement)];
 		expect(call[0]).toEqual({ preventScroll: true });
+	});
+
+	it("PR-1 R2 (PR-4): a focused API item row keeps keyboard focus across a re-render, and still has no select key", async () => {
+		const owner: ViewNode = { id: "apps", type: "meta", label: "Apps", children: [] };
+		const item: ApiItemState = { id: "1", label: "Docker 4.34", kind: "placeholder" };
+		let drawn = 0;
+		// The harness has no statuses manager, and the row's icon is the only thing that needs one.
+		(env.ex as unknown as { renderRowIcon: () => void }).renderRowIcon = () => {};
+		env.ex.renderNodeList = async (_nodes: ViewNode[], container: HTMLElement) => {
+			drawn++;
+			const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
+			row.dataset.selectKey = "bucket-row";
+			// The real API row renderer; `drawn` makes each draw's markup differ so the pane is really swapped.
+			(env.ex as unknown as { renderApiItemRow: (...a: unknown[]) => void }).renderApiItemRow(
+				{ ...item, label: `Docker ${drawn}` },
+				container,
+				{ id: "v1", name: "Default", inboxMode: "view", root: [owner] },
+				owner,
+				1,
+				[]
+			);
+		};
+		await env.ex.render();
+		const before = document.querySelector<HTMLElement>(".atlas-bucket .atlas-row-api-item")!;
+		expect(before.dataset.selectKey).toBeUndefined();
+		before.focus();
+		expect(document.activeElement).toBe(before);
+
+		await env.ex.render();
+		const after = document.querySelector<HTMLElement>(".atlas-bucket .atlas-row-api-item")!;
+		expect(after).not.toBe(before);
+		expect(before.isConnected).toBe(false);
+		expect(document.activeElement).toBe(after);
 	});
 
 	it("the swapped-in rows keep their click, dragstart and keydown listeners", async () => {
