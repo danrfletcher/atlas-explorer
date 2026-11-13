@@ -33,6 +33,21 @@ Off by default, and desktop only. See [MCP server](mcp-server.md) for what it of
 
 Status sets, the shared color palette, and the Glow, Retain icons and Retained icon color options. See [Statuses](statuses.md).
 
+## Tephra
+
+Desktop only. [Tephra](https://github.com/danrfletcher/Tephra) is a local program that indexes any number of folders ("sources") into one link graph. This tab has one switch, **Turn on Tephra multi-data source vault**, off by default. With it off Atlas does nothing Tephra-related: no connection, no background check, no change to your links.
+
+With it on, Atlas asks Tephra for its source list when you turn the switch on, and again every 10 seconds, and shows the state:
+
+- **Tephra isn't running.** The switch stays on. The tab shows the install command (`tephractl daemon install`) and the repo link. Atlas never runs it for you. When the daemon starts, the next check turns the tab to online without reopening settings.
+- **Connected.** One row per source: name, folder path and status (online, missing or offline). The vault itself (`notes`) has no options. Every other source has **Show in Obsidian search & graph**, on by default. Turning it off adds `Sources/<name>/` to Obsidian's **Files & links → Excluded files**; turning it on removes exactly that entry and leaves your own entries alone.
+
+Atlas reads Tephra's token from `$XDG_DATA_HOME/tephra/token`, else `~/.local/share/tephra/token`. It re-reads it once if Tephra answers 401, and never stores or logs it.
+
+**Turn the switch off before uninstalling Atlas.** Atlas's Tephra changes are only undone by the switch. Disabling or uninstalling the plugin, or quitting Obsidian, runs no clean-up and changes nothing; turning the switch off runs the clean-up steps, saves the setting and stops checking. It never unregisters a source in Tephra.
+
+On mobile the switch is disabled and Atlas behaves as if it were off.
+
 ## Commands
 
 Open the command palette and search for "Atlas Explorer".

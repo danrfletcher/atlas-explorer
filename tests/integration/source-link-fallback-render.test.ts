@@ -22,11 +22,11 @@ let controller: SourceLinkController;
 let host: { app: App; sourceLinks: SourceLinkController };
 let open: ReturnType<typeof vi.fn>;
 let trigger: ReturnType<typeof vi.fn>;
-const settings = { tephraMode: true, tephraLinkFallback: true };
+const settings = { tephraEnabled: true, tephraLinkFallback: true };
 
 beforeEach(() => {
 	Notice.reset();
-	settings.tephraMode = true;
+	settings.tephraEnabled = true;
 	app = new App();
 	seedPaths(app, sourcesVaultPaths());
 	open = vi.fn(async () => {});
@@ -120,14 +120,14 @@ describe("reading view post-processor", () => {
 		}
 	});
 
-	it("does nothing at all when tephraMode is off or the hook is active", () => {
-		settings.tephraMode = false;
+	it("does nothing at all when tephraEnabled is off or the hook is active", () => {
+		settings.tephraEnabled = false;
 		controller.sync();
 		const off = rendered("@whoop:Workout Plan");
 		const offBefore = off.innerHTML;
 		renderSourceLinksInReadingView(host, off, "Weekly Review.md");
 		expect(off.innerHTML).toBe(offBefore);
-		settings.tephraMode = true;
+		settings.tephraEnabled = true;
 		settings.tephraLinkFallback = false;
 		controller.sync();
 		expect(controller.getMode()).toBe("hook");
@@ -244,11 +244,11 @@ describe("live preview decorations (real EditorView)", () => {
 		});
 		const size = () => view.plugin(plugin)!.decorations.size;
 		expect(size()).toBe(1);
-		settings.tephraMode = false;
+		settings.tephraEnabled = false;
 		controller.sync(); // what turning Tephra mode off does; the controller then calls `workspace.updateOptions()`
 		view.dispatch({}); // a bare transaction, as a reconfigure is: no doc, viewport or selection change
 		expect(size()).toBe(0);
-		settings.tephraMode = true;
+		settings.tephraEnabled = true;
 		controller.sync();
 		view.dispatch({});
 		expect(size()).toBe(1);
@@ -257,7 +257,7 @@ describe("live preview decorations (real EditorView)", () => {
 	it("decorates nothing in source mode or when the fallback is not active", () => {
 		const links = ["[[@whoop:Workout Plan]]"];
 		expect(decorated(viewFor(links, false))).toEqual([]);
-		settings.tephraMode = false;
+		settings.tephraEnabled = false;
 		controller.sync();
 		expect(decorated(viewFor(links))).toEqual([]);
 	});

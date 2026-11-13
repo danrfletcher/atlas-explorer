@@ -2,11 +2,11 @@ import type { App, EventRef, TFile } from "obsidian";
 import { LinkResolutionHook } from "./link-resolution-hook";
 
 /**
- * G9 — decides, from `settings.tephraMode`, whether the link-resolution hook (main design) or the
+ * G9 — decides, from `settings.tephraEnabled`, whether the link-resolution hook (main design) or the
  * Q13 fallback renderer is active, and keeps that in step as the setting or the Obsidian internals
  * change.
  *
- *   off        — `tephraMode` is false: nothing is patched, no vault listeners, the renderers return
+ *   off        — `tephraEnabled` is false: nothing is patched, no vault listeners, the renderers return
  *                at once. Atlas behaves exactly as without Tephra mode.
  *   hook       — Obsidian's own resolution was taught `@source:`; Obsidian renders everything.
  *   fallback   — the hook could not be installed (or `tephraLinkFallback` forces it): Atlas renders
@@ -15,7 +15,7 @@ import { LinkResolutionHook } from "./link-resolution-hook";
 export type SourceLinkMode = "off" | "hook" | "fallback";
 
 export interface SourceLinkSettings {
-	tephraMode: boolean;
+	tephraEnabled: boolean;
 	/** Internal switch for the live spike: forces the Q13 fallback even when the hook would install. */
 	tephraLinkFallback: boolean;
 }
@@ -47,7 +47,7 @@ export class SourceLinkController {
 	sync(): void {
 		const previous = this.mode;
 		const settings = this.getSettings();
-		if (settings.tephraMode !== true) {
+		if (settings.tephraEnabled !== true) {
 			this.teardown();
 			this.mode = "off";
 		} else if (settings.tephraLinkFallback === true) {

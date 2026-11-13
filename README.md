@@ -72,7 +72,7 @@ Every folder is a unit: a **module** whose **interface** is a note saying what t
 
 ## Settings
 
-Under **Settings → Atlas Explorer**, with two tabs, **Basic** and **Status**. Every setting is described on [Settings and commands](docs/settings.md).
+Under **Settings → Atlas Explorer**, with three tabs, **Basic**, **Status** and **Tephra**. Every setting is described on [Settings and commands](docs/settings.md).
 
 <img src="docs/images/settings.png" alt="The Basic tab of the Atlas Explorer settings" width="860">
 
@@ -91,6 +91,8 @@ Under **Settings → Atlas Explorer**, with two tabs, **Basic** and **Status**. 
 | MCP server (desktop only) | off, port `27202` |
 
 The **Status** tab holds status sets, the color palette, Glow, Retain icons and Retained icon color.
+
+The **Tephra** tab (desktop only) holds one switch, **Turn on Tephra multi-data source vault** (off by default), and, when it is on, the connection status and the list of Tephra sources. Turn it off before uninstalling Atlas.
 
 ## Commands
 

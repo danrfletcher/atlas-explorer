@@ -7,7 +7,7 @@ import {
 	normalizeAutoPromotion,
 	normalizeHighlightOpenNote,
 	normalizeNoAutoPromoteFolders,
-	normalizeTephraMode,
+	normalizeTephraSettings,
 	rewriteNoAutoPromoteFolders,
 } from "./settings";
 import { UnitIndex, sanitizeHiddenModuleItems } from "./unit-index";
@@ -17,6 +17,10 @@ import { AtlasLinkSuggest } from "./link-suggest";
 import { applySuggesterPrecedence, removeSuggesterPrecedence } from "./suggester-precedence";
 import { FreeBlockTextCache, freeBlockLivePreviewPlugin, registerBlockLinkDisplayPostProcessor } from "./block-link-display";
 import { SourceLinkController } from "./source-link-controller";
+import { TephraClient } from "./tephra-client";
+import { TephraConnection } from "./tephra-connection";
+import { TephraController } from "./tephra-controller";
+import { obsidianTephraRequest } from "./tephra-request-obsidian";
 import { registerSourceLinkFallbackPostProcessor, sourceLinkLivePreviewPlugin } from "./source-link-fallback";
 import { ViewsManager } from "./views";
 import { FolderLiveRefresh } from "./folder-live-refresh";
@@ -104,8 +108,11 @@ export default class AtlasPlugin extends Plugin {
 	freeBlockTextCache: FreeBlockTextCache;
 	private linkSuggest: AtlasLinkSuggest;
 	/** G9: installs the `[[@source:path]]` link-resolution hook (or the Q13 fallback renderer) while
-	 * `settings.tephraMode` is on. Public: the fallback renderers read its mode. */
+	 * `settings.tephraEnabled` is on. Public: the fallback renderers read its mode. */
 	sourceLinks: SourceLinkController;
+	/** G16: owns the Tephra connection. Nothing is built or started unless the toggle is on and this is
+	 * desktop; `onunload` only stops its timer. */
+	tephraController: TephraController;
 	graduation: GraduationController;
 	private persistDebounced: Debouncer<[], void>;
 	/** PR-1 (G5): debounced live refresh for Inside-Vault Folder sources. Plugin-wide, not per leaf, so
@@ -192,17 +199,41 @@ export default class AtlasPlugin extends Plugin {
 		this.freeBlockTextCache.register();
 		registerBlockLinkDisplayPostProcessor(this);
 		this.registerEditorExtension([freeBlockLivePreviewPlugin(this, this.freeBlockTextCache)]);
-		// G9: with `tephraMode` off both of these return at once; they render only in fallback mode.
+		// G9: with `tephraEnabled` off both of these return at once; they render only in fallback mode.
 		this.sourceLinks = new SourceLinkController(
 			this.app,
-			() => this.settings,
+			// Mobile behaves as with the toggle off, whatever a synced data.json says.
+			() => ({ tephraEnabled: this.settings.tephraEnabled && !Platform.isMobile, tephraLinkFallback: this.settings.tephraLinkFallback }),
 			() => this.app.workspace.updateOptions() // re-runs editor extensions so live preview picks up the new mode
 		);
+		this.tephraController = new TephraController({
+			getEnabled: () => this.settings.tephraEnabled,
+			setEnabled: (enabled) => {
+				this.settings.tephraEnabled = enabled;
+			},
+			save: () => this.flushSave(),
+			isMobile: () => Platform.isMobile,
+			createConnection: () => new TephraConnection(new TephraClient({ request: obsidianTephraRequest })),
+			reportTeardownFailures: (failures) => {
+				for (const failure of failures) console.error(`[Atlas] Tephra clean-up step "${failure.name}" failed`, failure.error);
+				new Notice(`Atlas: ${failures.length} Tephra clean-up step(s) failed (${failures.map((f) => f.name).join(", ")}). See the developer console.`);
+			},
+			afterChange: () => {
+				const before = this.sourceLinks.getMode();
+				this.sourceLinks.sync();
+				// A runtime switch into the Q13 fallback doesn't re-render open editors (docs/decisions.md, PR-1).
+				if (this.sourceLinks.getMode() === "fallback" && before !== "fallback") {
+					new Notice("Atlas: reload Obsidian for [[@source:…]] links to render.");
+				}
+			},
+		});
 		registerSourceLinkFallbackPostProcessor(this);
 		// Installed now, not only at layout-ready, so the startup link-resolution pass already sees the
 		// hook; `sync()` runs again at layout-ready to add the leaf-level guard once a leaf exists.
 		this.sourceLinks.sync();
 		this.registerEditorExtension([sourceLinkLivePreviewPlugin(this)]);
+		// G16: builds the connection only when the saved toggle is on and this isn't mobile.
+		this.tephraController.startIfEnabled();
 
 		// PR-2 (T12): must run before registerView() below registers the view factory, so the
 		// G13 indicator and the "Sort children…" menu item resolve a real icon the very first
@@ -441,6 +472,7 @@ export default class AtlasPlugin extends Plugin {
 		this.graduation?.dispose(); // before closing the dialog, so a dismissed one doesn't revert or move anything
 		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);
+		this.tephraController?.dispose(); // E8: stops the timer only; the teardown steps run on the toggle's off path alone
 		this.sourceLinks?.dispose(); // E8: removes the in-memory patch only — no files or settings change
 		this.persistDebounced?.run(); // flush any pending save rather than losing up to 500ms of drags
 		void this.renderLog?.dispose(); // render log: write what's pending; a rejected write is swallowed inside
@@ -476,9 +508,9 @@ export default class AtlasPlugin extends Plugin {
 		this.settings.highlightOpenNote = normalizeHighlightOpenNote(this.settings.highlightOpenNote);
 		// PR-1 (G1): a missing or non-boolean value (an upgrade from a data.json without the key) is off.
 		this.settings.autoPromotion = normalizeAutoPromotion(this.settings.autoPromotion);
-		// G16: an old data.json has no `tephraMode`; only a real `true` turns it on.
-		this.settings.tephraMode = normalizeTephraMode(this.settings.tephraMode);
-		this.settings.tephraLinkFallback = normalizeTephraMode(this.settings.tephraLinkFallback);
+		// G15/G16: an old or hand-edited data.json: only a real `true` turns Tephra on; a non-object
+		// `tephraSourceSettings` is `{}`.
+		Object.assign(this.settings, normalizeTephraSettings(this.settings));
 		this.manualPromotions = data?.manualPromotions ?? [];
 		this.dismissedByView = data?.dismissedByView ?? {};
 		this.dismissedGlobal = data?.dismissedGlobal ?? [];
@@ -490,12 +522,14 @@ export default class AtlasPlugin extends Plugin {
 		}
 	}
 
-	/** G16: turns Tephra mode on or off at runtime — saves at once and installs or removes the link
-	 * hook to match. PR-2's settings toggle calls this; until then it is reachable from the console. */
-	async setTephraMode(enabled: boolean): Promise<void> {
-		this.settings.tephraMode = enabled;
-		this.sourceLinks.sync();
-		await this.flushSave();
+	/** G16: the Tephra toggle. Turning it off runs the registered teardown steps first; see `TephraController`. */
+	setTephraEnabled(enabled: boolean): Promise<void> {
+		return this.tephraController.setEnabled(enabled);
+	}
+
+	/** The live Tephra connection, or null while the toggle is off (or on mobile). */
+	get tephraConnection(): TephraConnection | null {
+		return this.tephraController?.getConnection() ?? null;
 	}
 
 	/** Saves right away and drops any pending debounced save: for changes that must survive an immediate reload. */

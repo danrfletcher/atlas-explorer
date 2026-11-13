@@ -1102,3 +1102,41 @@ input.atlas-name-input.atlas-name-invalid[type="text"]:not(:disabled) {
 	opacity: var(--link-unresolved-opacity);
 	text-decoration-style: var(--link-unresolved-decoration-style);
 }
+
+/* Tephra settings tab (G15): the source list. Names and paths can be long or non-Latin, so they wrap
+ * anywhere instead of stretching the tab; every rule is scoped to these classes. */
+.atlas-tephra-intro,
+.atlas-tephra-uninstall-note {
+	overflow-wrap: anywhere;
+}
+.atlas-tephra-connection.is-online {
+	color: var(--text-success, var(--text-normal));
+}
+.atlas-tephra-connection.is-offline p {
+	margin: 0 0 6px;
+	overflow-wrap: anywhere;
+}
+.atlas-tephra-source .setting-item-info {
+	min-width: 0;
+}
+.atlas-tephra-source .setting-item-name,
+.atlas-tephra-source .setting-item-description {
+	overflow-wrap: anywhere;
+}
+.atlas-tephra-source-setting {
+	margin-left: 16px;
+}
+.atlas-tephra-source-status {
+	flex: none;
+	padding: 0 8px;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-hover);
+	font-size: var(--font-ui-smaller);
+}
+.atlas-tephra-source-status.is-online {
+	color: var(--text-success, var(--text-normal));
+}
+.atlas-tephra-source-status.is-missing,
+.atlas-tephra-source-status.is-offline {
+	color: var(--text-muted);
+}

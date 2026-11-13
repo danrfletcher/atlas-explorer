@@ -3,7 +3,8 @@ import { App, MetadataCache, Notice, TFile } from "obsidian";
 import AtlasPlugin from "../../src/main";
 import { LinkResolutionHook } from "../../src/link-resolution-hook";
 import { SourceLinkController } from "../../src/source-link-controller";
-import { DEFAULT_SETTINGS, normalizeTephraMode } from "../../src/settings";
+import { TephraController } from "../../src/tephra-controller";
+import { DEFAULT_SETTINGS, normalizeTephraFlag } from "../../src/settings";
 import type { AtlasSettings } from "../../src/settings";
 import { obsidianFirstLinkpathDest, seedPaths, sourcesVaultPaths } from "../sources-vault";
 
@@ -254,7 +255,7 @@ describe("missing or changed internals: the guard leaves Obsidian alone, logs on
 		const app = buildApp();
 		(app.metadataCache as unknown as Record<string, unknown>).resolvedLinks = undefined;
 		const warn = vi.fn();
-		const controller = new SourceLinkController(app, () => ({ tephraMode: true, tephraLinkFallback: false }), undefined, warn);
+		const controller = new SourceLinkController(app, () => ({ tephraEnabled: true, tephraLinkFallback: false }), undefined, warn);
 		controller.sync();
 		expect(controller.getMode()).toBe("fallback");
 		expect(controller.isFallbackActive()).toBe(true);
@@ -262,16 +263,16 @@ describe("missing or changed internals: the guard leaves Obsidian alone, logs on
 	});
 });
 
-describe("tephraMode toggling through the controller", () => {
+describe("tephraEnabled toggling through the controller", () => {
 	function setup(initial: Partial<AtlasSettings> = {}) {
 		const app = buildApp();
-		const settings = { tephraMode: false, tephraLinkFallback: false, ...initial };
+		const settings = { tephraEnabled: false, tephraLinkFallback: false, ...initial };
 		const changes: string[] = [];
 		const controller = new SourceLinkController(app, () => settings, () => changes.push(controller.getMode()), quietWarn());
 		return { app, settings, controller, changes, original: app.metadataCache.getFirstLinkpathDest };
 	}
 
-	it("with tephraMode false nothing is patched and no vault listener is registered", () => {
+	it("with tephraEnabled false nothing is patched and no vault listener is registered", () => {
 		const { app, controller, original } = setup();
 		const on = vi.spyOn(app.vault, "on");
 		const workspaceOpen = (app.workspace as unknown as Record<string, unknown>).openLinkText;
@@ -286,11 +287,11 @@ describe("tephraMode toggling through the controller", () => {
 
 	it("turning it on installs, turning it off uninstalls and drops the listeners", () => {
 		const { app, settings, controller, changes, original } = setup();
-		settings.tephraMode = true;
+		settings.tephraEnabled = true;
 		controller.sync();
 		expect(controller.getMode()).toBe("hook");
 		expect(app.metadataCache.getFirstLinkpathDest("@whoop:Workout Plan", "Weekly Review.md")?.path).toBe("Sources/whoop/Workout Plan.md");
-		settings.tephraMode = false;
+		settings.tephraEnabled = false;
 		controller.sync();
 		expect(controller.getMode()).toBe("off");
 		expect(app.metadataCache.getFirstLinkpathDest).toBe(original);
@@ -298,15 +299,15 @@ describe("tephraMode toggling through the controller", () => {
 		expect(changes).toEqual(["hook", "off"]);
 		// the listeners are gone: creating a file after turn-off reaches nothing
 		const off = vi.spyOn(app.vault, "offref");
-		settings.tephraMode = true;
+		settings.tephraEnabled = true;
 		controller.sync();
-		settings.tephraMode = false;
+		settings.tephraEnabled = false;
 		controller.sync();
 		expect(off).toHaveBeenCalledTimes(3);
 	});
 
 	it("sync() is idempotent: repeated calls change nothing and notify once", () => {
-		const { app, settings, controller, changes } = setup({ tephraMode: true });
+		const { app, settings, controller, changes } = setup({ tephraEnabled: true });
 		controller.sync();
 		const patched = app.metadataCache.getFirstLinkpathDest;
 		controller.sync();
@@ -317,7 +318,7 @@ describe("tephraMode toggling through the controller", () => {
 	});
 
 	it("vault create, delete and rename invalidate the lookup table", async () => {
-		const { app, controller } = setup({ tephraMode: true });
+		const { app, controller } = setup({ tephraEnabled: true });
 		controller.sync();
 		const get = resolverOf(app);
 		expect(get("@whoop:Fresh", "Weekly Review.md")).toBeNull();
@@ -331,7 +332,7 @@ describe("tephraMode toggling through the controller", () => {
 	});
 
 	it("tephraLinkFallback forces the fallback and leaves Obsidian unpatched", () => {
-		const { app, controller, original } = setup({ tephraMode: true, tephraLinkFallback: true });
+		const { app, controller, original } = setup({ tephraEnabled: true, tephraLinkFallback: true });
 		controller.sync();
 		expect(controller.getMode()).toBe("fallback");
 		expect(app.metadataCache.getFirstLinkpathDest).toBe(original);
@@ -339,11 +340,11 @@ describe("tephraMode toggling through the controller", () => {
 	});
 
 	it("dispose() removes the patch without touching settings", () => {
-		const { app, settings, controller, original } = setup({ tephraMode: true });
+		const { app, settings, controller, original } = setup({ tephraEnabled: true });
 		controller.sync();
 		controller.dispose();
 		expect(app.metadataCache.getFirstLinkpathDest).toBe(original);
-		expect(settings.tephraMode).toBe(true);
+		expect(settings.tephraEnabled).toBe(true);
 		expect(controller.getMode()).toBe("off");
 	});
 });
@@ -403,12 +404,12 @@ describe("performance: 5,000 links across 3 sources", () => {
 	});
 });
 
-describe("tephraMode setting and the plugin lifecycle", () => {
+describe("tephraEnabled setting and the plugin lifecycle", () => {
 	const makePlugin = () => Object.create(AtlasPlugin.prototype) as AtlasPlugin & Record<string, unknown>;
 	const loadFromData = (plugin: AtlasPlugin, data: unknown) => (plugin as unknown as { loadFromData(d: unknown): void }).loadFromData(data);
 
-	it("DEFAULT_SETTINGS.tephraMode is the boolean false", () => {
-		expect(DEFAULT_SETTINGS.tephraMode).toBe(false);
+	it("DEFAULT_SETTINGS.tephraEnabled is the boolean false", () => {
+		expect(DEFAULT_SETTINGS.tephraEnabled).toBe(false);
 		expect(DEFAULT_SETTINGS.tephraLinkFallback).toBe(false);
 	});
 
@@ -420,35 +421,47 @@ describe("tephraMode setting and the plugin lifecycle", () => {
 		["true", false],
 		[1, false],
 		[{}, false],
-	])("normalizeTephraMode(%j) is %s: only a real true turns it on", (raw, expected) => {
-		expect(normalizeTephraMode(raw)).toBe(expected);
+	])("normalizeTephraFlag(%j) is %s: only a real true turns it on", (raw, expected) => {
+		expect(normalizeTephraFlag(raw)).toBe(expected);
 	});
 
-	it("an old data.json (no tephraMode) loads as off; an explicit true is kept; non-booleans are off", () => {
+	it("an old data.json (no tephraEnabled) loads as off; an explicit true is kept; non-booleans are off", () => {
 		const old = makePlugin();
 		loadFromData(old, { settings: { poolFolder: "_pool" } });
-		expect((old.settings as AtlasSettings).tephraMode).toBe(false);
+		expect((old.settings as AtlasSettings).tephraEnabled).toBe(false);
 		const on = makePlugin();
-		loadFromData(on, { settings: { poolFolder: "_pool", tephraMode: true } });
-		expect((on.settings as AtlasSettings).tephraMode).toBe(true);
+		loadFromData(on, { settings: { poolFolder: "_pool", tephraEnabled: true } });
+		expect((on.settings as AtlasSettings).tephraEnabled).toBe(true);
 		const bad = makePlugin();
-		loadFromData(bad, { settings: { poolFolder: "_pool", tephraMode: "true", tephraLinkFallback: 1 } });
-		expect((bad.settings as AtlasSettings).tephraMode).toBe(false);
+		loadFromData(bad, { settings: { poolFolder: "_pool", tephraEnabled: "true", tephraLinkFallback: 1 } });
+		expect((bad.settings as AtlasSettings).tephraEnabled).toBe(false);
 		expect((bad.settings as AtlasSettings).tephraLinkFallback).toBe(false);
 	});
 
-	it("setTephraMode installs and removes the hook, and saves", async () => {
+	it("setTephraEnabled installs and removes the hook, and saves", async () => {
 		const app = buildApp();
 		const plugin = makePlugin();
 		plugin.settings = { ...DEFAULT_SETTINGS };
 		plugin.app = app as never;
 		plugin.sourceLinks = new SourceLinkController(app, () => plugin.settings as AtlasSettings, undefined, quietWarn());
 		plugin.flushSave = vi.fn(async () => {});
+		plugin.tephraController = new TephraController({
+			getEnabled: () => (plugin.settings as AtlasSettings).tephraEnabled,
+			setEnabled: (enabled) => {
+				(plugin.settings as AtlasSettings).tephraEnabled = enabled;
+			},
+			save: () => plugin.flushSave(),
+			isMobile: () => false,
+			createConnection: () => ({ start: vi.fn(), stop: vi.fn() }) as never,
+			runTeardown: async () => [],
+			reportTeardownFailures: () => {},
+			afterChange: () => plugin.sourceLinks.sync(),
+		});
 		const original = app.metadataCache.getFirstLinkpathDest;
-		await plugin.setTephraMode(true);
+		await plugin.setTephraEnabled(true);
 		expect(app.metadataCache.getFirstLinkpathDest).not.toBe(original);
-		expect((plugin.settings as AtlasSettings).tephraMode).toBe(true);
-		await plugin.setTephraMode(false);
+		expect((plugin.settings as AtlasSettings).tephraEnabled).toBe(true);
+		await plugin.setTephraEnabled(false);
 		expect(app.metadataCache.getFirstLinkpathDest).toBe(original);
 		expect(plugin.flushSave).toHaveBeenCalledTimes(2);
 	});
@@ -456,7 +469,7 @@ describe("tephraMode setting and the plugin lifecycle", () => {
 	it("E8: onunload removes the patch by identity and changes no file or setting", () => {
 		const app = buildApp();
 		const plugin = makePlugin();
-		const settings = { ...DEFAULT_SETTINGS, tephraMode: true };
+		const settings = { ...DEFAULT_SETTINGS, tephraEnabled: true };
 		const original = app.metadataCache.getFirstLinkpathDest;
 		plugin.settings = settings;
 		plugin.app = app as never;
@@ -470,7 +483,7 @@ describe("tephraMode setting and the plugin lifecycle", () => {
 		plugin.saveData = saveData;
 		plugin.onunload();
 		expect(app.metadataCache.getFirstLinkpathDest).toBe(original);
-		expect(plugin.settings).toEqual({ ...DEFAULT_SETTINGS, tephraMode: true }); // setting untouched
+		expect(plugin.settings).toEqual({ ...DEFAULT_SETTINGS, tephraEnabled: true }); // setting untouched
 		expect(saveData).not.toHaveBeenCalled();
 		expect(app.vault.calls).toEqual([]);
 	});

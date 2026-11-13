@@ -8,10 +8,14 @@ interface CreateOpts {
 	text?: string;
 	cls?: string;
 	type?: string;
+	href?: string;
 	attr?: Record<string, string>;
 }
 
 declare global {
+	interface Node {
+		appendText(text: string): void;
+	}
 	interface HTMLElement {
 		createEl<K extends keyof HTMLElementTagNameMap>(tag: K, opts?: CreateOpts | string): HTMLElementTagNameMap[K];
 		createDiv(opts?: CreateOpts | string): HTMLDivElement;
@@ -33,6 +37,7 @@ function make(parent: HTMLElement, tag: string, opts?: CreateOpts | string): HTM
 	if (o.cls) el.className = o.cls;
 	if (o.text !== undefined) el.textContent = o.text;
 	if (o.type) el.setAttribute("type", o.type);
+	if (o.href) el.setAttribute("href", o.href);
 	for (const [k, v] of Object.entries(o.attr ?? {})) el.setAttribute(k, v);
 	parent.appendChild(el);
 	return el;
@@ -65,6 +70,10 @@ proto.hasClass = function (cls: string) {
 };
 proto.toggleClass = function (cls: string, on: boolean) {
 	this.classList.toggle(cls, on);
+};
+/** Obsidian adds `appendText` to every DOM node. */
+Node.prototype.appendText = function (text: string) {
+	this.appendChild(document.createTextNode(text));
 };
 proto.setAttr = function (name: string, value: string) {
 	this.setAttribute(name, value);
@@ -251,6 +260,10 @@ export class Vault {
 	config: Record<string, unknown> = {};
 	getConfig(key: string): unknown {
 		return this.config[key];
+	}
+	/** Like Obsidian's: stores the value; `userIgnoreFilters` is the Excluded files list. */
+	setConfig(key: string, value: unknown): void {
+		this.config[key] = value;
 	}
 }
 
@@ -466,7 +479,12 @@ export class Menu {
 	}
 }
 export class Plugin {}
-export class PluginSettingTab {}
+export class PluginSettingTab {
+	containerEl: HTMLElement = document.createElement("div");
+	constructor(public app?: App, public plugin?: unknown) {}
+	display(): void {}
+	hide(): void {}
+}
 /** Minimal stand-in for Obsidian's `EditorSuggest` — just enough for `AtlasLinkSuggest` (and any
  * other test that merely needs to import `src/main.ts`) to extend it; no test here exercises the
  * actual suggester popup. */

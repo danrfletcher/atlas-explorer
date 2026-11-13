@@ -12,7 +12,7 @@ export { plainNameClashes } from "./source-links";
  * be installed, or was forced off for the spike). Atlas renders `[[@source:path]]` itself as a
  * clickable internal-style link with hover preview, in reading view and live preview. `![[@…]]`
  * embeds are NOT rendered: that is the agreed gap (Q13 = A), not something to work around here.
- * With `tephraMode` off, or with the hook active, every function here returns without touching the DOM.
+ * With `tephraEnabled` off, or with the hook active, every function here returns without touching the DOM.
  */
 
 interface FallbackHost {
