@@ -45,6 +45,15 @@ export interface AtlasSettings {
 	 * `UnitIndex.isSuppressedFromInbox`; it never unplaces anything and never changes how links
 	 * resolve. Absent in an old `data.json` resolves to off, via `normalizeAutoPromotion`. */
 	autoPromotion: boolean;
+	/** G16 (PR-1, internal): Tephra multi-data-source mode. Off by default and has no UI yet (the
+	 * Tephra settings tab arrives in PR-2). While true, Atlas teaches Obsidian's link resolution about
+	 * `[[@source:path]]` (or, if that can't be done, renders those links itself); while false nothing
+	 * is patched and no extra rendering runs. Read through `normalizeTephraMode`, so an old or
+	 * hand-edited `data.json` without a real boolean loads as off. */
+	tephraMode: boolean;
+	/** G9 (PR-1, internal, no UI): force the Q13 fallback renderer even when the link-resolution hook
+	 * would install — for checking the fallback live. Only meaningful while `tephraMode` is on. */
+	tephraLinkFallback: boolean;
 }
 
 export const DEFAULT_TO_DELETE_FOLDER = "_to_delete";
@@ -65,12 +74,19 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	highlightOpenNote: true,
 	mcpServerEnabled: false,
 	autoPromotion: false,
+	tephraMode: false,
+	tephraLinkFallback: false,
 };
 
 /** PR-1 (G1): anything in `data.json` that isn't a real boolean (absent, a string, `null`...) is off,
  * the safe default, rather than being coerced by truthiness (`"false"` must not turn it on). */
 export function normalizeAutoPromotion(raw: unknown): boolean {
 	return typeof raw === "boolean" ? raw : false;
+}
+
+/** G16: only a real `true` turns Tephra mode on; absent, a string like `"true"`, `null`... are off. */
+export function normalizeTephraMode(raw: unknown): boolean {
+	return raw === true;
 }
 
 /** PR-1.F2: a hand-edited `data.json` can hold any JSON value for `highlightOpenNote` (a string,

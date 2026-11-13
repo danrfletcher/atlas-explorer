@@ -53,6 +53,8 @@ describe("F7: no setting, no UI beyond the command, no off switch", () => {
 				"highlightOpenNote",
 				"mcpServerEnabled",
 				"autoPromotion",
+				"tephraMode", // atlas-22 PR-1: internal Tephra switch, no UI yet
+				"tephraLinkFallback", // atlas-22 PR-1: internal, forces the Q13 fallback for the live spike
 			].sort()
 		);
 	});

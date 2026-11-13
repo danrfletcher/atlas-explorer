@@ -1,6 +1,8 @@
 /** Hand-written stand-in for the `obsidian` package (vitest aliases it here): just enough of the
  * vault model, `Modal` (with a real jsdom DOM), `Notice` (recordable), `Setting` and `debounce`. */
 
+import { StateField } from "@codemirror/state";
+
 // --- Obsidian's HTMLElement helpers -------------------------------------------------------------
 interface CreateOpts {
 	text?: string;
@@ -154,6 +156,10 @@ export class Vault {
 		return { name, cb };
 	}
 
+	offref(ref: { name: VaultEvent; cb: (...args: any[]) => void }): void {
+		this.listeners.get(ref.name)?.delete(ref.cb);
+	}
+
 	private emit(name: VaultEvent, ...args: unknown[]): void {
 		for (const cb of this.listeners.get(name) ?? []) cb(...args);
 	}
@@ -253,9 +259,13 @@ export class MetadataCache {
 	getFileCache(_file: TFile): null {
 		return null;
 	}
-	getFirstLinkpathDest(_link: string, _from: string): null {
+	/** Settable like Obsidian's own (a plain method that callers and the G9 hook can replace). */
+	getFirstLinkpathDest(_link: string, _from: string): TFile | null {
 		return null;
 	}
+	/** Same shapes as Obsidian's: source path -> target path -> link count. Tests fill them in. */
+	resolvedLinks: Record<string, Record<string, number>> = {};
+	unresolvedLinks: Record<string, Record<string, number>> = {};
 	on(name: string, cb: () => void): { name: string; cb: () => void } {
 		if (name === "resolved") this.listeners.add(cb);
 		return { name, cb };
@@ -292,7 +302,13 @@ export class App {
 	vault = new Vault();
 	metadataCache = new MetadataCache();
 	fileManager = new FileManager(this.vault);
-	workspace = { onLayoutReady: (cb: () => void) => cb(), getLeavesOfType: () => [] as unknown[] };
+	workspace = {
+		onLayoutReady: (cb: () => void) => cb(),
+		getLeavesOfType: () => [] as unknown[],
+		updateOptions: () => {},
+		/** Like Obsidian's: tests replace it to observe or to stand in for the real open. */
+		openLinkText: async (_linktext: string, _sourcePath: string, _newLeaf?: boolean): Promise<void> => {},
+	};
 
 	/** Real Obsidian's own per-device `localStorage` helpers (`App.loadLocalStorage`/
 	 * `saveLocalStorage`, added 1.8.7) — an in-memory stand-in so `McpTokenStore` (PR-1.S1/R5),
@@ -512,3 +528,10 @@ export function debounce<A extends unknown[]>(fn: (...args: A) => void, wait = 0
 	};
 	return debounced;
 }
+
+/** Real CodeMirror field standing in for Obsidian's `editorLivePreviewField`: `true` = live preview.
+ * Tests must add it to the state's extensions (as Obsidian does); `editorLivePreviewField.init(() => false)` models source mode. */
+export const editorLivePreviewField = StateField.define<boolean>({
+	create: () => true,
+	update: (value) => value,
+});

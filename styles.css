@@ -1085,3 +1085,20 @@ input.atlas-name-input.atlas-name-invalid[type="text"]:not(:disabled) {
 	margin: 0 0 6px;
 	overflow-wrap: anywhere;
 }
+
+/* Q13 fallback (G9): `[[@source:…]]` links Atlas renders itself when the link-resolution hook can't be
+ * installed. Styled like Obsidian's internal links; scoped to this class so nothing else changes. */
+.atlas-source-link {
+	color: var(--link-color);
+	text-decoration: var(--link-decoration);
+	cursor: pointer;
+}
+.atlas-source-link:hover {
+	color: var(--link-color-hover);
+	text-decoration: var(--link-decoration-hover);
+}
+.atlas-source-link.is-unresolved {
+	color: var(--link-unresolved-color);
+	opacity: var(--link-unresolved-opacity);
+	text-decoration-style: var(--link-unresolved-decoration-style);
+}

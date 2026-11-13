@@ -7,6 +7,7 @@ import {
 	normalizeAutoPromotion,
 	normalizeHighlightOpenNote,
 	normalizeNoAutoPromoteFolders,
+	normalizeTephraMode,
 	rewriteNoAutoPromoteFolders,
 } from "./settings";
 import { UnitIndex, sanitizeHiddenModuleItems } from "./unit-index";
@@ -15,6 +16,8 @@ import { registerAddBlockCommand } from "./commands";
 import { AtlasLinkSuggest } from "./link-suggest";
 import { applySuggesterPrecedence, removeSuggesterPrecedence } from "./suggester-precedence";
 import { FreeBlockTextCache, freeBlockLivePreviewPlugin, registerBlockLinkDisplayPostProcessor } from "./block-link-display";
+import { SourceLinkController } from "./source-link-controller";
+import { registerSourceLinkFallbackPostProcessor, sourceLinkLivePreviewPlugin } from "./source-link-fallback";
 import { ViewsManager } from "./views";
 import { FolderLiveRefresh } from "./folder-live-refresh";
 import { parentFolderPath } from "./folder-source";
@@ -100,6 +103,9 @@ export default class AtlasPlugin extends Plugin {
 	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
 	freeBlockTextCache: FreeBlockTextCache;
 	private linkSuggest: AtlasLinkSuggest;
+	/** G9: installs the `[[@source:path]]` link-resolution hook (or the Q13 fallback renderer) while
+	 * `settings.tephraMode` is on. Public: the fallback renderers read its mode. */
+	sourceLinks: SourceLinkController;
 	graduation: GraduationController;
 	private persistDebounced: Debouncer<[], void>;
 	/** PR-1 (G5): debounced live refresh for Inside-Vault Folder sources. Plugin-wide, not per leaf, so
@@ -186,6 +192,17 @@ export default class AtlasPlugin extends Plugin {
 		this.freeBlockTextCache.register();
 		registerBlockLinkDisplayPostProcessor(this);
 		this.registerEditorExtension([freeBlockLivePreviewPlugin(this, this.freeBlockTextCache)]);
+		// G9: with `tephraMode` off both of these return at once; they render only in fallback mode.
+		this.sourceLinks = new SourceLinkController(
+			this.app,
+			() => this.settings,
+			() => this.app.workspace.updateOptions() // re-runs editor extensions so live preview picks up the new mode
+		);
+		registerSourceLinkFallbackPostProcessor(this);
+		// Installed now, not only at layout-ready, so the startup link-resolution pass already sees the
+		// hook; `sync()` runs again at layout-ready to add the leaf-level guard once a leaf exists.
+		this.sourceLinks.sync();
+		this.registerEditorExtension([sourceLinkLivePreviewPlugin(this)]);
 
 		// PR-2 (T12): must run before registerView() below registers the view factory, so the
 		// G13 indicator and the "Sort children…" menu item resolve a real icon the very first
@@ -200,6 +217,7 @@ export default class AtlasPlugin extends Plugin {
 			// Deferred until layout is ready so the native `[[` suggester is already registered —
 			// see docs/decisions.md for why this reorder is needed and how it degrades safely.
 			applySuggesterPrecedence(this.app, this.linkSuggest);
+			this.sourceLinks.sync(); // G9: after layout, so the workspace and a leaf exist to patch
 			if (this.settings.replaceNativeExplorerOnStartup) {
 				void this.activateExplorerView();
 			}
@@ -423,6 +441,7 @@ export default class AtlasPlugin extends Plugin {
 		this.graduation?.dispose(); // before closing the dialog, so a dismissed one doesn't revert or move anything
 		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);
+		this.sourceLinks?.dispose(); // E8: removes the in-memory patch only — no files or settings change
 		this.persistDebounced?.run(); // flush any pending save rather than losing up to 500ms of drags
 		void this.renderLog?.dispose(); // render log: write what's pending; a rejected write is swallowed inside
 		console.debug("[Atlas] unloading");
@@ -457,6 +476,9 @@ export default class AtlasPlugin extends Plugin {
 		this.settings.highlightOpenNote = normalizeHighlightOpenNote(this.settings.highlightOpenNote);
 		// PR-1 (G1): a missing or non-boolean value (an upgrade from a data.json without the key) is off.
 		this.settings.autoPromotion = normalizeAutoPromotion(this.settings.autoPromotion);
+		// G16: an old data.json has no `tephraMode`; only a real `true` turns it on.
+		this.settings.tephraMode = normalizeTephraMode(this.settings.tephraMode);
+		this.settings.tephraLinkFallback = normalizeTephraMode(this.settings.tephraLinkFallback);
 		this.manualPromotions = data?.manualPromotions ?? [];
 		this.dismissedByView = data?.dismissedByView ?? {};
 		this.dismissedGlobal = data?.dismissedGlobal ?? [];
@@ -466,6 +488,14 @@ export default class AtlasPlugin extends Plugin {
 		if (!data) {
 			this.settings.excludedFolders = computeDefaultExcludedFolders(this.app, this.settings.poolFolder);
 		}
+	}
+
+	/** G16: turns Tephra mode on or off at runtime — saves at once and installs or removes the link
+	 * hook to match. PR-2's settings toggle calls this; until then it is reachable from the console. */
+	async setTephraMode(enabled: boolean): Promise<void> {
+		this.settings.tephraMode = enabled;
+		this.sourceLinks.sync();
+		await this.flushSave();
 	}
 
 	/** Saves right away and drops any pending debounced save: for changes that must survive an immediate reload. */

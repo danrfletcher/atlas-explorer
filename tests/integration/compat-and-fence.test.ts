@@ -14,7 +14,7 @@ describe("data compatibility (a v0.2.1 data.json)", () => {
 	it("settings keys are the v0.2.1 fixture's keys plus noAutoPromoteFolders and highlightOpenNote", () => {
 		// noAutoPromoteFolders and highlightOpenNote (PR-1.F2) are new and absent from the fixture;
 		// loading without them yields [] / true respectively (see main-persistence tests).
-		expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([...Object.keys(data.settings), "noAutoPromoteFolders", "highlightOpenNote", "mcpServerEnabled", "autoPromotion"].sort());
+		expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([...Object.keys(data.settings), "noAutoPromoteFolders", "highlightOpenNote", "mcpServerEnabled", "autoPromotion", "tephraMode", "tephraLinkFallback"].sort());
 	});
 
 	it("persisted AtlasData keys are the v0.2.1 fixture's keys plus PR-2's new fields", () => {
