@@ -51,7 +51,7 @@ describe("fence regression", () => {
 		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(28); // 19 + PR-1.S1's MCP server section (heading, enable toggle, port, token) + the Auto-promote linked items toggle + atlas-22 PR-2's Tephra tab (master toggle, Sources heading, source row, per-source toggle)
 		for (const f of NEW_FILES) expect(read(f), f).not.toMatch(/addCommand\(|addItem\(|new Setting\(|addSettingTab|registerEditorSuggest/);
 		const wired = [...readdirSync(join(root, "src"))].filter((f) => f.endsWith(".ts")).filter((f) => /openNameDialog/.test(read(`src/${f}`)));
-		expect(wired.sort()).toEqual(["add-under-named.ts", "create-from-meta.ts", "create-module.ts", "main.ts", "name-dialog.ts", "test-harness.ts"]); // main.ts: graduation's clash dialog (PR-2); create-module.ts: PR-3; create-from-meta.ts: PR-4; add-under-named.ts: PR-3.F2/F3 (File and Module share it)
+		expect(wired.sort()).toEqual(["add-under-named.ts", "create-from-meta.ts", "create-module.ts", "main.ts", "name-dialog.ts", "source-actions.ts", "test-harness.ts"]); // source-actions.ts: atlas-22 PR-5's Add source dialog; main.ts: graduation's clash dialog (PR-2); create-module.ts: PR-3; create-from-meta.ts: PR-4; add-under-named.ts: PR-3.F2/F3 (File and Module share it)
 	});
 
 	it("RG-6 UI strings in the new files never say 'promote'", () => {

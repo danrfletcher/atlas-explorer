@@ -324,7 +324,14 @@ describe("the scoped \"+\" (G1)", () => {
 		const open = vi.spyOn(AddFileSuggestModal.prototype, "open").mockImplementation(function (this: AddFileSuggestModal) {
 			opened = this;
 		});
+		// Atlas-22 PR-5: with the toggle on the vault's "+" is a menu; "Add file…" is today's modal, unchanged.
+		let menu: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			menu = this;
+		});
 		sectionEl(r.h, name).querySelector<HTMLElement>(".atlas-inbox-add-btn")!.click();
+		show.mockRestore();
+		menu?.items.find((item) => item.title === "Add file…")!.clickHandler!();
 		open.mockRestore();
 		return opened!;
 	}

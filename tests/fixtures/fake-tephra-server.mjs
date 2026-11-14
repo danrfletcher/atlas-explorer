@@ -34,8 +34,11 @@ export function defaultTokenFile(env = process.env) {
  * `units` is what `unit.list` answers, by source name: an array of top-level entries (`{ name, kind }`, kind
  * `folder` or `markdown`/`file`; the rest of Tephra's entry shape is filled in), or `{ entries, offline }` for a
  * source whose folder is gone. It may also be a function returning that map. A source not in it is an RPC error.
+ *
+ * `methods` adds RPC methods of a test's own: `{ "source.register": (params) => ({ result: … }) }`, each returning
+ * `{ result }` or `{ error: { code, message } }`. It is for a test that changes what the daemon lists.
  */
-export async function startFakeTephra({ port = 4812, host = "127.0.0.1", tokenFile = defaultTokenFile(), sources = DEFAULT_SOURCES, units = {} } = {}) {
+export async function startFakeTephra({ port = 4812, host = "127.0.0.1", tokenFile = defaultTokenFile(), sources = DEFAULT_SOURCES, units = {}, methods = {} } = {}) {
 	const requests = [];
 	const server = createServer((req, res) => {
 		const chunks = [];
@@ -77,6 +80,11 @@ export async function startFakeTephra({ port = 4812, host = "127.0.0.1", tokenFi
 				const entries = rows.map((row, i) => ({ id: `${name}:${row.name}`, name: row.name, rel_path: row.name, kind: row.kind ?? "file", size: 1, mtime: 1 + i }));
 				const offline = !Array.isArray(listing) && listing.offline === true;
 				return send(200, { jsonrpc: "2.0", id: body.id, result: { source: name, folder: "", recursive: false, offline, needs_rescan: false, entries } });
+			}
+			if (Object.hasOwn(methods, body.method)) {
+				// A test's own method (`source.register`, `source.unregister`): returns `{ result }` or `{ error: { code, message } }`.
+				const answer = methods[body.method](body.params);
+				return send(200, { jsonrpc: "2.0", id: body.id, ...answer });
 			}
 			return send(200, { jsonrpc: "2.0", id: body.id, error: { code: -32601, message: `Method not found: ${body.method}` } });
 		});

@@ -532,3 +532,15 @@ Code-reviewed and unit/integration-tested only; the container run (screenshots) 
 - [x] E12 `computeInboxWindow` is fed each list's own offset (the spacer's position); the sticky header stack and `stuckScrollTarget` handle N headers.
 - [x] F1/G16 toggle off: no Tephra calls; the Inbox DOM matches the pre-PR snapshots in `tests/fixtures/inbox-toggle-off-*.html`.
 - Not built here: Add/Remove source (PR-5), opening files (PR-6), cross-source and backlink promotion (PR-8), offline sections (PR-9).
+
+## Atlas-22 PR-5: Add source and Remove source (G3, G5, E2, E4, E9)
+
+Code-reviewed and unit/integration-tested only; the container run (real folder picker, real Tephra) is the tester's.
+
+- [x] G3 Inbox "+" with the toggle on is a menu (Add file… unchanged, Add source…); toggle off and mobile keep the direct modal. A source section's "+" is unchanged.
+- [x] G3 `pickFolder` (system picker), folder refusals (inside vault, vault itself, under `Sources/`, by real path), `NameDialog` with the source-name rules live, one `source.register`, Tephra's refusal shown in the dialog, no retry on timeout (`source.list` instead).
+- [x] G5 source header "Remove" (not on the vault's), confirm, one `source.unregister`, `SourcesFolder.removeSource` unlinks the link alone; real folders and foreign links left with a notice; "no source named" counts as done.
+- [x] E2 name rules (`src/source-name-rules.ts`, tested by row incl. 199/200-byte boundary, unicode, case). E9 nested/overlapping roots are Tephra's call, its message is shown.
+- Not live-checked here: the real Electron folder picker (`window.require("electron").remote.dialog`) and a real `tephrad` register/unregister. Tephra sends no `graph:changed` for either; Atlas asks for a check itself.
+- Not built here: Rename source (PR-11).
+

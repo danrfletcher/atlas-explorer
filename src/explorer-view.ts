@@ -3953,7 +3953,7 @@ export class AtlasExplorerView extends ItemView {
 		// PR-5 (G7): additive — the header's existing collapse `click` listener below is untouched.
 		header.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showInboxHeaderMenu(evt);
+			this.showInboxHeaderMenu(evt, sourceName);
 		});
 
 		// A source section has no This view/Global toggle: the mode is one setting for the whole Inbox.
@@ -3976,8 +3976,9 @@ export class AtlasExplorerView extends ItemView {
 		setTooltip(addBtn, sourceName === null ? "Add file to inbox" : `Add file from ${sourceName}`);
 		addBtn.addEventListener("click", (evt) => {
 			evt.stopPropagation();
-			if (sourceName === null) this.openAddFileModal();
-			else this.openAddFileModal(sourceName);
+			if (sourceName !== null) this.openAddFileModal(sourceName);
+			else if (this.tephraSectionsOn()) this.showInboxAddMenu(evt); // PR-5 (G3): with Tephra on, "+" offers Add file… and Add source…
+			else this.openAddFileModal(); // toggle off: straight to the modal, exactly as before (G16)
 		});
 
 		// PR 11: same fix as the bucket section and the meta-folder chevron — content always renders
@@ -5366,11 +5367,11 @@ export class AtlasExplorerView extends ItemView {
 		modal.open();
 	}
 
-	/** PR-5 (G7): the inbox section header's own right-click menu — a single toggle item, same
+	/** PR-5 (G7): the inbox section header's own right-click menu — the Show/Hide Dismissed toggle, same
 	 * `Menu`/`showAtMouseEvent` construction as the toolbar view-name menu and the row menus below.
 	 * Toggling flips the instance-level `showDismissed` flag and re-renders; no persisted write, same
-	 * as `inboxCollapsed`. */
-	private showInboxHeaderMenu(evt: MouseEvent): void {
+	 * as `inboxCollapsed`. Atlas-22 PR-5 (G5): a Tephra source's header (`sourceName` set) adds Remove below it. */
+	private showInboxHeaderMenu(evt: MouseEvent, sourceName: string | null = null): void {
 		const menu = new Menu();
 		menu.addItem((item) =>
 			item
@@ -5381,6 +5382,25 @@ export class AtlasExplorerView extends ItemView {
 					void this.render();
 				})
 		);
+		// PR-5 (G5): a Tephra source's header adds Remove (Rename is PR-11). The vault's header never does, and
+		// with the Tephra toggle off there are no source headers, so nothing here is reachable.
+		if (sourceName !== null && this.tephraSectionsOn()) {
+			menu.addSeparator();
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove")
+					.setIcon("trash")
+					.onClick(() => this.plugin.sourceActions.removeSource(sourceName))
+			);
+		}
+		menu.showAtMouseEvent(evt);
+	}
+
+	/** PR-5 (G3): the vault Inbox's "+" with the Tephra toggle on. "Add file…" is today's modal, unchanged. */
+	private showInboxAddMenu(evt: MouseEvent): void {
+		const menu = new Menu();
+		menu.addItem((item) => item.setTitle("Add file…").setIcon("file-plus").onClick(() => this.openAddFileModal()));
+		menu.addItem((item) => item.setTitle("Add source…").setIcon("folder-plus").onClick(() => void this.plugin.sourceActions.addSource()));
 		menu.showAtMouseEvent(evt);
 	}
 

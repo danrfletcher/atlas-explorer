@@ -28,3 +28,8 @@ export function existsOnDisk(path: string): boolean {
 		return false;
 	}
 }
+
+/** The path with every link in it resolved (PR-5: a folder picked through a link is still seen to be inside the vault). Rejects when it doesn't exist. */
+export function realPath(path: string): Promise<string> {
+	return fs.promises.realpath(path);
+}

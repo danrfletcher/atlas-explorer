@@ -20,6 +20,9 @@ import type { SourceDeleteClassifier } from "./source-delete-classifier";
 /** Read at most this much of a source's `.gitignore`. */
 const MAX_GITIGNORE_CHARS = 256_000;
 
+/** What `SourcesFolder.removeSource` found at `Sources/<name>` and did about it. */
+export type RemoveSourceLinkOutcome = "unlinked" | "absent" | "real-folder" | "kept" | "skipped" | "failed";
+
 /** Where Atlas keeps what it did outside its own settings, so it can undo exactly that (`data.json`). */
 export interface SourcesRecords {
 	/** `tephraLinks`: source name -> the folder its `Sources/<name>` link points at. */
@@ -144,6 +147,37 @@ export class SourcesFolder {
 	 */
 	resync(): Promise<void> {
 		return this.lastSources === null ? Promise.resolve() : this.sync(this.lastSources);
+	}
+
+	/**
+	 * PR-5 (G5): Tephra no longer lists `name`. Looks at `Sources/<name>`, then runs one ordinary sync with
+	 * `remaining` (Tephra's list without it), so the link, its record and its Excluded files entries go
+	 * through exactly the clean-up every other removed source gets (`planSourceLinks`' `remove` action:
+	 * `lstat`, then `unlink` of the link alone, after the delete expectation is registered). Nothing here
+	 * deletes a folder or a file: a real folder or note at that path is left as it is and reported.
+	 *
+	 * - `unlinked`: it was a link and is gone.
+	 * - `absent`: nothing was there.
+	 * - `real-folder`: something that isn't a symlink is there; untouched.
+	 * - `kept`: a link is still there (Atlas didn't make it, so it isn't Atlas's to remove); untouched.
+	 * - `skipped`: the toggle is off, this is mobile, or the name can't be a `Sources/` entry; nothing ran.
+	 * - `failed`: the filesystem refused; the error is in the console.
+	 */
+	async removeSource(name: string, remaining: TephraSource[]): Promise<RemoveSourceLinkOutcome> {
+		const vaultPath = this.deps.getVaultPath();
+		if (!this.active || this.deps.isMobile() || vaultPath === null || !isUsableSourceName(name)) return "skipped";
+		const path = `${vaultPath}/${SOURCES_FOLDER}/${name}`;
+		this.lastSources = remaining;
+		let outcome: RemoveSourceLinkOutcome = "failed";
+		await this.enqueue(async () => {
+			const before = await lstatOrNull(this.deps.fs, path);
+			if (this.active) await this.runSync(remaining);
+			const after = await lstatOrNull(this.deps.fs, path);
+			if (before === null) outcome = "absent";
+			else if (!before.isSymbolicLink()) outcome = "real-folder";
+			else outcome = after !== null && after.isSymbolicLink() ? "kept" : "unlinked";
+		});
+		return outcome;
 	}
 
 	/**

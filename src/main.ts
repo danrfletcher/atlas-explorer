@@ -24,9 +24,12 @@ import { TephraClient, TEPHRA_RPC_URL, resolveTephraRpcUrl } from "./tephra-clie
 import { TephraConnection } from "./tephra-connection";
 import { TephraController } from "./tephra-controller";
 import { SourcesFolder } from "./sources-folder";
+import { SourceActions } from "./source-actions";
+import { pickFolder } from "./pick-folder";
+import { ConfirmModal } from "./modals";
 import { SourceDeleteClassifier } from "./source-delete-classifier";
 import { isInSourcesFolder, skipsSourcesFolder } from "./sources-path";
-import { nodeSourcesFs, existsOnDisk } from "./sources-fs";
+import { nodeSourcesFs, existsOnDisk, realPath } from "./sources-fs";
 import { vaultExcludeConfig } from "./source-excludes";
 import { refreshExcludedFilesPane } from "./tephra-exclude";
 import { registerTephraTeardown } from "./tephra-teardown";
@@ -126,6 +129,8 @@ export default class AtlasPlugin extends Plugin {
 	tephraController: TephraController;
 	/** G2: the `Sources/<name>` links, the vault `.gitignore` line and Atlas's Excluded files entries. */
 	sourcesFolder: SourcesFolder;
+	/** PR-5 (G3, G5): the Inbox's "Add source…" and a source header's "Remove". */
+	sourceActions: SourceActions;
 	/** R3-4: tells deletes Atlas or a missing source caused from the user's own. */
 	sourceDeleteClassifier: SourceDeleteClassifier;
 	graduation: GraduationController;
@@ -246,6 +251,17 @@ export default class AtlasPlugin extends Plugin {
 			classifier: this.sourceDeleteClassifier,
 			notify: (message) => void new Notice(message, 10_000),
 			onExcludesChanged: () => refreshExcludedFilesPane(this.app),
+		});
+		this.sourceActions = new SourceActions({
+			app: this.app,
+			getConnection: () => this.tephraConnection,
+			pickFolder,
+			getVaultPath: () => this.getVaultBasePath() || null,
+			fs: nodeSourcesFs,
+			realpath: realPath,
+			sourcesFolder: this.sourcesFolder,
+			confirm: (message, confirmLabel, onConfirm) => new ConfirmModal(this.app, message, confirmLabel, onConfirm).open(),
+			notify: (message) => void new Notice(message, 10_000),
 		});
 		// G16/R3-3: the toggle's off path unlinks what Atlas linked and removes the entries Atlas excluded. Never
 		// run on unload (E8): only `TephraController.setEnabled(false)` reaches the registry.
