@@ -124,10 +124,18 @@ export function isUsableSourceName(name: string): boolean {
 	return name.length > 0 && name !== "." && name !== ".." && name !== "__proto__" && !/[\\/\u0000-\u001f]/.test(name);
 }
 
+/**
+ * What Tephra's `source.list` says about one source, in Atlas's words. Tephra itself (read from its code, not
+ * assumed) reports `active`, `stale`, `offline` or `permission_denied`; its `offline` is a source whose
+ * folder is gone or unplugged, which is Atlas's "missing" (the E5 case), never "Tephra is unreachable" (that
+ * is the connection's own `offline` state). `online` and `missing` are also accepted, as an earlier stand-in
+ * server sent them. `stale` and `permission_denied` still list from the cache, so they count as online. A
+ * value Atlas doesn't know is `offline`: neither shown as missing nor treated as gone.
+ */
 function mapSourceStatus(raw: unknown): TephraSourceStatus {
 	const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
-	if (value === "online") return "online";
-	if (value === "missing") return "missing";
+	if (value === "online" || value === "active" || value === "stale" || value === "permission_denied") return "online";
+	if (value === "missing" || value === "offline") return "missing";
 	return "offline";
 }
 

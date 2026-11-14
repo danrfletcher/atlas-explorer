@@ -520,3 +520,15 @@ Live E6 checkpoints:
 - [ ] Run every edge case above
 - [ ] Scale test per F11
 - [ ] Rename/move/delete tests for F9 done from **outside** Obsidian (shell `mv`/`rm` while Obsidian is open), not just inside
+
+## Atlas-22 PR-4: one Inbox section per Tephra source (G1, E5, E12)
+
+Code-reviewed and unit/integration-tested only; the container run (screenshots) is the tester's.
+
+- [x] G1 `src/inbox-sections.ts` (pure): groups units into the vault section (`inbox`) then `source:<name>` sections A-Z (case-insensitive), the vault matched as `notes`, longest-root ownership of `Sources/<name>/…`, empty and missing sources kept, toggle off giving exactly one vault section. Also parses a `unit.list` answer (folders to `folder-unit`, files to `root-file`, vault path `Sources/<name>/<entry>`).
+- [x] G1 `explorer-view.ts`: `planInboxSections` asks Tephra once per listed source per render and keeps nothing between renders (F1); each section has its own virtual window (`InboxDrawGroup`), collapse state (not persisted), selection order and "+" (limited to `Sources/<name>/`; the vault's "+" never offers `Sources/`). Shift-click ranges never leave the anchor's section.
+- [x] G1 `source-promotion.ts` + `UnitIndex.sourcePromoted`: the pop-out rule per source; links from the vault or other sources are PR-8's (the single seam is `collectSourceLinks`).
+- [x] E5 A source Tephra reports gone (`source.list` status, or `unit.list` `offline`) keeps a grey `(missing)` header with no rows. Tephra's own `source.list` status `offline` means the source's folder is gone, so `mapSourceStatus` maps it to missing; unreachable Tephra shows no source section and no "(missing)" (PR-9 owns that).
+- [x] E12 `computeInboxWindow` is fed each list's own offset (the spacer's position); the sticky header stack and `stuckScrollTarget` handle N headers.
+- [x] F1/G16 toggle off: no Tephra calls; the Inbox DOM matches the pre-PR snapshots in `tests/fixtures/inbox-toggle-off-*.html`.
+- Not built here: Add/Remove source (PR-5), opening files (PR-6), cross-source and backlink promotion (PR-8), offline sections (PR-9).

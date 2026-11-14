@@ -36,7 +36,7 @@ import { registerSourceLinkFallbackPostProcessor, sourceLinkLivePreviewPlugin } 
 import { ViewsManager } from "./views";
 import { FolderLiveRefresh } from "./folder-live-refresh";
 import { parentFolderPath } from "./folder-source";
-import { ATLAS_VIEW_TYPE, AtlasExplorerView } from "./explorer-view";
+import { ATLAS_VIEW_TYPE, AtlasExplorerView, refreshExplorersOnTephraChange } from "./explorer-view";
 import { registerSortIcons } from "./sort";
 import { registerF10Commands } from "./f10-commands";
 import { closeNameDialog, openNameDialog } from "./name-dialog";
@@ -276,6 +276,8 @@ export default class AtlasPlugin extends Plugin {
 				connection.onCheck((snapshot) => {
 					if (snapshot.state === "online") void this.sourcesFolder.sync(snapshot.sources);
 				});
+				// PR-4 (G1/E5): sections appear, go, turn "(missing)" or come back with the source list.
+				refreshExplorersOnTephraChange(connection, () => this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE).map((leaf) => leaf.view));
 				return connection;
 			},
 			reportTeardownFailures: (failures) => {

@@ -18,8 +18,11 @@ describe("the fixture vault is what the spec lists", () => {
 		expect(sourcesVaultPaths()).toEqual([
 			"Leg Day.md",
 			"README.md",
+			"Sources/tephra/Cargo.toml",
 			"Sources/tephra/README.md",
 			"Sources/tephra/crates/tephrad/src/registry.rs",
+			"Sources/tephra/docs/guide.md",
+			"Sources/tephra/scripts/build.sh",
 			"Sources/whoop/Leg Day.md",
 			"Sources/whoop/Workout Plan.md",
 			"Weekly Review.md",

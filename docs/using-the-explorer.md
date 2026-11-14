@@ -133,6 +133,20 @@ The inbox lists every unit not placed in the current view. With **Auto-promote l
 - **Dismiss** hides an inbox row. Dismissing in a single view hides it in that view; dismissing while the inbox is on **Global** hides it everywhere. A dismissed row stays dismissed even if something later links to it. Right-click the inbox header and choose **Show Dismissed** (or **Hide Dismissed**) to reveal dismissed rows inline, and **Unhide** on one to bring it back. Dismissing never affects manual promotions.
 - Status dots can't be assigned to inbox rows. Place the unit in the bucket first.
 
+### One section per Tephra source
+
+With the Tephra switch on (desktop), the Inbox becomes one section per Tephra source. The first is the one above, headed **Inbox**, with your vault's units, unchanged. After it come the other sources A to Z, each under a `[name]` header with its own count. A source section follows the same rules as the vault Inbox:
+
+- Its top-level folders are modules (long-press opens Module contents) and its top-level files are units, listed by Tephra, so `.git`, ignored folders and dotfiles never appear. Rows are the `Sources/<name>/…` files in your vault.
+- A deeper file shows up with the **promoted** pill when a note outside its own top-level folder, in the same source, links to it. A link to a block promotes only that block. Links from your vault or from other sources do not promote anything yet.
+- **+** in a source section adds a file from that source only. **+** in the vault's Inbox never offers anything under `Sources/`.
+- Rows drag into any view, select (shift-click ranges stay inside one section), dismiss and unhide like vault rows. A view stores the `Sources/<name>/…` path.
+- Each section collapses on its own and starts open on every load. The filter and sort apply inside every section; rows never mix between sections.
+- If Tephra reports a source's folder gone, its header turns grey with **(missing)** and its rows go. Rows you placed in a view stay, greyed as missing, and come back when the folder does. If Tephra itself isn't running, no source section shows and nothing is marked missing.
+- Sections appear and go when Tephra's source list changes (at the next check, every 10 seconds or when Obsidian gets focus), without a reload.
+
+With the switch off none of this exists: no Tephra calls, one Inbox.
+
 ## Module contents
 
 Click a module's icon (or choose **View module contents**) to see its internals, or press and hold anywhere on a module row for half a second. Moving the pointer more than 5 pixels, or releasing early, cancels the hold; a right-click never starts one. Internals aren't units until promoted. Right-click an item there for **Reveal in native explorer**, **Promote and place in view…** or **Promote to inbox**.

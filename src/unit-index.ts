@@ -1,6 +1,8 @@
 import { App, Platform, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AtlasSettings, isCoveredByNoAutoPromote, normalizeNoAutoPromoteFolders } from "./settings";
-import { isInSourcesFolder, skipsSourcesFolder } from "./sources-path";
+import { isInSourcesFolder, skipsSourcesFolder, SOURCES_FOLDER, sourceLinkPath } from "./sources-path";
+import { excludeEntryMatcher } from "./source-excludes";
+import { computeSourcePromotions, ResolvedLink } from "./source-promotion";
 import { AddedItem, DismissScope, Unit, UnitRef, rewritePathString, rewriteRefPath, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 
 /** PR-2: adds or removes `ref` from `list` by `unitRefKey` equality, returning a new array only when
@@ -57,6 +59,10 @@ export class UnitIndex {
 	private promotedFiles = new Map<string, Unit>();
 	private promotedFolders = new Map<string, Unit>();
 	private promotedBlocks = new Map<string, Unit>();
+	/** PR-4 (G1): the pop-out rule inside each Tephra source: a deeper file linked from outside its own
+	 * top-level folder, in the same source, is a `promoted-*` unit with a `Sources/<name>/…` path. Derived
+	 * from the link graph on every `computePromotions`, never stored, and empty unless `skipsSources()`. */
+	private sourcePromoted = new Map<string, Unit>();
 	/** PR-4 (T1): every ref any Folder source currently manages (`ViewsManager.getFolderSourceManagedRefs`),
 	 * lifted into the same `promoted-*` shape a manual/link promotion gets — so a Folder-source child
 	 * (an ordinary nested file/folder, never a vault-root folder) resolves through `getUnits()`/
@@ -144,7 +150,7 @@ export class UnitIndex {
 		// wouldn't collide in either Map and would otherwise survive into `base` twice. Compare by
 		// `unitRefKey` on the resolved ref instead of relying on either Map's own key shape.
 		const promotedRefKeys = new Set(
-			[...this.promotedFiles.values(), ...this.promotedFolders.values(), ...this.promotedBlocks.values()].map((unit) =>
+			[...this.promotedFiles.values(), ...this.promotedFolders.values(), ...this.promotedBlocks.values(), ...this.sourcePromoted.values()].map((unit) =>
 				unitRefKey(unitToRef(unit))
 			)
 		);
@@ -154,6 +160,7 @@ export class UnitIndex {
 			...this.promotedFiles.values(),
 			...this.promotedFolders.values(),
 			...this.promotedBlocks.values(),
+			...this.sourcePromoted.values(),
 			// Folder-source units sit in `base` so the R3 and R1 rules below treat them like any other promoted unit.
 			...Array.from(this.folderSourceUnits.values()).filter((unit) => !promotedRefKeys.has(unitRefKey(unitToRef(unit)))),
 		].filter((unit) => {
@@ -561,11 +568,18 @@ export class UnitIndex {
 		const promotedFolders = new Map<string, Unit>();
 		const promotedBlocks = new Map<string, Unit>();
 		let linkCount = 0;
+		const sourceLinks: ResolvedLink[] = [];
 
 		// Single pass over every file's link/embed cache. A reference with a subpath (`#^id` or
 		// `#Heading`) promotes only the block, never its containing file — a link to one paragraph
 		// isn't a link to the whole note. Only a subpath-less reference can promote the file/folder.
 		for (const file of this.app.vault.getMarkdownFiles()) {
+			if (this.isExcludedBySources(file.path)) {
+				// R3-1: nothing under `Sources/` promotes into or out of the vault's own units. Its links are
+				// read for the per-source pop-out rule instead (`computeSourcePromotions` below).
+				this.collectSourceLinks(file, sourceLinks);
+				continue;
+			}
 			if (this.isExcluded(file.path)) continue;
 			const cache = this.app.metadataCache.getFileCache(file);
 			if (!cache) continue;
@@ -621,11 +635,58 @@ export class UnitIndex {
 		this.promotedFiles = promotedFiles;
 		this.promotedFolders = promotedFolders;
 		this.promotedBlocks = promotedBlocks;
+		this.sourcePromoted = this.computeSourcePromoted(sourceLinks);
 		this.applyManualPromotions();
 		this.notifyChange();
 
 		const elapsed = performance.now() - start;
 		console.debug(`[Atlas] promotions recomputed in ${elapsed.toFixed(2)}ms (${linkCount} links scanned)`);
+	}
+
+	/** PR-4 (G1): the links written in a file under `Sources/`, resolved the way Obsidian resolves them. Only
+	 * a link that resolves to a file counts; a self-link is dropped later by the rule itself. */
+	private collectSourceLinks(file: TFile, out: ResolvedLink[]): void {
+		const cache = this.app.metadataCache.getFileCache(file);
+		if (!cache) return;
+		for (const ref of [...(cache.links ?? []), ...(cache.embeds ?? []), ...(cache.frontmatterLinks ?? [])]) {
+			const hashIndex = ref.link.indexOf("#");
+			const linkpath = hashIndex === -1 ? ref.link : ref.link.slice(0, hashIndex);
+			const subpath = hashIndex === -1 ? "" : ref.link.slice(hashIndex + 1);
+			const to = linkpath ? this.app.metadataCache.getFirstLinkpathDest(linkpath, file.path)?.path : file.path;
+			if (to) out.push({ from: file.path, to, subpath });
+		}
+	}
+
+	/** The Tephra sources as the vault shows them: one folder link per source, directly under `Sources/`. */
+	private sourceNamesInVault(): string[] {
+		const folder = this.app.vault.getAbstractFileByPath(SOURCES_FOLDER);
+		if (!(folder instanceof TFolder)) return [];
+		return folder.children.filter((child) => child instanceof TFolder).map((child) => child.name);
+	}
+
+	private computeSourcePromoted(links: ResolvedLink[]): Map<string, Unit> {
+		if (links.length === 0 || !this.skipsSources()) return new Map();
+		const sourceNames = this.sourceNamesInVault();
+		// An ignored folder (PR-3's exclude entries for the source) never pops out, even when it holds a linked file.
+		const matchers = new Map<string, ((path: string) => boolean)[]>();
+		const excludedFor = (path: string): boolean => {
+			const owner = sourceNames.filter((name) => path.startsWith(`${sourceLinkPath(name)}/`)).sort((a, b) => b.length - a.length)[0];
+			if (owner === undefined) return false;
+			let list = matchers.get(owner);
+			if (!list) {
+				list = (this.settings.tephraExcludes?.[owner] ?? []).map(excludeEntryMatcher).filter((m): m is (path: string) => boolean => m !== null);
+				matchers.set(owner, list);
+			}
+			return list.some((matches) => matches(path));
+		};
+		return computeSourcePromotions(links, {
+			sourceNames,
+			isExcluded: excludedFor,
+			interfaceFolderFor: (path) => {
+				const file = this.app.vault.getAbstractFileByPath(path);
+				return file instanceof TFile ? this.interfaceNoteFolderFor(file) : null;
+			},
+		}).units;
 	}
 
 	private applyManualPromotions(): void {
@@ -678,6 +739,10 @@ export class UnitIndex {
 		}
 		for (const key of Array.from(this.promotedBlocks.keys())) {
 			if (key === path || key.startsWith(`${path}#`) || key.startsWith(prefix)) this.promotedBlocks.delete(key);
+		}
+		// The per-source pop-outs are keyed by `unitKey`, so they go by the unit's own path instead.
+		for (const [key, unit] of Array.from(this.sourcePromoted)) {
+			if (unit.path === path || unit.path.startsWith(prefix)) this.sourcePromoted.delete(key);
 		}
 		this.notifyChange();
 		this.logIncremental("delete", start);

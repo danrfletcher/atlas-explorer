@@ -294,7 +294,9 @@ describe("error mapping", () => {
 describe("source.list rows", () => {
 	beforeEach(() => writeFileSync(tokenFile, TOKEN_A));
 
-	it("maps status online / missing / offline, and anything else to offline", () => {
+	it("maps Tephra's own statuses (active / stale / offline / permission_denied) and the stand-in's (online / missing); anything else is offline", () => {
+		// PR-4: Tephra's `source.list` sends `active|stale|offline|permission_denied` (Tephra's `status_str`). Its
+		// `offline` is a source whose folder is gone, which Atlas calls missing; it is not "Tephra is unreachable".
 		const rows = [
 			{ name: "a", path: "/a", status: "online" },
 			{ name: "b", path: "/b", status: "missing" },
@@ -302,14 +304,22 @@ describe("source.list rows", () => {
 			{ name: "d", path: "/d", status: "weird" },
 			{ name: "e", path: "/e" },
 			{ name: "f", path: "/f", status: "ONLINE" },
+			{ name: "g", path: "/g", status: "active" },
+			{ name: "h", path: "/h", status: "stale" },
+			{ name: "i", path: "/i", status: "permission_denied" },
+			{ name: "j", path: "/j", status: " Offline " },
 		];
 		expect(parseTephraSources(rows).map((s) => [s.name, s.status])).toEqual([
 			["a", "online"],
 			["b", "missing"],
-			["c", "offline"],
+			["c", "missing"],
 			["d", "offline"],
 			["e", "offline"],
 			["f", "online"],
+			["g", "online"],
+			["h", "online"],
+			["i", "online"],
+			["j", "missing"],
 		]);
 	});
 

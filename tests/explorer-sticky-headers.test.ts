@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stuckScrollTarget } from "../src/explorer-view";
 import { makeSectionHarness, SectionHarness } from "./explorer-header-fixtures";
+import { makeSourcesRig, SourcesRig, fixtureEntries } from "./sources-explorer-fixture";
 
 // PR-1.B1: the JS pinning emulation (`computeStickyHeaders`, `updateStickyHeaders`, the scroll
 // listener, the per-header `translateY` transforms and `scroll-padding-top`/`-bottom`) is gone, so
@@ -275,5 +276,106 @@ describe("stylesheet: .atlas-section-header is a native sticky rule (F1, F2, F3,
 		}
 		expect(after.has("margin")).toBe(false);
 		expect(after.has("height")).toBe(false);
+	});
+});
+
+// PR-4 (G1, E12): N Tephra source headers. The real explorer over a vault and three sources big enough to scroll
+// (the sources-vault fixture's layout, each source with 20 more files), through the real connection. jsdom has no
+// layout, so the section harness lays the sections out from the DOM (header 28 px, 28 px rows, a 300 px viewport)
+// and the expected numbers below are worked out from that DOM here, not by the code under test.
+describe("N source headers stack and stick in order, and a title click lands each on stuckScrollTarget (G1, E12)", () => {
+	let rig: SourcesRig | null = null;
+	afterEach(async () => {
+		await rig?.teardown();
+		rig = null;
+	});
+
+	const SOURCES = ["alpha", "tephra", "whoop"];
+	const vaultPaths = [
+		...Array.from({ length: 12 }, (_, i) => `note-${String(i).padStart(2, "0")}.md`),
+		...SOURCES.flatMap((name) => Array.from({ length: 20 }, (_, i) => `Sources/${name}/file-${String(i).padStart(2, "0")}.md`)),
+	];
+	const open = async () => {
+		const made = await makeSourcesRig({
+			vaultPaths,
+			sources: SOURCES.map((name) => ({ name, path: `/${name}`, status: "online" as const })),
+			units: Object.fromEntries(SOURCES.map((name) => [name, fixtureEntries(name, vaultPaths)])),
+		});
+		made.h.setViewportHeight(VIEWPORT);
+		await made.h.render();
+		await made.settle();
+		return made;
+	};
+	const sections = (r: SourcesRig) => [...r.h.panel().querySelectorAll<HTMLElement>(".atlas-explorer-scroll > .atlas-section")];
+	/** Where each section's header sits in the content (the heights of everything before it), from the DOM. */
+	const expectedTops = (r: SourcesRig) => {
+		let top = 0;
+		const tops = sections(r).map((section) => {
+			const here = top;
+			const content = section.querySelector(":scope > .atlas-meta-children")!.classList.contains("is-collapsed")
+				? 0
+				: section.classList.contains("atlas-bucket")
+				? section.querySelectorAll(".atlas-row").length * ROW
+				: parseFloat(section.querySelector<HTMLElement>(".atlas-inbox-spacer")!.style.height);
+			top += HEADER + content;
+			return here;
+		});
+		return { tops, max: top - VIEWPORT };
+	};
+
+	it("lays out bucket, Inbox and the three sources in order, each header stacked under the ones above and pinned above the ones below", async () => {
+		rig = await open();
+		const all = sections(rig);
+		expect(all.map((el) => el.querySelector(".atlas-section-title")!.textContent)).toEqual(["Bucket", "Inbox", "[alpha]", "[tephra]", "[whoop]"]);
+		const sourceSections = all.slice(2);
+		expect(sourceSections.map((el) => el.style.getPropertyValue("--atlas-section-top"))).toEqual(["56px", "84px", "112px"]);
+		expect(sourceSections.map((el) => el.style.getPropertyValue("--atlas-section-bottom"))).toEqual(["56px", "28px", "0px"]);
+		expect(all[1].style.getPropertyValue("--atlas-section-bottom")).toBe("84px");
+		expect(rig.h.body().classList.contains("atlas-sticky-disabled")).toBe(false);
+	});
+
+	it("each source header is a sticky rule fed by those variables, in the stylesheet", () => {
+		const css = readFileSync(join(__dirname, "..", "styles.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+		const rule = Array.from(css.matchAll(/([^{}]+)\{([^}]*)\}/g)).find((m) => m[1].trim() === ".atlas-inbox.atlas-inbox-source > .atlas-section-header");
+		expect(rule).toBeDefined();
+		expect(rule![2]).toMatch(/top\s*:\s*var\(--atlas-section-top/);
+		expect(rule![2]).toMatch(/bottom\s*:\s*var\(--atlas-section-bottom/);
+	});
+
+	it("a title click on each header, in turn, scrolls to that header's stuckScrollTarget with every header before it stacked above", async () => {
+		rig = await open();
+		const all = sections(rig);
+		const { tops, max } = expectedTops(rig);
+		const wanted = all.map((_, i) => stuckScrollTarget(tops[i], HEADER * i, max));
+		// The Inbox header already sits directly under the bucket's at the top (target 0); each source header's target
+		// is further down than the one before, and none is clamped to the end.
+		expect(wanted[1]).toBe(0);
+		expect(wanted.slice(2).every((top) => top > 0 && top < max)).toBe(true);
+		expect(wanted.slice(2)).toEqual([...wanted.slice(2)].sort((a, b) => a - b));
+		expect(new Set(wanted.slice(2)).size).toBe(3);
+
+		for (let i = 1; i < all.length; i++) {
+			rig.h.scrollTo(wanted[i] === 0 ? 500 : 0); // away from the target, so the click has a scroll to make
+			rig.h.scrollCalls.length = 0;
+			all[i].querySelector<HTMLElement>(".atlas-section-title")!.click();
+			expect(rig.h.scrollCalls.map((call) => call.top), `header ${i}`).toEqual([wanted[i]]);
+			expect(rig.h.body().scrollTop, `header ${i}`).toBe(wanted[i]);
+			// Stuck: this header sits directly under the i headers before it, and each of those is stacked at the top.
+			expect(all[i].querySelector<HTMLElement>(":scope > .atlas-section-header")!.getBoundingClientRect().top, `header ${i}`).toBe(HEADER * i);
+		}
+	});
+
+	it("the same holds after a collapse and a Tephra-driven re-render: the targets follow the new heights", async () => {
+		rig = await open();
+		sections(rig)[2].querySelector<HTMLElement>(":scope > .atlas-section-header > .atlas-chevron")!.click(); // collapse [alpha]
+		await rig.settle();
+		await rig.check();
+		const { tops, max } = expectedTops(rig);
+		const all = sections(rig);
+		expect(tops[3] - tops[2]).toBe(HEADER); // a collapsed section is its header alone
+		rig.h.scrollTo(0);
+		rig.h.scrollCalls.length = 0;
+		all[4].querySelector<HTMLElement>(".atlas-section-title")!.click(); // [whoop]
+		expect(rig.h.scrollCalls.map((call) => call.top)).toEqual([stuckScrollTarget(tops[4], HEADER * 4, max)]);
 	});
 });

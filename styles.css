@@ -160,6 +160,31 @@
 	bottom: 0;
 }
 
+/* PR-4 (G1): Tephra source sections stack under the Inbox label. `updateStickyLayout()` writes
+ * `--atlas-section-top` (the headers above) and `--atlas-section-bottom` (the headers after) on each source
+ * section, and `--atlas-section-bottom` on the vault Inbox section, so N headers stack at the top in order and
+ * pin to the bottom edge in order. With no source section the variable is unset and the Inbox rule above is
+ * unchanged. Scoped to modifier classes: the shared header rule is not touched. */
+.atlas-inbox:not(.atlas-inbox-source) > .atlas-section-header {
+	bottom: var(--atlas-section-bottom, 0px);
+}
+
+.atlas-inbox.atlas-inbox-source > .atlas-section-header {
+	top: var(--atlas-section-top, 0px);
+	bottom: var(--atlas-section-bottom, 0px);
+}
+
+/* A source whose folder Tephra reports gone: the header and its "(missing)" marker go grey. */
+.atlas-section-header.is-missing {
+	color: var(--text-faint);
+}
+
+.atlas-section-missing {
+	color: var(--text-faint);
+	font-weight: normal;
+	text-transform: none;
+}
+
 /* PR-1.B1 (E2): the short-panel guard. Set on the scroll body when it's too short to show both
  * headers plus a row — both labels fall back into normal flow instead of overlapping the content. */
 .atlas-explorer-scroll.atlas-sticky-disabled .atlas-section-header {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// A stand-in for the Tephra daemon, for tests and for checking Atlas by hand. It answers `source.list` over
-// `POST /rpc` with JSON-RPC 2.0, behind the same bearer-token check. Nothing here is part of the plugin.
+// A stand-in for the Tephra daemon, for tests and for checking Atlas by hand. It answers `source.list` and
+// `unit.list` over `POST /rpc` with JSON-RPC 2.0, behind the same bearer-token check. Nothing here is part of
+// the plugin.
 //
 //   node tests/fixtures/fake-tephra-server.mjs [--port 4812] [--host 127.0.0.1] [--token-file <path>]
 //
@@ -29,8 +30,12 @@ export function defaultTokenFile(env = process.env) {
  * Starts the fake daemon. `sources` may be an array or a function returning one (so a test can change what
  * the daemon lists between checks). Resolves to `{ server, port, requests, close }`; `requests` records every
  * request that reached the RPC handler as `{ authorization, body }`.
+ *
+ * `units` is what `unit.list` answers, by source name: an array of top-level entries (`{ name, kind }`, kind
+ * `folder` or `markdown`/`file`; the rest of Tephra's entry shape is filled in), or `{ entries, offline }` for a
+ * source whose folder is gone. It may also be a function returning that map. A source not in it is an RPC error.
  */
-export async function startFakeTephra({ port = 4812, host = "127.0.0.1", tokenFile = defaultTokenFile(), sources = DEFAULT_SOURCES } = {}) {
+export async function startFakeTephra({ port = 4812, host = "127.0.0.1", tokenFile = defaultTokenFile(), sources = DEFAULT_SOURCES, units = {} } = {}) {
 	const requests = [];
 	const server = createServer((req, res) => {
 		const chunks = [];
@@ -63,6 +68,16 @@ export async function startFakeTephra({ port = 4812, host = "127.0.0.1", tokenFi
 				const list = typeof sources === "function" ? sources() : sources;
 				return send(200, { jsonrpc: "2.0", id: body.id, result: list });
 			}
+			if (body.method === "unit.list") {
+				const map = typeof units === "function" ? units() : units;
+				const name = body.params && typeof body.params === "object" ? body.params.source : undefined;
+				const listing = typeof name === "string" && Object.hasOwn(map, name) ? map[name] : undefined;
+				if (listing === undefined) return send(200, { jsonrpc: "2.0", id: body.id, error: { code: -32602, message: `Unknown source: ${String(name)}` } });
+				const rows = Array.isArray(listing) ? listing : listing.entries;
+				const entries = rows.map((row, i) => ({ id: `${name}:${row.name}`, name: row.name, rel_path: row.name, kind: row.kind ?? "file", size: 1, mtime: 1 + i }));
+				const offline = !Array.isArray(listing) && listing.offline === true;
+				return send(200, { jsonrpc: "2.0", id: body.id, result: { source: name, folder: "", recursive: false, offline, needs_rescan: false, entries } });
+			}
 			return send(200, { jsonrpc: "2.0", id: body.id, error: { code: -32601, message: `Method not found: ${body.method}` } });
 		});
 	});
@@ -75,7 +90,11 @@ export async function startFakeTephra({ port = 4812, host = "127.0.0.1", tokenFi
 		server,
 		port: typeof address === "object" && address ? address.port : port,
 		requests,
-		close: () => new Promise((resolve) => server.close(() => resolve())),
+		close: () =>
+			new Promise((resolve) => {
+				server.close(() => resolve());
+				server.closeAllConnections?.(); // a kept-alive client would otherwise hold the close open
+			}),
 	};
 }
 
