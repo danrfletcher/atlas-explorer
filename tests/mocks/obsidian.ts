@@ -323,6 +323,17 @@ export class App {
 		openLinkText: async (_linktext: string, _sourcePath: string, _newLeaf?: boolean): Promise<void> => {},
 	};
 
+	/** Like Obsidian's internal `app.viewRegistry`: file extension (lower-case, no dot) -> view type. Core types
+	 * only; a test adds what a plugin such as VS Code Workbench would register (`rs`, `ts`, `toml`, ...). */
+	viewRegistry: { typeByExtension: Record<string, string> } = {
+		typeByExtension: { md: "markdown", canvas: "canvas", pdf: "pdf", png: "image", jpg: "image", jpeg: "image", svg: "image", mp3: "audio", mp4: "video" },
+	};
+	/** Every path handed to Obsidian's open-in-default-app, in order (a test may also replace the method). */
+	defaultAppOpens: string[] = [];
+	openWithDefaultApp = async (path: string): Promise<void> => {
+		this.defaultAppOpens.push(path);
+	};
+
 	/** Real Obsidian's own per-device `localStorage` helpers (`App.loadLocalStorage`/
 	 * `saveLocalStorage`, added 1.8.7) — an in-memory stand-in so `McpTokenStore` (PR-1.S1/R5),
 	 * constructed directly against `app`, works the same in a test as in the real plugin. */

@@ -18,6 +18,7 @@ import { resolveUnit } from "./unit-display";
 import { InboxSection, groupInboxSections, parseUnitList, sourceSectionKey, sourceUnitsFromEntries } from "./inbox-sections";
 import { isInSourcesFolder, skipsSourcesFolder, sourceLinkPath } from "./sources-path";
 import { excludeEntryMatcher } from "./source-excludes";
+import { openSourceBlock, openSourceFile } from "./source-open";
 import { TEPHRA_VAULT_SOURCE_NAME } from "./settings";
 import { isUsableSourceName, type TephraSource } from "./tephra-client";
 import type { TephraConnection } from "./tephra-connection";
@@ -1033,6 +1034,18 @@ function clickRunnerFor(view: { clickActionRunner: ClickActionRunner | null }, a
  * selectable nodes, and a select key would put them into `bucketVisibleOrder`'s shift-click ranges). Kept off
  * the markup (a property, not an attribute) so the row's pinned markup is unchanged. */
 const apiRowFocusKeys = new WeakMap<HTMLElement, string>();
+
+/** G7: with the Tephra toggle on, a file under `Sources/` opens by the source-open rule (a registered Obsidian
+ * view, else the default app). Everything else, and everything with the toggle off (G16), takes the original
+ * `getLeaf(newTab).openFile` path unchanged. A plain function, not a method, so `openRef` needs nothing but
+ * `this.plugin`. */
+async function openTFile(plugin: Pick<AtlasPlugin, "app" | "settings">, file: TFile, newTab: boolean): Promise<void> {
+	if (skipsSourcesFolder(plugin.settings, Platform.isMobile) && isInSourcesFolder(file.path)) {
+		await openSourceFile(plugin.app, file, newTab);
+		return;
+	}
+	await plugin.app.workspace.getLeaf(newTab).openFile(file);
+}
 
 export class AtlasExplorerView extends ItemView {
 	private filterText = "";
@@ -5612,18 +5625,29 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- shared actions ------------------------------------------------------------------------
 
+	/** Opens a unit. Every path here is a vault path looked up in the vault index, so only a real `TFile` is
+	 * ever opened (F2). A block ref outside `Sources/` opens by `openLinkText`; a block ref in a source note
+	 * opens its exact TFile with the subpath as view state, so a same-named note elsewhere can't win and no
+	 * note is ever created. */
 	private async openRef(ref: UnitRef, newTab = false): Promise<void> {
 		if (ref.kind === "block") {
+			if (skipsSourcesFolder(this.plugin.settings, Platform.isMobile) && isInSourcesFolder(ref.path)) {
+				// G7: never `openLinkText` for a source note. Obsidian can't resolve a path through a Sources/ folder
+				// link and would create a note there. Open the exact TFile; a missing one opens nothing (E5).
+				const source = this.plugin.app.vault.getAbstractFileByPath(ref.path);
+				if (source instanceof TFile) await openSourceBlock(this.plugin.app, source, ref.subpath, newTab);
+				return;
+			}
 			this.plugin.app.workspace.openLinkText(`${ref.path}#${ref.subpath}`, "", newTab);
 			return;
 		}
 		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
 		if (ref.kind === "folder" && file instanceof TFolder) {
 			const note = findInterfaceNote(this.plugin.app, file, this.plugin.settings);
-			if (note) await this.plugin.app.workspace.getLeaf(newTab).openFile(note);
+			if (note) await openTFile(this.plugin, note, newTab);
 			return;
 		}
-		if (file instanceof TFile) await this.plugin.app.workspace.getLeaf(newTab).openFile(file);
+		if (file instanceof TFile) await openTFile(this.plugin, file, newTab);
 	}
 
 	private revealInNativeExplorer(path: string): void {

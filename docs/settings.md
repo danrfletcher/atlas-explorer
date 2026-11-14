@@ -58,6 +58,12 @@ With the switch on and Tephra running, the vault's Inbox **+** button opens a sm
 
 To remove a source, right-click its Inbox header (`[whoop]`) and choose **Remove**, then confirm. Tephra stops indexing it and Atlas removes the `Sources/<name>` link. Your files in the source's folder are never touched. The vault's own header has no Remove. A real folder or note of yours at `Sources/<name>`, or a link Atlas didn't make, is left alone and a notice says so. If Tephra isn't running, both actions say so and do nothing: Atlas never starts Tephra.
 
+### Opening a file from a source
+
+Clicking a file in a source's Inbox section, middle-clicking it, choosing **Open** or **Open in new tab**, or clicking a file in a source module's Module Contents opens the file at its `Sources/<name>/…` path, the same way a vault file opens. Atlas asks Obsidian whether it has a view for the file's extension (case does not matter: `.PDF` is `.pdf`): if it does, the file opens in a tab (a new tab for middle-click and **Open in new tab**); if it doesn't, Atlas hands it to Obsidian's open-in-default-app, which opens it in the Mac app for that type. Notes, canvases, PDFs, images, audio and video are Obsidian's own. Code files open in Obsidian when a plugin such as VS Code Workbench has registered the extension, and in the default app when none has. A file with no extension (`Makefile`, `LICENSE`) follows the same rule.
+
+Word (`.doc`, `.docx`), PowerPoint (`.ppt`, `.pptx`), Excel (`.xls`, `.xlsx`) and Google Docs and Sheets (`.gdoc`, `.gsheet`) files always open in their own app, even if a plugin registers a text view for them, so they are never edited in Obsidian. A PDF opens only in Obsidian's read-only PDF view. Edits to a note are saved by Obsidian through the `Sources/<name>` link to the file in the source's folder; Atlas never writes to a file by opening it. A source's file that is missing does nothing when clicked, and a file Obsidian can't read (no permission on the folder) shows Obsidian's own error and an `[Atlas]` line in the developer console. With the switch off, files open exactly as before.
+
 ### Turning it off
 
 Atlas reads Tephra's token from `$XDG_DATA_HOME/tephra/token`, else `~/.local/share/tephra/token`. It re-reads it once if Tephra answers 401, and never stores or logs it.

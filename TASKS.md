@@ -544,3 +544,13 @@ Code-reviewed and unit/integration-tested only; the container run (real folder p
 - Not live-checked here: the real Electron folder picker (`window.require("electron").remote.dialog`) and a real `tephrad` register/unregister. Tephra sends no `graph:changed` for either; Atlas asks for a check itself.
 - Not built here: Rename source (PR-11).
 
+## Atlas-22 PR-6: Open a source's files (G7, F2, F3, F8, E1, E5, GP3)
+
+Code-reviewed and unit/integration-tested only; the container run (real Obsidian, real VS Code Workbench, real Mac apps) is the tester's.
+
+- [x] G7 `src/source-open.ts`: `chooseOpener(file, registeredExtensions)` (pure) and `openSourceFile`; `ExplorerView.openRef` routes every `Sources/` file through it (click, middle-click, Open, Open in new tab, Enter, Module Contents `onOpenFile`, a module's interface note). Registered by Obsidian's live `app.viewRegistry.typeByExtension` plus a core floor.
+- [x] F8 deny-list (`doc`, `docx`, `ppt`, `pptx`, `xls`, `xlsx`, `gdoc`, `gsheet`) beats the registry; `.pdf` only ever opens in Obsidian's PDF view.
+- [x] G7 block refs in a source note open the exact TFile via `openFile` with an `eState` subpath (`openSourceBlock`), not `openLinkText`: live, `openLinkText` on a `Sources/` path created a stray note. See `docs/decisions.md`.
+- [x] G16 toggle off (or mobile): `openRef` takes the original `getLeaf(newTab).openFile` path for every file; so does a vault file outside `Sources/` with the toggle on.
+- [x] E5/E1/F2/F3 tests: missing and deleted-after-render rows do nothing and create nothing; no Tephra call from `openRef`; failed opens are caught and logged; no write API on any open; a real symlink in a temp dir stays a symlink with the file's mtime unchanged.
+- Not live-checked here: `app.viewRegistry` and `app.openWithDefaultApp` are undocumented Obsidian internals (checked against the mock only); real VS Code Workbench extensions; real Mac apps.
