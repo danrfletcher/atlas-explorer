@@ -6,6 +6,31 @@ import type { RequestResult, ScheduleTimeout } from "./api-http";
 /** Tephra's daemon, local only. G16: nothing in Atlas builds a client unless the Tephra toggle is on. */
 export const TEPHRA_RPC_URL = "http://127.0.0.1:4812/rpc";
 
+/**
+ * The RPC URL to use: the saved `tephraUrl` override when it is a loopback `http://` address with an explicit
+ * port, otherwise Tephra's default. The bearer token goes to whatever this returns, so the override is
+ * accepted only for `127.0.0.1`, `localhost` or `[::1]`, with no credentials, no query and no path other than
+ * `/` or `/rpc`; anything else (a remote host, `https:`, `127.0.0.1@evil.example`, a look-alike such as
+ * `127.0.0.1.evil.example`) falls back to the default. It exists so a second Tephra can run on a scratch
+ * port next to the real one; it has no UI and is set by hand in `data.json`.
+ */
+export function resolveTephraRpcUrl(raw: unknown): string {
+	if (typeof raw !== "string" || raw.trim() === "") return TEPHRA_RPC_URL;
+	let url: URL;
+	try {
+		url = new URL(raw.trim());
+	} catch {
+		return TEPHRA_RPC_URL;
+	}
+	const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+	const plainPath = url.pathname === "/" || url.pathname === "/rpc";
+	const port = Number(url.port);
+	const portOk = url.port !== "" && Number.isInteger(port) && port >= 1 && port <= 65535;
+	if (url.protocol !== "http:" || !loopback || !portOk || !plainPath) return TEPHRA_RPC_URL;
+	if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") return TEPHRA_RPC_URL;
+	return `http://${url.hostname}:${url.port}/rpc`;
+}
+
 /** Each request attempt gives up after this long; `requestUrl` can't be aborted, so the client races it. */
 export const TEPHRA_CALL_TIMEOUT_MS = 5000;
 
@@ -28,6 +53,34 @@ export interface TephraRequestParams {
 /** Resolves with the status and body, rejects only on a genuine network failure; never throws for a
  * non-2xx status (same contract as `RequestFn` in `api-http.ts`). */
 export type TephraRequestFn = (params: TephraRequestParams) => Promise<RequestResult>;
+
+/** What a socket reports back to its owner: text messages and, once, that it closed. */
+export interface TephraSocketParams {
+	/** The `http://` URL of the endpoint; the socket upgrades it. */
+	url: string;
+	/** Sent on the handshake only. Includes the bearer credential: never log or store it. */
+	headers: Record<string, string>;
+	onText: (text: string) => void;
+	/** Called once when the connection ends for any reason except the owner's own `close()`. */
+	onClose: () => void;
+}
+
+export interface TephraSocketHandle {
+	close(): void;
+}
+
+/** `rejected`: the server answered the handshake with a plain HTTP status (401 for a bad token). */
+export type TephraSocketResult = { kind: "open"; handle: TephraSocketHandle } | { kind: "rejected"; status: number } | { kind: "error" };
+
+/** Opens Tephra's push channel. `openNodeWebSocket` backs it in production; tests pass a fake. */
+export type TephraSocketFn = (params: TephraSocketParams) => Promise<TephraSocketResult>;
+
+export interface TephraPushHandlers {
+	onText: (text: string) => void;
+	onClose: () => void;
+}
+
+export type TephraPushResult = { ok: true; handle: TephraSocketHandle } | { ok: false; error: TephraError };
 
 export type TephraErrorKind = "no-token" | "unauthorized" | "timeout" | "network" | "http" | "non-json" | "rpc" | "bad-response";
 
@@ -100,6 +153,8 @@ export interface TephraClientOptions {
 	/** Reads the token file as text (throws if it can't). Defaults to Node's `fs`. */
 	readFile?: (path: string) => Promise<string>;
 	url?: string;
+	/** Opens the push channel (`graph:changed`). Without one, `openPush` reports it isn't available. */
+	openSocket?: TephraSocketFn;
 	timeoutMs?: number;
 	scheduleTimeout?: ScheduleTimeout;
 }
@@ -155,6 +210,32 @@ export class TephraClient {
 			return { ok: false, error: { kind: "bad-response", message: "source.list did not return a list" } };
 		}
 		return { ok: true, sources: parseTephraSources(result.result) };
+	}
+
+	/**
+	 * Opens the push channel with the same token and the same one-reread-on-401 rule as `call`. The token
+	 * goes to the socket as a header and stays out of the result. Nothing throws.
+	 */
+	async openPush(handlers: TephraPushHandlers): Promise<TephraPushResult> {
+		const openSocket = this.options.openSocket;
+		if (!openSocket) return { ok: false, error: { kind: "network", message: "Tephra's push channel isn't available here" } };
+		for (const reread of [false, true]) {
+			const token = await this.getToken(reread);
+			if (token === null) {
+				return { ok: false, error: { kind: "no-token", message: "Tephra's token file is missing, empty or unreadable" } };
+			}
+			let result: TephraSocketResult;
+			try {
+				result = await openSocket({ url: this.url, headers: { Authorization: `Bearer ${token}` }, ...handlers });
+			} catch {
+				return { ok: false, error: { kind: "network", message: "Tephra is unreachable" } };
+			}
+			if (result.kind === "open") return { ok: true, handle: result.handle };
+			if (result.kind === "error") return { ok: false, error: { kind: "network", message: "Tephra is unreachable" } };
+			if (result.status !== 401) return { ok: false, error: { kind: "http", message: `Tephra answered HTTP ${result.status}`, status: result.status } };
+			// 401: Tephra rotated its token. Read the file again once, then give up.
+		}
+		return { ok: false, error: { kind: "unauthorized", message: "Tephra rejected the token", status: 401 } };
 	}
 
 	private async attempt(method: string, params: unknown, rereadToken: boolean): Promise<Attempt> {

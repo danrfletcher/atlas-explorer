@@ -14,6 +14,9 @@ export interface TephraControllerDeps {
 	/** Runs the registered teardown steps in order; defaults to the plugin-wide registry. */
 	runTeardown?: () => Promise<TephraTeardownFailure[]>;
 	reportTeardownFailures: (failures: TephraTeardownFailure[]) => void;
+	/** E13: asked before the toggle goes on. Resolving false refuses it: the setting stays off, nothing is saved
+	 * or connected, and the callee has already said why. Optional: absent means always allowed. */
+	beforeEnable?: () => Promise<boolean>;
 	/** Called after every applied change, with the setting already updated (the link hook re-syncs here). */
 	afterChange: (enabled: boolean) => void;
 }
@@ -79,18 +82,28 @@ export class TephraController {
 	private async drain(): Promise<void> {
 		while (!this.disposed && this.applied !== this.desired) {
 			const target = this.desired;
+			let result = target;
 			try {
-				if (target) await this.applyOn();
-				else await this.applyOff();
+				if (target) {
+					if (await this.applyOn()) result = true;
+					else {
+						// Refused (E13): stays off, and a later flip is a fresh request.
+						result = false;
+						this.desired = false;
+					}
+				} else await this.applyOff();
 			} catch (error) {
 				console.error("[Atlas] turning Tephra on or off failed", error);
 			} finally {
-				this.applied = target; // never retried in a loop: a failed save leaves the in-memory state as asked
+				this.applied = result; // never retried in a loop: a failed save leaves the in-memory state as asked
 			}
 		}
 	}
 
-	private async applyOn(): Promise<void> {
+	/** Returns false when `beforeEnable` refused: then nothing was changed. */
+	private async applyOn(): Promise<boolean> {
+		if (this.deps.beforeEnable && !(await this.deps.beforeEnable())) return false;
+		if (this.disposed) return false;
 		this.deps.setEnabled(true);
 		try {
 			await this.deps.save();
@@ -101,6 +114,7 @@ export class TephraController {
 				this.deps.afterChange(true);
 			}
 		}
+		return true;
 	}
 
 	private async applyOff(): Promise<void> {

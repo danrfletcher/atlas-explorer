@@ -7,6 +7,7 @@ import {
 	TephraClient,
 	parseTephraSources,
 	parseTephraToken,
+	resolveTephraRpcUrl,
 	resolveTephraTokenPath,
 	type TephraRequestFn,
 	type TephraRequestParams,
@@ -363,6 +364,61 @@ describe("against the fake Tephra server (a real HTTP round trip on an ephemeral
 			const second = await client.listSources();
 			expect(second.ok).toBe(true);
 			expect(fake.requests.map((r) => r.authorization)).toEqual([`Bearer ${TOKEN_A}`, `Bearer ${TOKEN_A}`, `Bearer ${TOKEN_B}`]);
+		} finally {
+			await fake.close();
+		}
+	});
+});
+
+describe("the loopback URL override (resolveTephraRpcUrl)", () => {
+	it("is the default when nothing, an empty string or a non-string is saved", () => {
+		for (const raw of [undefined, null, "", "   ", 4812, {}, ["http://127.0.0.1:5000"]]) expect(resolveTephraRpcUrl(raw), String(raw)).toBe(TEPHRA_RPC_URL);
+	});
+
+	it("accepts a loopback http address with a port, and always ends in /rpc", () => {
+		expect(resolveTephraRpcUrl("http://127.0.0.1:53120")).toBe("http://127.0.0.1:53120/rpc");
+		expect(resolveTephraRpcUrl("http://127.0.0.1:53120/")).toBe("http://127.0.0.1:53120/rpc");
+		expect(resolveTephraRpcUrl("  http://127.0.0.1:53120/rpc  ")).toBe("http://127.0.0.1:53120/rpc");
+		expect(resolveTephraRpcUrl("http://localhost:6000/rpc")).toBe("http://localhost:6000/rpc");
+		expect(resolveTephraRpcUrl("http://[::1]:6000")).toBe("http://[::1]:6000/rpc");
+	});
+
+	it("never accepts an address the token must not go to", () => {
+		const refused = [
+			"http://example.com:4812/rpc", // remote host
+			"http://192.168.1.5:4812/rpc", // LAN
+			"http://0.0.0.0:4812/rpc",
+			"http://127.0.0.1.evil.example:4812/rpc", // look-alike
+			"http://127.0.0.1:4812@evil.example/rpc", // userinfo trick: the host is evil.example
+			"http://user:pw@127.0.0.1:4812/rpc", // credentials
+			"https://127.0.0.1:4812/rpc", // not http
+			"ws://127.0.0.1:4812/rpc",
+			"http://127.0.0.1/rpc", // no explicit port
+			"http://127.0.0.1:0/rpc",
+			"http://127.0.0.1:4812/other", // a path that isn't /rpc
+			"http://127.0.0.1:4812/rpc?x=1",
+			"http://127.0.0.1:4812/rpc#frag",
+			"not a url",
+			"127.0.0.1:4812",
+		];
+		for (const raw of refused) expect(resolveTephraRpcUrl(raw), raw).toBe(TEPHRA_RPC_URL);
+	});
+
+	it("a client built with the override talks to that port, and only that port (a real round trip)", async () => {
+		writeFileSync(tokenFile, TOKEN_A);
+		const fake = await startFakeTephra({ port: 0, tokenFile });
+		try {
+			const urls: string[] = [];
+			const request: TephraRequestFn = async ({ url, method, headers, body }) => {
+				urls.push(url);
+				const response = await fetch(url, { method, headers, body });
+				return { status: response.status, text: await response.text() };
+			};
+			const client = clientWith(request, { url: resolveTephraRpcUrl(`http://127.0.0.1:${fake.port}`) });
+			const listed = await client.listSources();
+			expect(listed.ok && listed.sources.map((s) => s.name)).toEqual(["notes", "tephra", "whoop"]);
+			expect(urls).toEqual([`http://127.0.0.1:${fake.port}/rpc`]);
+			expect(fake.requests.map((r) => r.authorization)).toEqual([`Bearer ${TOKEN_A}`]);
 		} finally {
 			await fake.close();
 		}

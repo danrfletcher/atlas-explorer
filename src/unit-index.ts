@@ -1,5 +1,6 @@
-import { App, TAbstractFile, TFile, TFolder } from "obsidian";
+import { App, Platform, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AtlasSettings, isCoveredByNoAutoPromote, normalizeNoAutoPromoteFolders } from "./settings";
+import { isInSourcesFolder, skipsSourcesFolder } from "./sources-path";
 import { AddedItem, DismissScope, Unit, UnitRef, rewritePathString, rewriteRefPath, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 
 /** PR-2: adds or removes `ref` from `list` by `unitRefKey` equality, returning a new array only when
@@ -475,11 +476,24 @@ export class UnitIndex {
 		return changed;
 	}
 
+	/** R3-1: with the Tephra toggle on (desktop), `Sources/` belongs to Tephra's links, not to the vault: this
+	 * index never makes it a module, never promotes a file into or out of it, and never lists a manual
+	 * promotion under it. With the toggle off a real folder called `Sources` is an ordinary module. */
+	private skipsSources(): boolean {
+		return skipsSourcesFolder(this.settings, Platform.isMobile);
+	}
+
+	private isExcludedBySources(path: string): boolean {
+		return isInSourcesFolder(path) && this.skipsSources();
+	}
+
 	/** A path (folder or file) is excluded unless it's inside the pool folder — the pool folder
-	 * itself is excluded from being a folder-unit, but its contents are never excluded as files. */
+	 * itself is excluded from being a folder-unit, but its contents are never excluded as files.
+	 * `Sources/` is excluded as a whole while the Tephra toggle is on (R3-1). */
 	private isExcluded(path: string): boolean {
 		const poolFolder = this.settings.poolFolder;
 		if (path.startsWith(`${poolFolder}/`)) return false;
+		if (isInSourcesFolder(path) && this.skipsSources()) return true;
 		return this.settings.excludedFolders.some((excluded) => path === excluded || path.startsWith(`${excluded}/`));
 	}
 
@@ -616,6 +630,7 @@ export class UnitIndex {
 
 	private applyManualPromotions(): void {
 		for (const ref of this.manualPromotions) {
+			if (this.isExcludedBySources(ref.path)) continue; // R3-1: kept in `manualPromotions`, so they return with the toggle's off state
 			if (ref.kind === "file") {
 				this.promotedFiles.set(ref.path, { type: "promoted-file", path: ref.path, topLevelFolder: this.topLevelFolderFor(ref.path) ?? "" });
 			} else if (ref.kind === "folder") {

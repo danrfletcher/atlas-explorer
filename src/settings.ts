@@ -3,9 +3,8 @@ import type AtlasPlugin from "./main";
 import { rewritePathString } from "./types";
 import { normalizeHexColor } from "./statuses";
 import { closeActivePopup, openColorPickerPopup } from "./status-popup";
-import { TEPHRA_INSTALL_COMMAND, TEPHRA_REPO_URL, type TephraSource } from "./tephra-client";
+import { TEPHRA_INSTALL_COMMAND, TEPHRA_REPO_URL, isUsableSourceName, type TephraSource } from "./tephra-client";
 import type { TephraSnapshot } from "./tephra-connection";
-import { refreshExcludedFilesPane, setSourceExcluded } from "./tephra-exclude";
 
 export interface AtlasSettings {
 	poolFolder: string;
@@ -62,6 +61,19 @@ export interface AtlasSettings {
 	/** G9 (PR-1, internal, no UI): force the Q13 fallback renderer even when the link-resolution hook
 	 * would install — for checking the fallback live. Only meaningful while `tephraEnabled` is on. */
 	tephraLinkFallback: boolean;
+	/** G2/R3-3/E13: the `Sources/<name>` folder links Atlas made, by source name, with the target each was
+	 * given. This record is what "Atlas owns this link" means: Atlas replaces or removes only a link listed
+	 * here, and `Sources/` is Atlas's only while every entry in it is a link listed here. Read through
+	 * `normalizeTephraLinks`. */
+	tephraLinks: Record<string, string>;
+	/** G2/R3-2: the Obsidian Excluded files entries Atlas added, by source name. Toggle-off removes exactly
+	 * these and no entry the user wrote. Read through `normalizeTephraExcludes`. */
+	tephraExcludes: Record<string, string[]>;
+	/** Advanced, no UI: a loopback `http://127.0.0.1:<port>` address for Tephra instead of the default
+	 * port, set by hand in `data.json` (to run a second Tephra on a scratch port). Anything that isn't a
+	 * loopback http address is ignored, because the Tephra token is sent to this address. Read through
+	 * `resolveTephraRpcUrl`. */
+	tephraUrl?: string;
 }
 
 export interface TephraSourceSetting {
@@ -90,6 +102,8 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	tephraEnabled: false,
 	tephraSourceSettings: {},
 	tephraLinkFallback: false,
+	tephraLinks: {},
+	tephraExcludes: {},
 };
 
 /** PR-1 (G1): anything in `data.json` that isn't a real boolean (absent, a string, `null`...) is off,
@@ -124,6 +138,31 @@ export function normalizeTephraSettings(raw: { tephraEnabled?: unknown; tephraSo
 		tephraSourceSettings: normalizeTephraSourceSettings(raw.tephraSourceSettings),
 		tephraLinkFallback: normalizeTephraFlag(raw.tephraLinkFallback),
 	};
+}
+
+/** G2: `tephraLinks` from a hand-edited `data.json`. Only a plain object counts; an entry survives only when
+ * its key is one safe path segment (it becomes a path under `Sources/`, so `..` or `a/b` must never get
+ * through) and its value is an absolute path. Always a fresh object. */
+export function normalizeTephraLinks(raw: unknown): Record<string, string> {
+	const result: Record<string, string> = {};
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return result;
+	for (const [name, target] of Object.entries(raw)) {
+		if (!isUsableSourceName(name) || typeof target !== "string" || !target.startsWith("/")) continue;
+		result[name] = target;
+	}
+	return result;
+}
+
+/** R3-2: `tephraExcludes` from a hand-edited `data.json`: a plain object of string lists, with a safe key. */
+export function normalizeTephraExcludes(raw: unknown): Record<string, string[]> {
+	const result: Record<string, string[]> = {};
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return result;
+	for (const [name, list] of Object.entries(raw)) {
+		if (!isUsableSourceName(name) || !Array.isArray(list)) continue;
+		const entries = list.filter((entry): entry is string => typeof entry === "string" && entry !== "");
+		if (entries.length > 0) result[name] = entries;
+	}
+	return result;
 }
 
 /** True unless the source's own setting says off: a source Atlas hasn't seen yet shows in search & graph. */
@@ -595,7 +634,9 @@ export class AtlasSettingTab extends PluginSettingTab {
 				toggle.setValue(showsInSearch(this.plugin.settings, source.name)).onChange(async (value) => {
 					this.plugin.settings.tephraSourceSettings[source.name] = { showInSearch: value };
 					await this.plugin.saveSettings();
-					if (setSourceExcluded(this.app.vault, source.name, !value)) refreshExcludedFilesPane(this.app);
+					// The Excluded files entry and Atlas's record of it change inside the Sources folder's job chain, which
+					// reads the setting when it reconciles: a sync already running can't undo this with a stale value.
+					await this.plugin.sourcesFolder.resync();
 				})
 			);
 	}

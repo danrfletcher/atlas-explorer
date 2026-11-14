@@ -92,7 +92,7 @@ Under **Settings → Atlas Explorer**, with three tabs, **Basic**, **Status** an
 
 The **Status** tab holds status sets, the color palette, Glow, Retain icons and Retained icon color.
 
-The **Tephra** tab (desktop only) holds one switch, **Turn on Tephra multi-data source vault** (off by default), and, when it is on, the connection status and the list of Tephra sources. Turn it off before uninstalling Atlas.
+The **Tephra** tab (desktop only) holds one switch, **Turn on Tephra multi-data source vault** (off by default), and, when it is on, the connection status and the list of Tephra sources. While it is on, Atlas links each top-level source into the vault as `Sources/<name>`, adds `Sources/` to the vault `.gitignore` and each source's `.git/` and `.gitignore` entries to Excluded files, and refuses to turn on if a `Sources` folder or file of yours is in the way. Turn it off before uninstalling Atlas: that removes the links and Excluded entries (never your files). See [Settings](docs/settings.md).
 
 ## Commands
 

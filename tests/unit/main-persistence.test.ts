@@ -39,6 +39,16 @@ describe("AtlasPlugin.loadFromData", () => {
 		expect(loaded.dismissedGlobal).toEqual([]);
 		expect(loaded.addedItems).toEqual([]);
 	});
+
+	it("keeps a hand-set tephraUrl through load, and leaves it unset when data.json has none", () => {
+		const load = (settings: object) => {
+			const plugin = makePlugin();
+			(plugin as unknown as { loadFromData(d: unknown): void }).loadFromData({ settings: { ...DEFAULT_SETTINGS, ...settings }, manualPromotions: [], views: [], activeViewId: "default", expandedModuleFolders: [], statusSets: [], colorPalette: [] });
+			return (plugin as unknown as { settings: AtlasSettings }).settings;
+		};
+		expect(load({ tephraUrl: "http://127.0.0.1:53120" }).tephraUrl).toBe("http://127.0.0.1:53120");
+		expect(load({}).tephraUrl).toBeUndefined();
+	});
 });
 
 describe("AtlasPlugin.persistNow", () => {
@@ -208,7 +218,7 @@ describe("highlightOpenNote persistence (PR-1.F2, F3)", () => {
 		const persisted = saved[0] as Record<string, unknown>;
 
 		const settingsKeys = Object.keys(persisted.settings as AtlasSettings).sort();
-		expect(settingsKeys).toEqual([...Object.keys(fixture.settings), "noAutoPromoteFolders", "highlightOpenNote", "mcpServerEnabled", "autoPromotion", "tephraEnabled", "tephraSourceSettings", "tephraLinkFallback"].sort());
+		expect(settingsKeys).toEqual([...Object.keys(fixture.settings), "noAutoPromoteFolders", "highlightOpenNote", "mcpServerEnabled", "autoPromotion", "tephraEnabled", "tephraSourceSettings", "tephraLinkFallback", "tephraLinks", "tephraExcludes"].sort());
 
 		// No top-level key beyond what PR-2 already established (dismissedByView/dismissedGlobal/
 		// addedItems, defaulted here since the fixture predates them) and atlas-17 PR-2's

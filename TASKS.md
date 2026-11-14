@@ -463,6 +463,47 @@ Two bugs Dan found post-release (v0.2.0): the truncation placeholder (PR 19) doe
 
 ---
 
+## Atlas-22 PR-3: E6 (the Sources link follows Tephra) and the Tephra change it depends on
+
+E6 is split by who is responsible (design review, provisional until Dan ratifies it). PR-3 owns two bounds and meets both. The 5 s bound against an unmodified Tephra is not a line of this PR.
+
+- [x] **E6, Atlas's half: 5 s from a `graph:changed` push.** When Tephra sends `graph:changed` after a `tephractl source add` or `remove`, Atlas creates or removes `Sources/<name>` within 5 s of the notification (in practice about a second: the push client in `tephra-ws-frames.ts`, `tephra-socket-node.ts` and `tephra-connection.ts` feeds `requestCheck()`, held to one check per second during a burst). If the notification is lost, the 10 s check or the next focus check catches it. `tests/integration/sources-folder.test.ts` covers it with a fake client that emits `graph:changed`.
+- [x] **E6, what Tephra does today (dev b04c1cf): no push on register/unregister.** `source.register` and `source.unregister` send no `graph:changed` (`crates/tephrad/src/main.rs` ~480-515 forwards only the registry's `DaemonEvent::SourceChanged`; `SourceRegistry::register` / `::unregister` in `crates/tephrad/src/registry.rs` send no event; the two RPC methods in `rpc/server.rs` only call `graph_refresh.refresh()`, which broadcasts nothing). So a source added or removed with `tephractl` while Obsidian is open gets or loses its link at the next 10 s check (`TEPHRA_CHECK_INTERVAL_MS`), within 12 s of `tephractl` returning, or within 2 s when the Obsidian window regains focus. That is the bound this PR meets and checks. `tests/integration/sources-folder.test.ts` covers add/remove with no push being caught by the 10 s tick.
+- **Tracked on the Tephra side, not here:** the 5 s bound for a `tephractl` add or remove against a real Tephra needs Tephra to broadcast `graph:changed` from `source.register` and `source.unregister`. Atlas adds no workaround (no faster polling, no watching Tephra's files).
+- [x] Confirmed live against a real `tephrad` built from Tephra b04c1cf (scratch port, scratch config and data dirs; real `TephraClient`, `openNodeWebSocket`, `TephraConnection` with its 10 s timer, and `SourcesFolder`, run from a throwaway vitest file, not in the suite):
+  - `Sources/` held exactly `tephra` and `whoop` (no link for `notes`); `Sources/tephra/README.md` read through the link; Excluded files held `Sources/tephra/.git/`, `…/target/`, `…/.DS_Store` and `Sources/whoop/.git/`; vault `.gitignore` was `Sources/`. Toggle off removed `Sources/`, the link records and the exclude entries.
+  - The push channel connects with the token and receives `graph:changed` for a `.md` write and for a `.gitignore` edit in a source, but for no `source add` or `source remove` (0 pushes in 8 s each, twice over). That is the "no push" fact above.
+  - With no push, a `source add` or `remove` was followed 9.9, 10.1, 10.0 and 10.0 s later (an earlier identical run saw one add at 0.2 s, consistent with the add landing just before a tick): inside the 12 s bound.
+  - With `Sources/tephra` and `Sources/whoop` as real symlinks in the notes source, Tephra's `unit.list` (`tephractl ls notes -r`) and `search` returned no `Sources/…` file path (G2 "nothing is indexed twice" holds). Tephra does list a `Sources` folder row with size 2 whose own listing is empty; that is a Tephra cosmetic quirk, not a double index.
+- [x] Checked live in Obsidian 1.14.4 by the tester (scratch Tephra via the loopback-only `tephraUrl` in `data.json`): GP1 (file explorer shows `Sources/tephra` and `Sources/whoop`, no `Sources` module in the Inbox), R3-4 (view entry missing on toggle-off, back with its status on toggle-on), E12 (Quick Switcher omits `Sources/tephra/target/` and finds `Sources/tephra/README`). Global search for E12 was re-checked by the coder with a symlinked scratch folder and the same `userIgnoreFilters` call: with `target/` excluded only `README.md` is found, without it both are. E6 with `tephractl` and no push showed the link 2.4, 3.9 and 5.1 s after `source add`: the 10 s check landing, inside the 12 s bound.
+- [x] Live E6 with the relay, coder, against a real `tephrad` built from b04c1cf (scratch ports, scratch config and data dirs), with the plugin's real `TephraClient`, `openNodeWebSocket`, `TephraConnection`, `TephraController` and `SourcesFolder` pointed at the relay as `tephraUrl` does (a throwaway vitest file, kept in `evidence/PR-3/`, not in the suite; the Obsidian container run is the tester's). Log: `evidence/PR-3/e6-relay-live.log`.
+  - Stand-in push (10 s timer parked so only the frame can trigger a check; the log says "stand-in push"): after `tephractl source add` nothing happened for 3 s; the frame was sent and `Sources/recipes` appeared 0.05 s later. Same for `source remove`. Two rounds each; limit 5 s.
+  - No push (the relay never signalled, real 10 s timer): `Sources/recipes` appeared 8.5, 10.0 and 10.0 s after `tephractl` returned, and went 10.0, 10.0 and 10.0 s after; limit 12 s.
+  - Focus (timer parked; the window `focus` handler in `main.ts` calls `requestCheck()`): the link appeared 0.05 s after the check and went 0.05 s after, in two rounds; limit 2 s. The in-Obsidian `window.dispatchEvent(new Event('focus'))` check is left to the tester.
+
+### Running the E6 relay (`scripts/tephra-relay.mjs`)
+
+A dev script, outside `src/` and not bundled into `main.js`. It sits between Obsidian and the real `tephrad`:
+
+- Plain HTTP calls (the JSON-RPC `POST /rpc`) are forwarded to `tephrad` and the reply returned as it came. Only `Host` is rewritten to name `tephrad`. Nothing in a body or header is read, changed or logged.
+- The push channel (the WebSocket upgrade on `GET /rpc`) is answered by the relay itself and never reaches `tephrad`. It sends nothing until it is signalled, then one `graph:changed` text frame to each connected push client. It only requires an `Authorization` header on that upgrade; `tephrad` still checks the token on every forwarded call.
+- It binds `127.0.0.1` only (relay port and the optional control port) and refuses a `--target` that isn't an `http://` loopback address with an explicit port.
+
+Run it (pick free scratch ports, not Tephra's default 4812):
+
+```
+node scripts/tephra-relay.mjs --target http://127.0.0.1:<tephrad-port> --port <relay-port> [--control-port <port>]
+```
+
+It prints its PID and ports. Set `"tephraUrl": "http://127.0.0.1:<relay-port>"` in `settings` in the plugin's `data.json` (see docs/settings.md) and reload the plugin. Send the frame with any of: `kill -USR1 <relay pid>`, a line `push` on the relay's stdin, or `curl -X POST http://127.0.0.1:<control-port>/push` (200 with the client count, 409 when no push client is connected). Every frame is logged with an ISO timestamp and the words "stand-in push": the frame is the one thing real Tephra doesn't send for a `source add` or `remove`, so keep that wording in any evidence log. Stop it with Ctrl-C or `kill <pid>` (only the PID you started).
+
+Live E6 checkpoints:
+
+1. Stand-in push: with the relay in front of a real `tephrad`, run `tephractl source add recipes ~/Documents/Recipes` (b04c1cf's syntax is `<name> <path>`), then signal the relay: `Sources/recipes` should appear within 5 s of the logged frame. Then `tephractl source remove recipes` and signal again: it should go within 5 s.
+2. No push: do not signal. `tephractl source add`, and `Sources/recipes` should appear within 12 s of `tephractl` returning; `tephractl source remove`, and it goes within 12 s. Then add again and fire the window `focus` event (for example `window.dispatchEvent(new Event('focus'))` through the container's DevTools protocol): the link should appear within 2 s.
+
+---
+
 ## Cross-cutting (verify at the end, not tied to one PR)
 
 - [x] Nothing in the plugin's DnD/promotion/placement code path ever calls `vault.rename` or `fileManager.renameFile` for the bucket/view mechanics (Part 7 — grep-verify across the whole codebase, not just F8) — grepped the entire `src/` tree for both calls: zero matches other than the code comment in `explorer-view.ts` documenting the constraint

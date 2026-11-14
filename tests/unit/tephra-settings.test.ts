@@ -6,6 +6,11 @@ import { AtlasSettingTab, DEFAULT_SETTINGS, normalizeTephraSettings, normalizeTe
 import type { AtlasSettings } from "../../src/settings";
 import { TephraConnection, type TephraConnectionClient } from "../../src/tephra-connection";
 import type { TephraSource, TephraSourcesResult } from "../../src/tephra-client";
+import { SourcesFolder } from "../../src/sources-folder";
+import { SourceDeleteClassifier } from "../../src/source-delete-classifier";
+import { vaultExcludeConfig } from "../../src/source-excludes";
+import { refreshExcludedFilesPane } from "../../src/tephra-exclude";
+import { MemoryFs } from "../memory-fs";
 
 interface ToggleState {
 	value?: boolean;
@@ -134,10 +139,32 @@ async function buildTab(opts: { enabled?: boolean; tephraSourceSettings?: AtlasS
 	const app = new App();
 	const settings: AtlasSettings = { ...DEFAULT_SETTINGS, tephraEnabled: opts.enabled ?? false, tephraSourceSettings: opts.tephraSourceSettings ?? {} };
 	const state: { connection: TephraConnection | null } = { connection: opts.connection ?? null };
+	// The real Sources folder over an in-memory disk: the tab hands the setting change to it, and it is what
+	// edits Excluded files and keeps the record of the entries it added.
+	const memfs = new MemoryFs().dir("/vault").dir(WHOOP.path);
+	const sourcesFolder = new SourcesFolder({
+		fs: memfs,
+		getVaultPath: () => "/vault",
+		isMobile: () => false,
+		records: {
+			getLinks: () => settings.tephraLinks,
+			setLinks: (next) => void (settings.tephraLinks = next),
+			getExcludes: () => settings.tephraExcludes,
+			setExcludes: (next) => void (settings.tephraExcludes = next),
+			save: async () => {},
+		},
+		excludeConfig: () => vaultExcludeConfig(app.vault as never),
+		showsInSearch: (name) => showsInSearch(settings, name),
+		classifier: new SourceDeleteClassifier({ getLinkTargets: () => settings.tephraLinks, targetExists: () => true }),
+		notify: () => {},
+		onExcludesChanged: () => refreshExcludedFilesPane(app as never),
+	});
+	sourcesFolder.start();
 	const plugin = {
 		settings,
 		app,
 		saveSettings: vi.fn(async () => {}),
+		sourcesFolder,
 		setTephraEnabled: vi.fn(async (value: boolean) => {
 			settings.tephraEnabled = value;
 			if (!value) {
@@ -157,7 +184,7 @@ async function buildTab(opts: { enabled?: boolean; tephraSourceSettings?: AtlasS
 		const button = [...containerEl.querySelectorAll<HTMLButtonElement>(".atlas-settings-tab")].find((b) => b.textContent === "Tephra")!;
 		button.click();
 	};
-	return { tab, plugin, containerEl, rows: Setting.rows, app, state, open };
+	return { tab, plugin, containerEl, rows: Setting.rows, app, state, open, sourcesFolder, memfs };
 }
 
 const textOf = (el: Element) => el.textContent ?? "";
@@ -317,26 +344,46 @@ describe("the Tephra tab: toggle on", () => {
 
 	it("turning a source's toggle off saves it and adds Sources/<name>/ to Excluded files; turning it on removes exactly that", async () => {
 		const { connection, answer } = controllableConnection();
-		const { open, rows, plugin, app } = await buildTab({ enabled: true, connection });
+		const { open, rows, plugin, app, sourcesFolder } = await buildTab({ enabled: true, connection });
 		app.vault.setConfig("userIgnoreFilters", ["Private/"]);
 		connection.start();
 		open();
 		await answer({ ok: true, sources: [WHOOP] });
+		await sourcesFolder.sync([WHOOP]); // the sync the connection's check triggers in the plugin
+		expect(app.vault.getConfig("userIgnoreFilters")).toEqual(["Private/", "Sources/whoop/.git/"]);
 		const toggle = rows.filter((r) => r.name === "Show in Obsidian search & graph").at(-1)!.toggles[0];
 
 		await toggle.onChange!(false);
 		expect(plugin.settings.tephraSourceSettings).toEqual({ whoop: { showInSearch: false } });
 		expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
-		expect(app.vault.getConfig("userIgnoreFilters")).toEqual(["Private/", "Sources/whoop/"]);
+		expect(app.vault.getConfig("userIgnoreFilters")).toEqual(["Private/", "Sources/whoop/.git/", "Sources/whoop/"]);
+		expect(plugin.settings.tephraExcludes).toEqual({ whoop: ["Sources/whoop/", "Sources/whoop/.git/"] });
 
 		await toggle.onChange!(true);
 		expect(plugin.settings.tephraSourceSettings).toEqual({ whoop: { showInSearch: true } });
-		expect(app.vault.getConfig("userIgnoreFilters")).toEqual(["Private/"]);
+		expect(app.vault.getConfig("userIgnoreFilters")).toEqual(["Private/", "Sources/whoop/.git/"]);
+		expect(plugin.settings.tephraExcludes).toEqual({ whoop: ["Sources/whoop/.git/"] });
+	});
+
+	it("turning a source's toggle back on leaves a Sources/<name>/ entry Dan added himself", async () => {
+		const { connection, answer } = controllableConnection();
+		const { open, rows, app, sourcesFolder, plugin } = await buildTab({ enabled: true, connection });
+		app.vault.setConfig("userIgnoreFilters", ["Sources/whoop/"]); // his own, before Atlas knew the source
+		connection.start();
+		open();
+		await answer({ ok: true, sources: [WHOOP] });
+		await sourcesFolder.sync([WHOOP]);
+		const toggle = rows.filter((r) => r.name === "Show in Obsidian search & graph").at(-1)!.toggles[0];
+
+		await toggle.onChange!(false); // already there: not Atlas's, so not recorded
+		expect(plugin.settings.tephraExcludes).toEqual({ whoop: ["Sources/whoop/.git/"] });
+		await toggle.onChange!(true);
+		expect(app.vault.getConfig("userIgnoreFilters")).toEqual(["Sources/whoop/", "Sources/whoop/.git/"]);
 	});
 
 	it("a source toggle refreshes Obsidian's Excluded files pane, so it lists the entry instead of the old list (C31)", async () => {
 		const { connection, answer } = controllableConnection();
-		const { open, rows, app } = await buildTab({ enabled: true, connection });
+		const { open, rows, app, sourcesFolder } = await buildTab({ enabled: true, connection });
 		app.vault.setConfig("userIgnoreFilters", ["Private/"]);
 		const pane = { listed: ["Private/"] as unknown[] }; // built once by Obsidian, rebuilt only by update()
 		const fileTab = { id: "file", update: vi.fn(() => { pane.listed = [...(app.vault.getConfig("userIgnoreFilters") as unknown[])]; }) };
@@ -344,14 +391,16 @@ describe("the Tephra tab: toggle on", () => {
 		connection.start();
 		open();
 		await answer({ ok: true, sources: [WHOOP] });
+		await sourcesFolder.sync([WHOOP]);
+		fileTab.update.mockClear(); // the first sync added `.git/`
 		const toggle = rows.filter((r) => r.name === "Show in Obsidian search & graph").at(-1)!.toggles[0];
 
 		await toggle.onChange!(false);
-		expect(pane.listed).toEqual(["Private/", "Sources/whoop/"]);
+		expect(pane.listed).toEqual(["Private/", "Sources/whoop/.git/", "Sources/whoop/"]);
 		await toggle.onChange!(false); // already excluded: nothing changed, nothing to refresh
 		expect(fileTab.update).toHaveBeenCalledTimes(1);
 		await toggle.onChange!(true);
-		expect(pane.listed).toEqual(["Private/"]);
+		expect(pane.listed).toEqual(["Private/", "Sources/whoop/.git/"]);
 		expect(fileTab.update).toHaveBeenCalledTimes(2);
 	});
 
