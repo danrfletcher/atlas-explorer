@@ -5,7 +5,7 @@ const NAMES = ["tephra", "other"];
 const run = (links: ResolvedLink[], extra: { isExcluded?: (p: string) => boolean; interfaceFolderFor?: (p: string) => string | null } = {}) =>
 	[...computeSourcePromotions(links, { sourceNames: NAMES, isExcluded: () => false, interfaceFolderFor: () => null, ...extra }).units.values()];
 
-describe("the pop-out rule inside one source (G1)", () => {
+describe("the pop-out rule per source (G1, G12)", () => {
 	it("a link from the same top-level folder promotes nothing", () => {
 		expect(run([{ from: "Sources/tephra/docs/a.md", to: "Sources/tephra/docs/deep/b.md", subpath: "" }])).toEqual([]);
 	});
@@ -20,12 +20,26 @@ describe("the pop-out rule inside one source (G1)", () => {
 		expect(run([{ from: "Sources/tephra/README.md", to: "Sources/tephra/docs/b.md", subpath: "" }])).toHaveLength(1);
 	});
 
-	it("a link from a vault note is not read here (PR-8 seam)", () => {
-		expect(run([{ from: "Home.md", to: "Sources/tephra/docs/b.md", subpath: "" }])).toEqual([]);
+	it("a link from a vault note counts as from outside the source (G12)", () => {
+		expect(run([{ from: "Home.md", to: "Sources/tephra/docs/b.md", subpath: "" }])).toEqual([
+			{ type: "promoted-file", path: "Sources/tephra/docs/b.md", topLevelFolder: "Sources/tephra/docs" },
+		]);
 	});
 
-	it("a link from another source is not read here (PR-8 seam)", () => {
-		expect(run([{ from: "Sources/other/a.md", to: "Sources/tephra/docs/b.md", subpath: "" }])).toEqual([]);
+	it("a link from another source counts as from outside, even from a folder of the same name (G12)", () => {
+		expect(run([{ from: "Sources/other/docs/a.md", to: "Sources/tephra/docs/b.md", subpath: "" }])).toEqual([
+			{ type: "promoted-file", path: "Sources/tephra/docs/b.md", topLevelFolder: "Sources/tephra/docs" },
+		]);
+	});
+
+	it("a link from under Sources/ that no listed source owns is skipped", () => {
+		expect(run([{ from: "Sources/gone/a.md", to: "Sources/tephra/docs/b.md", subpath: "" }])).toEqual([]);
+	});
+
+	it("a vault note's block link into a source promotes the block only", () => {
+		expect(run([{ from: "Home.md", to: "Sources/tephra/docs/b.md", subpath: "^k1" }])).toEqual([
+			{ type: "promoted-block", path: "Sources/tephra/docs/b.md", subpath: "^k1" },
+		]);
 	});
 
 	it("a link out of the source to a vault note promotes nothing here", () => {

@@ -54,7 +54,7 @@ describe("R3-1: UnitIndex skips Sources/ while the Tephra toggle is on", () => {
 		expect(folderUnits(index)).toEqual(["Notes", "Sources"]);
 	});
 
-	it("a vault note linking to a Sources file promotes nothing, on", () => {
+	it("a vault note linking to a top-level Sources file promotes nothing, on (a deeper one is PR-8: unit-index-source-promotion.test.ts)", () => {
 		const caches = { "Notes/Idea.md": { links: [link("README")] } as CachedMetadata };
 		const { index } = make({ tephraEnabled: true }, FILES, FOLDERS, caches, { README: "Sources/tephra/README.md" });
 		expect(promoted(index)).toEqual([]);

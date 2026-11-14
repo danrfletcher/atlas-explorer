@@ -5,7 +5,7 @@
 // READ-ONLY: this script only calls readdirSync / readFileSync / lstatSync. It never writes, renames
 // or deletes anything, and it sends nothing over the network.
 //
-//   node scripts/count-case-mismatched-links.mjs <vault-path> [--json]
+//   node scripts/report-case-mismatch.mjs <vault-path> [--json]
 //
 // A link "mismatches" when its last path segment (without `.md`) matches no file name exactly but
 // matches one case-insensitively. Links inside fenced code blocks and inline code are ignored, as
@@ -17,7 +17,7 @@ const args = process.argv.slice(2);
 const asJson = args.includes("--json");
 const root = args.find((a) => !a.startsWith("--"));
 if (!root) {
-	console.error("usage: node scripts/count-case-mismatched-links.mjs <vault-path> [--json]");
+	console.error("usage: node scripts/report-case-mismatch.mjs <vault-path> [--json]");
 	process.exit(2);
 }
 

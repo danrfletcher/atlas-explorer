@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** E4: the report-only script, run for real against a throwaway vault. */
-const script = join(__dirname, "../../scripts/count-case-mismatched-links.mjs");
+const script = join(__dirname, "../../scripts/report-case-mismatch.mjs");
 
 function snapshot(dir: string): Record<string, string> {
 	const out: Record<string, string> = {};
@@ -21,7 +21,43 @@ function snapshot(dir: string): Record<string, string> {
 	return out;
 }
 
-describe("scripts/count-case-mismatched-links.mjs", () => {
+const fixtureVault = join(__dirname, "../fixtures/case-mismatch-vault");
+
+/** Every path under `dir` with its mtime, size and kind (symlinks not followed). */
+function stamps(dir: string): Record<string, string> {
+	const out: Record<string, string> = {};
+	const walk = (d: string) => {
+		for (const entry of readdirSync(d, { withFileTypes: true })) {
+			const p = join(d, entry.name);
+			const st = lstatSync(p);
+			out[p] = `${st.mtimeMs}:${st.size}:${st.isDirectory() ? "d" : "f"}`;
+			if (entry.isDirectory()) walk(p);
+		}
+	};
+	walk(dir);
+	return out;
+}
+
+describe("scripts/report-case-mismatch.mjs", () => {
+	it("on the fixture vault reports exactly the seeded mismatches and leaves every mtime unchanged (E4)", () => {
+		const before = stamps(fixtureVault);
+		const report = JSON.parse(execFileSync("node", [script, fixtureVault, "--json"], { encoding: "utf8" }));
+		expect(report.count).toBe(4);
+		expect(report.mismatches.map((m: { file: string; line: number; link: string; actual: string }) => `${m.file}:${m.line} ${m.link} -> ${m.actual}`)).toEqual([
+			"Journal.md:1 [plan](workout%20plan.md) -> Workout Plan.md",
+			"Weekly Review.md:2 [[leg day]] -> Leg Day.md",
+			"Weekly Review.md:2 [[WORKOUT PLAN]] -> Workout Plan.md",
+			"Weekly Review.md:3 ![[pic.png]] -> pic.PNG",
+		]);
+		expect(stamps(fixtureVault)).toEqual(before);
+	});
+
+	it("prints the same list as text, with the count first", () => {
+		const text = execFileSync("node", [script, fixtureVault], { encoding: "utf8" });
+		expect(text).toContain("case-mismatched links: 4");
+		expect(text).toContain("Weekly Review.md:2  [[leg day]]  ->  Leg Day.md");
+	});
+
 	it("counts only links whose case differs from the target, ignores code, URLs and unresolved links, and writes nothing", () => {
 		const dir = mkdtempSync(join(tmpdir(), "atlas-e4-"));
 		mkdirSync(join(dir, "Notes"));

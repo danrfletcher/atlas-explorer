@@ -78,6 +78,14 @@ Clicking a file in a source's Inbox section, middle-clicking it, choosing **Open
 
 Word (`.doc`, `.docx`), PowerPoint (`.ppt`, `.pptx`), Excel (`.xls`, `.xlsx`) and Google Docs and Sheets (`.gdoc`, `.gsheet`) files always open in their own app, even if a plugin registers a text view for them, so they are never edited in Obsidian. A PDF opens only in Obsidian's read-only PDF view. Edits to a note are saved by Obsidian through the `Sources/<name>` link to the file in the source's folder; Atlas never writes to a file by opening it. A source's file that is missing does nothing when clicked, and a file Obsidian can't read (no permission on the folder) shows Obsidian's own error and an `[Atlas]` line in the developer console. With the switch off, files open exactly as before.
 
+### Links between sources (backlinks and pop-outs)
+
+Links across sources behave like links in the vault. `[[@whoop:Workout Plan]]` in a note shows in Obsidian's own Backlinks, Outgoing links and graph (Atlas adds no link store of its own). Links Obsidian can't read, from code comments, PDFs and Office files, come from Tephra and appear as **Also linked from (Tephra)** at the bottom of the Backlinks panel: one `path:line` row each, sorted by path then line. Click a row to open the file at that line, middle-click for a new tab (a file Obsidian has no view for opens in its own app, without the line). If the Backlinks panel isn't open or can't be extended, run **Open Links pane** to see the same list in a pane of its own. With Tephra off or unreachable the section is empty and Obsidian's Backlinks is unchanged.
+
+In a source's Inbox section, a deeper file pops out with the **promoted** pill when a link reaches it from outside its own module. A module is the source's top-level folder (`Sources/<name>/<top>`); a link from another source, or from your vault, always counts as from outside, and a link from the same module never does. Links in notes are read from Obsidian; links in code, PDFs and Office files are read from Tephra and kept in memory for the session only, so after a restart with Tephra off they are missing until it is back.
+
+Obsidian matches link names without regard to case and Tephra matches exactly, so a link such as `[[leg day]]` to `Leg Day.md` shows in Obsidian's Backlinks but not in the Tephra section. To count how many links in a vault differ in case from their target, run `node scripts/report-case-mismatch.mjs <vault-path>` (read-only; add `--json` for JSON).
+
 ### Turning it off
 
 Atlas reads Tephra's token from `$XDG_DATA_HOME/tephra/token`, else `~/.local/share/tephra/token`. It re-reads it once if Tephra answers 401, and never stores or logs it.
@@ -100,6 +108,7 @@ Open the command palette and search for "Atlas Explorer".
 | `Atlas Explorer: Place active file in view…` | Fuzzy-picks a view, then a folder (or the bucket root) within it, and places the active file there: the keyboard and mobile equivalent of dragging it in. |
 | `Atlas Explorer: Reveal active file in Atlas` | Opens the explorer and, if the active file isn't placed anywhere, says so. |
 | `Atlas Explorer: New view` | Prompts for a name and creates a new, empty view. |
+| `Atlas Explorer: Open Links pane` | With Tephra on: opens a pane in the right sidebar that lists the active file's **Also linked from (Tephra)** rows, for when the Backlinks panel can't show them. |
 | `Atlas Explorer: Rebuild index` | Forces a full re-scan of every unit in the vault, and logs timings to the console. |
 | `Atlas Explorer: Copy render log` | Copies the render log to the clipboard as JSON and shows a notice with the entry count (`[]` if it is empty). Each entry has only `kind` (what triggered the rebuild), `at` (epoch ms), `durationMs` and `changed`: no note text, labels or paths. The log keeps the last 500 rebuilds in `render-log.json` in the plugin folder, is always on, and has no setting. |
 

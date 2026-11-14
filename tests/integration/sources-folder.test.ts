@@ -842,6 +842,9 @@ describe("R3-4: deletes that Atlas or a missing source caused, through the real 
 		Object.assign(ctx.p, {
 			sourcesFolder: h.sourcesFolder,
 			sourceLinks: { getMode: () => "live", sync: () => {} },
+			// PR-8: the two collaborators `onTephraToggled` also drives (their own tests are in promotion-offline-parity and backlinks-tephra-section).
+			tephraGraphSync: { unbind: () => {} },
+			tephraBacklinks: { refresh: () => {} },
 			refreshExplorerViews: () => void refreshed.push(1),
 		});
 		h.hooks.afterChange = (enabled) => ctx.p.onTephraToggled(enabled);

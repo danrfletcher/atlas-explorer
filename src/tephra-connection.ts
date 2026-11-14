@@ -107,6 +107,7 @@ export class TephraConnection {
 	private snapshot: TephraSnapshot = OFF_SNAPSHOT;
 	private listeners = new Set<(snapshot: TephraSnapshot) => void>();
 	private checkListeners = new Set<(snapshot: TephraSnapshot) => void>();
+	private graphListeners = new Set<() => void>();
 	private stopTimer: (() => void) | null = null;
 	private inFlight: Promise<void> | null = null;
 	/** Bumped by `stop()`: a check that started in an earlier run must not write its result. */
@@ -161,6 +162,14 @@ export class TephraConnection {
 	onCheck(listener: (snapshot: TephraSnapshot) => void): () => void {
 		this.checkListeners.add(listener);
 		return () => this.checkListeners.delete(listener);
+	}
+
+	/** PR-8: subscribes to every `graph:changed` notification, raw (not held to the check cooldown: the listener
+	 * debounces for itself). Only a real notification on the live push channel calls it, never a timer tick or a
+	 * focus check. Returns the unsubscribe function. */
+	onGraphChanged(listener: () => void): () => void {
+		this.graphListeners.add(listener);
+		return () => this.graphListeners.delete(listener);
 	}
 
 	/** A `graph:changed` notification, or Obsidian regaining focus: asks for a check now. */
@@ -230,6 +239,13 @@ export class TephraConnection {
 	/** One `graph:changed` push: asks for a check, but a burst of them is held to one check per cooldown. */
 	private onPushText(generation: number, text: string): void {
 		if (generation !== this.generation || !isGraphChangedMessage(text)) return;
+		for (const listener of [...this.graphListeners]) {
+			try {
+				listener();
+			} catch (error) {
+				console.error("[Atlas] a Tephra graph listener threw", error);
+			}
+		}
 		if (this.cancelPushCooldown) {
 			this.pushPending = true; // inside the cooldown: remembered, and run when it ends
 			return;

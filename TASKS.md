@@ -554,3 +554,13 @@ Code-reviewed and unit/integration-tested only; the container run (real Obsidian
 - [x] G16 toggle off (or mobile): `openRef` takes the original `getLeaf(newTab).openFile` path for every file; so does a vault file outside `Sources/` with the toggle on.
 - [x] E5/E1/F2/F3 tests: missing and deleted-after-render rows do nothing and create nothing; no Tephra call from `openRef`; failed opens are caught and logged; no write API on any open; a real symlink in a temp dir stays a symlink with the file's mtime unchanged.
 - Not live-checked here: `app.viewRegistry` and `app.openWithDefaultApp` are undocumented Obsidian internals (checked against the mock only); real VS Code Workbench extensions; real Mac apps.
+
+## Atlas-22 PR-8: links across sources (G10, G12, E4, GP5)
+
+Code-reviewed and unit/integration-tested only (jsdom); the real Backlinks panel, the graph and a real `tephrad` are the tester's.
+
+- [x] G12 `topLevelFolderFor` is source-aware (`sourceModuleOf`); a link from a vault file or another source is from outside; same-module links never promote; subpath links promote the block only.
+- [x] G12 non-note links: `graph.get_edges` via `TephraGraphSync` (first online, debounced `graph:changed`), held in memory only, read only for origins with no Obsidian file cache.
+- [x] G10 "Also linked from (Tephra)" in `.backlink-pane` (`src/backlinks-section.ts`), request token, one section across re-renders; the Atlas Links pane fallback and command.
+- [x] E4 `scripts/report-case-mismatch.mjs` with `tests/fixtures/case-mismatch-vault/`.
+- Not live-checked: the `.backlink-pane` DOM shape, `eState.line` on a real open, the graph edge (GP5), a real `tephrad`. The report on a copy of Dan's vault has not been run (no copy was provided).

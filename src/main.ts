@@ -63,6 +63,9 @@ import { McpTool } from "./mcp-protocol";
 import { createGetNodeStatusTool, createListNodesTool, createListStatusSetsTool, createListViewsTool, createSetNodeStatusTool } from "./mcp-status-tools";
 import { createAddNodeTool, createCreateFolderTool, createMoveNodeTool, createRemoveNodeTool, createRenameFolderTool } from "./mcp-arrange-tools";
 import { RENDER_LOG_FILE, RenderLog, withRenderCause } from "./render-log";
+import { ATLAS_LINKS_VIEW_TYPE, openBacklinkRow, TephraBacklinksSection } from "./backlinks-section";
+import { AtlasLinksView } from "./atlas-links-view";
+import { TephraGraphSync } from "./tephra-graph-sync";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -128,6 +131,10 @@ export default class AtlasPlugin extends Plugin {
 	/** G16: owns the Tephra connection. Nothing is built or started unless the toggle is on and this is
 	 * desktop; `onunload` only stops its timer. */
 	tephraController: TephraController;
+	/** PR-8 (G10): "Also linked from (Tephra)" in the Backlinks panel, or in the Atlas Links pane. */
+	tephraBacklinks: TephraBacklinksSection;
+	/** PR-8 (G12): Tephra's non-note edges for the unit index; in memory only. */
+	tephraGraphSync: TephraGraphSync;
 	/** G2: the `Sources/<name>` links, the vault `.gitignore` line and Atlas's Excluded files entries. */
 	sourcesFolder: SourcesFolder;
 	/** PR-5 (G3, G5): the Inbox's "Add source…" and a source header's "Remove". */
@@ -267,6 +274,22 @@ export default class AtlasPlugin extends Plugin {
 		// G16/R3-3: the toggle's off path unlinks what Atlas linked and removes the entries Atlas excluded. Never
 		// run on unload (E8): only `TephraController.setEnabled(false)` reaches the registry.
 		this.register(registerTephraTeardown({ name: "Sources folder links", run: () => this.sourcesFolder.teardown() }));
+		const tephraOn = () => this.settings.tephraEnabled && !Platform.isMobile;
+		this.tephraBacklinks = new TephraBacklinksSection({
+			app: this.app,
+			isEnabled: tephraOn,
+			getConnection: () => this.tephraConnection,
+			includeCrossSourceNotes: () => this.sourceLinks.getMode() === "fallback",
+			open: (path, line, newTab) => void openBacklinkRow(this.app, path, line, newTab),
+		});
+		this.tephraGraphSync = new TephraGraphSync({
+			setEdges: (edges) => this.unitIndex.setTephraEdges(edges),
+			clearEdges: () => this.unitIndex.clearTephraEdges(),
+			afterRefresh: (promotionsChanged) => {
+				this.tephraBacklinks.refresh(true);
+				if (promotionsChanged) this.refreshExplorerViews();
+			},
+		});
 		this.tephraController = new TephraController({
 			getEnabled: () => this.settings.tephraEnabled,
 			setEnabled: (enabled) => {
@@ -295,6 +318,7 @@ export default class AtlasPlugin extends Plugin {
 				});
 				// PR-4 (G1/E5): sections appear, go, turn "(missing)" or come back with the source list.
 				refreshExplorersOnTephraChange(connection, () => this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE).map((leaf) => leaf.view));
+				this.tephraGraphSync.bind(connection); // PR-8: edges on first online and per `graph:changed` burst
 				return connection;
 			},
 			reportTeardownFailures: (failures) => {
@@ -325,6 +349,20 @@ export default class AtlasPlugin extends Plugin {
 		registerSortIcons();
 
 		this.registerView(ATLAS_VIEW_TYPE, (leaf) => new AtlasExplorerView(leaf, this));
+		// PR-8 (G10): the fallback pane for "Also linked from (Tephra)"; empty while the toggle is off.
+		this.registerView(ATLAS_LINKS_VIEW_TYPE, (leaf) => new AtlasLinksView(leaf, () => this.tephraBacklinks.refresh(true)));
+		this.addCommand({
+			id: "open-links-pane",
+			name: "Open Links pane",
+			checkCallback: (checking) => {
+				if (!this.settings.tephraEnabled || Platform.isMobile) return false;
+				if (!checking) void this.activateLinksPane();
+				return true;
+			},
+		});
+		this.registerEvent(this.app.workspace.on("file-open", () => this.tephraBacklinks.refresh()));
+		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.tephraBacklinks.refresh()));
+		this.registerEvent(this.app.workspace.on("layout-change", () => this.tephraBacklinks.refresh())); // a Backlinks panel opened
 
 		this.app.workspace.onLayoutReady(() => {
 			this.unitIndex.rebuild();
@@ -571,6 +609,8 @@ export default class AtlasPlugin extends Plugin {
 		removeSuggesterPrecedence(this.app, this.linkSuggest);
 		this.sourcesFolder?.dispose(); // E8: stops new syncs only; no link, `.gitignore` line or Excluded entry changes
 		this.tephraController?.dispose(); // E8: stops the timer only; the teardown steps run on the toggle's off path alone
+		this.tephraGraphSync?.unbind(false); // PR-8: stops following Tephra; nothing is written
+		this.tephraBacklinks?.detach(); // removes the section from the Backlinks panel
 		this.sourceLinks?.dispose(); // E8: removes the in-memory patch only — no files or settings change
 		this.persistDebounced?.run(); // flush any pending save rather than losing up to 500ms of drags
 		void this.renderLog?.dispose(); // render log: write what's pending; a rejected write is swallowed inside
@@ -584,6 +624,8 @@ export default class AtlasPlugin extends Plugin {
 	 * becomes one again when it goes off. So both directions rebuild, then repaint the open explorers. */
 	onTephraToggled(enabled: boolean): void {
 		if (enabled) this.sourcesFolder.start();
+		else this.tephraGraphSync.unbind(); // PR-8: forgets the in-memory edges and recomputes
+		this.tephraBacklinks.refresh(true); // PR-8: adds the section on, removes it (and any request in flight) off
 		const before = this.sourceLinks.getMode();
 		this.sourceLinks.sync();
 		// A runtime switch into the Q13 fallback doesn't re-render open editors (docs/decisions.md, PR-1).
@@ -592,6 +634,17 @@ export default class AtlasPlugin extends Plugin {
 		}
 		this.unitIndex.rebuild();
 		this.refreshExplorerViews();
+	}
+
+	/** PR-8 (G10): opens the Atlas Links pane in the right sidebar, reusing one that's open. */
+	async activateLinksPane(): Promise<void> {
+		const { workspace } = this.app;
+		let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(ATLAS_LINKS_VIEW_TYPE)[0] ?? null;
+		if (!leaf) {
+			leaf = workspace.getRightLeaf(false);
+			await leaf?.setViewState({ type: ATLAS_LINKS_VIEW_TYPE, active: true });
+		}
+		if (leaf) await workspace.revealLeaf(leaf);
 	}
 
 	/** PR 15 fix: re-renders every open Atlas explorer leaf — used by the settings tab right after a

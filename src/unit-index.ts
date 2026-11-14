@@ -1,9 +1,19 @@
 import { App, Platform, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AtlasSettings, isCoveredByNoAutoPromote, normalizeNoAutoPromoteFolders } from "./settings";
-import { isInSourcesFolder, skipsSourcesFolder, SOURCES_FOLDER, sourceLinkPath } from "./sources-path";
+import { isInSourcesFolder, skipsSourcesFolder, SOURCES_FOLDER } from "./sources-path";
 import { excludeEntryMatcher } from "./source-excludes";
-import { computeSourcePromotions, ResolvedLink } from "./source-promotion";
+import { computeSourcePromotions, ResolvedLink, sourceModuleOf } from "./source-promotion";
+import { isIndexedNote, isListedTephraSource, parseTephraId, TephraEdge, TephraPath } from "./tephra-backlinks";
+import { NOTES_SOURCE } from "./source-links";
+import { owningSourceName } from "./inbox-sections";
 import { AddedItem, DismissScope, Unit, UnitRef, rewritePathString, rewriteRefPath, unitRefKey, unitRefsEqual, unitToRef } from "./types";
+
+/** One non-note Tephra edge with both ids already read (see `UnitIndex.setTephraEdges`). */
+interface TephraLink {
+	from: TephraPath;
+	to: TephraPath;
+	subpath: string;
+}
 
 /** PR-2: adds or removes `ref` from `list` by `unitRefKey` equality, returning a new array only when
  * membership actually changes (so callers can skip a no-op persist). */
@@ -63,6 +73,12 @@ export class UnitIndex {
 	 * top-level folder, in the same source, is a `promoted-*` unit with a `Sources/<name>/…` path. Derived
 	 * from the link graph on every `computePromotions`, never stored, and empty unless `skipsSources()`. */
 	private sourcePromoted = new Map<string, Unit>();
+	/** PR-8 (G12): Tephra's last answer for the links Obsidian can't read (code comments, PDFs, Office files),
+	 * kept in memory only: never persisted, never written to disk. It is replaced whole by `setTephraEdges` and
+	 * emptied by `clearTephraEdges`; a failed call leaves it as it was, so promotions don't flicker when Tephra
+	 * drops. Only edges into a source are kept, with their ids read once (R2) and repeats dropped; which of them
+	 * count is decided on every `computePromotions`. */
+	private tephraLinks: TephraLink[] = [];
 	/** PR-4 (T1): every ref any Folder source currently manages (`ViewsManager.getFolderSourceManagedRefs`),
 	 * lifted into the same `promoted-*` shape a manual/link promotion gets — so a Folder-source child
 	 * (an ordinary nested file/folder, never a vault-root folder) resolves through `getUnits()`/
@@ -501,12 +517,21 @@ export class UnitIndex {
 		const poolFolder = this.settings.poolFolder;
 		if (path.startsWith(`${poolFolder}/`)) return false;
 		if (isInSourcesFolder(path) && this.skipsSources()) return true;
+		return this.isInExcludedFolder(path);
+	}
+
+	/** `path` is, or lives under, an `excludedFolders` entry. Applies to `Sources/<name>/…` paths as to any vault path (G12). */
+	private isInExcludedFolder(path: string): boolean {
 		return this.settings.excludedFolders.some((excluded) => path === excluded || path.startsWith(`${excluded}/`));
 	}
 
 	/** The top-level folder-unit containing `path`, or null if `path` is at vault root, in the
-	 * pool folder, or inside an excluded folder — all of which mean "not inside any folder-unit". */
+	 * pool folder, or inside an excluded folder — all of which mean "not inside any folder-unit".
+	 * PR-8 (G12): with Tephra on, a path under `Sources/` is source-aware: its module is
+	 * `Sources/<name>/<top>` for the longest listed source root, and a file at a source's root (or under no
+	 * listed source) has none. */
 	private topLevelFolderFor(path: string): string | null {
+		if (this.isExcludedBySources(path)) return path === SOURCES_FOLDER ? null : sourceModuleOf(path, this.sourceNamesInVault());
 		const slash = path.indexOf("/");
 		if (slash === -1) return null;
 		const top = path.slice(0, slash);
@@ -569,6 +594,7 @@ export class UnitIndex {
 		const promotedBlocks = new Map<string, Unit>();
 		let linkCount = 0;
 		const sourceLinks: ResolvedLink[] = [];
+		const sourceNames = this.skipsSources() ? this.sourceNamesInVault() : [];
 
 		// Single pass over every file's link/embed cache. A reference with a subpath (`#^id` or
 		// `#Heading`) promotes only the block, never its containing file — a link to one paragraph
@@ -591,7 +617,14 @@ export class UnitIndex {
 				const linkpath = hashIndex === -1 ? ref.link : ref.link.slice(0, hashIndex);
 				const subpath = hashIndex === -1 ? "" : ref.link.slice(hashIndex + 1);
 				const destPath = linkpath ? this.app.metadataCache.getFirstLinkpathDest(linkpath, file.path)?.path : file.path;
-				if (!destPath || destPath === file.path || this.isExcluded(destPath)) continue; // unresolved, or "from another file" fails
+				if (!destPath || destPath === file.path) continue; // unresolved, or "from another file" fails
+				if (this.isExcludedBySources(destPath)) {
+					// PR-8 (G12): a vault note's link into a source is a link from outside it; the vault section
+					// itself never changes (R3-1). This file already passed the vault-side exclusions above.
+					sourceLinks.push({ from: file.path, to: destPath, subpath });
+					continue;
+				}
+				if (this.isExcluded(destPath)) continue;
 
 				// The same-module check applies to every reference the same way, subpath or not — a
 				// block reference from inside the same module is exactly as "not outside it" as a
@@ -635,7 +668,8 @@ export class UnitIndex {
 		this.promotedFiles = promotedFiles;
 		this.promotedFolders = promotedFolders;
 		this.promotedBlocks = promotedBlocks;
-		this.sourcePromoted = this.computeSourcePromoted(sourceLinks);
+		this.collectTephraLinks(sourceNames, sourceLinks);
+		this.sourcePromoted = this.computeSourcePromoted(sourceLinks, sourceNames);
 		this.applyManualPromotions();
 		this.notifyChange();
 
@@ -664,14 +698,81 @@ export class UnitIndex {
 		return folder.children.filter((child) => child instanceof TFolder).map((child) => child.name);
 	}
 
-	private computeSourcePromoted(links: ResolvedLink[]): Map<string, Unit> {
+	/** PR-8 (G12): replaces Tephra's last answer for non-note links (see `tephraLinks`) and recomputes the
+	 * promotions. Edges that don't point into a source are dropped here. Each id is read once, here, not on
+	 * every `computePromotions`, and an edge repeated with the same (from, to, subpath) is kept once; nothing is
+	 * stored anywhere else. */
+	setTephraEdges(edges: readonly TephraEdge[]): boolean {
+		const seen = new Set<string>();
+		const next: TephraLink[] = [];
+		for (const edge of edges) {
+			if (edge.to === null) continue;
+			// A block-level edge names its target as `@source:path#^id`: the path part maps, the rest is the subpath.
+			const hash = edge.to.indexOf("#");
+			const to = parseTephraId(hash === -1 ? edge.to : edge.to.slice(0, hash));
+			const from = parseTephraId(edge.from);
+			if (to === null || from === null || to.source === NOTES_SOURCE) continue; // not a link into a source
+			const subpath = hash === -1 ? edge.subpath : edge.to.slice(hash + 1);
+			const key = `${from.path}\0${to.path}\0${subpath}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			next.push({ from, to, subpath });
+		}
+		if (next.length === 0 && this.tephraLinks.length === 0) return false;
+		this.tephraLinks = next;
+		return this.recomputeSourcePromotions();
+	}
+
+	/** True when the set of source-promoted units differs after recomputing. */
+	private recomputeSourcePromotions(): boolean {
+		const before = [...this.sourcePromoted.keys()].sort().join("\0");
+		this.computePromotions();
+		return before !== [...this.sourcePromoted.keys()].sort().join("\0");
+	}
+
+	/** Forgets Tephra's answer (the toggle went off). A no-op when there is none. True when the promoted set changed. */
+	clearTephraEdges(): boolean {
+		if (this.tephraLinks.length === 0) return false;
+		this.tephraLinks = [];
+		return this.recomputeSourcePromotions();
+	}
+
+	/** PR-8 (G12): the links Tephra reports from files that aren't notes Obsidian indexes (code, PDF, Office, or a markdown file with no file cache),
+	 * as vault paths. A link written in a note Obsidian does index is never read here (it comes through the
+	 * cache, so a code fence in a note keeps not promoting, whatever Tephra says). An edge naming an unknown or
+	 * removed source, or a file that isn't in the vault, is skipped silently. The origin is also held to
+	 * `excludedFolders`, as for any vault link, wherever it is (under `Sources/<name>/` too); the target's
+	 * exclusion is checked by `computeSourcePromoted` for both kinds of link. */
+	private collectTephraLinks(sourceNames: readonly string[], out: ResolvedLink[]): void {
+		if (this.tephraLinks.length === 0 || !this.skipsSources()) return;
+		const known = new Set(sourceNames);
+		const verdicts = new Map<string, boolean>(); // per origin file: does it count?
+		for (const link of this.tephraLinks) {
+			if (!isListedTephraSource(link.to, known) || !isListedTephraSource(link.from, known)) continue;
+			let counts = verdicts.get(link.from.path);
+			if (counts === undefined) {
+				const file = this.app.vault.getAbstractFileByPath(link.from.path);
+				counts = file instanceof TFile && !isIndexedNote(file, this.app.metadataCache.getFileCache(file)) && !this.isExcludedByFolders(link.from.path);
+				verdicts.set(link.from.path, counts);
+			}
+			if (counts) out.push({ from: link.from.path, to: link.to.path, subpath: link.subpath });
+		}
+	}
+
+	/** `isExcluded` without the `Sources/` rule: a path is only kept out by `excludedFolders` (pool contents never are). */
+	private isExcludedByFolders(path: string): boolean {
+		return !path.startsWith(`${this.settings.poolFolder}/`) && this.isInExcludedFolder(path);
+	}
+
+	private computeSourcePromoted(links: ResolvedLink[], sourceNames: readonly string[]): Map<string, Unit> {
 		if (links.length === 0 || !this.skipsSources()) return new Map();
-		const sourceNames = this.sourceNamesInVault();
-		// An ignored folder (PR-3's exclude entries for the source) never pops out, even when it holds a linked file.
+		// Kept out of promotion, as target or origin: a path under an Atlas-excluded folder (`excludedFolders`, as for a
+		// vault path), or under an ignored folder (PR-3's exclude entries for the path's own source).
 		const matchers = new Map<string, ((path: string) => boolean)[]>();
 		const excludedFor = (path: string): boolean => {
-			const owner = sourceNames.filter((name) => path.startsWith(`${sourceLinkPath(name)}/`)).sort((a, b) => b.length - a.length)[0];
-			if (owner === undefined) return false;
+			if (this.isExcludedByFolders(path)) return true;
+			const owner = owningSourceName(path, sourceNames);
+			if (owner === null) return false;
 			let list = matchers.get(owner);
 			if (!list) {
 				list = (this.settings.tephraExcludes?.[owner] ?? []).map(excludeEntryMatcher).filter((m): m is (path: string) => boolean => m !== null);

@@ -1198,3 +1198,31 @@ input.atlas-name-input.atlas-name-invalid[type="text"]:not(:disabled) {
 	overflow-wrap: anywhere;
 	pointer-events: none;
 }
+
+/* PR-8 (G10): "Also linked from (Tephra)" at the bottom of the core Backlinks panel, and in the Atlas Links pane.
+   Scoped to its own classes; Obsidian's .backlink-pane rules are not touched. */
+.atlas-tephra-backlinks {
+	padding: var(--size-4-2, 8px) var(--size-4-3, 12px);
+}
+.atlas-tephra-backlinks-title {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold, 600);
+	margin-bottom: var(--size-4-1, 4px);
+}
+.atlas-tephra-backlink-row {
+	padding: 2px var(--size-4-1, 4px);
+	border-radius: var(--radius-s, 4px);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	cursor: pointer;
+	overflow-wrap: anywhere;
+}
+.atlas-tephra-backlink-row:hover,
+.atlas-tephra-backlink-row:focus-visible {
+	background-color: var(--background-modifier-hover);
+}
+.atlas-tephra-backlinks-empty {
+	color: var(--text-faint);
+	font-size: var(--font-ui-small);
+}
