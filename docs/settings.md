@@ -58,6 +58,20 @@ With the switch on and Tephra running, the vault's Inbox **+** button opens a sm
 
 To remove a source, right-click its Inbox header (`[whoop]`) and choose **Remove**, then confirm. Tephra stops indexing it and Atlas removes the `Sources/<name>` link. Your files in the source's folder are never touched. The vault's own header has no Remove. A real folder or note of yours at `Sources/<name>`, or a link Atlas didn't make, is left alone and a notice says so. If Tephra isn't running, both actions say so and do nothing: Atlas never starts Tephra.
 
+### Linking to a source's files with `[[`
+
+With the switch on (desktop only), the `[[` popup knows your sources:
+
+- `[[text` searches only the source the note is in. A note in `Sources/whoop/` sees whoop's files; a note in your vault sees vault files, never anything under `Sources/`.
+- `[[@` lists the sources, with **All sources** first. `[[@wh` filters the list by name. A source Tephra reports as missing is listed greyed, with `(missing)`. A name that matches nothing shows "No source named wh".
+- Pick a source (or type `[[@whoop:`) and keep typing to search that source. `[[@*:text` searches every source, the vault included, and each row shows which source it is from.
+- A hand-typed `[[@whoop:Plan]]` that matches two files in `whoop` (`a/Plan.md` and `b/Plan.md`) shows as broken. Hovering it shows "2 matches in whoop:" and both paths; clicking shows the same text in a notice. The popup never inserts such a link.
+- The link that goes in follows one rule. A file in the same source as the note gives `[[Name]]`. A file in another source gives `[[@source:path]]`, using just the file's name when that finds that file and no other. When two files in the source share a name, the link carries the file's full path from the source's root (`[[@tephra:crates/tephrad/README]]`), so a link the popup writes is never ambiguous and Tephra resolves it the same way. Notes drop `.md`; other files keep their extension (`[[@tephra:registry.rs]]`). The file's own name and capitalisation are used.
+- After a file in another source, or a non-note file, `#` searches its headings and `^` (or `#^`) its blocks and code symbols through Tephra. A block with no `^id` gets one from Tephra when you pick it. Plain notes in the same source keep Obsidian's own heading and block popup.
+- Tephra not running: `[[text`, `[[@` and `[[@name:text` still work from the sources Atlas already knows. `#` and `^` show "Tephra offline". If Tephra reports an error or doesn't answer, the popup shows that and inserts nothing.
+
+With the switch off, the popup is the same as before and Tephra is never called.
+
 ### Opening a file from a source
 
 Clicking a file in a source's Inbox section, middle-clicking it, choosing **Open** or **Open in new tab**, or clicking a file in a source module's Module Contents opens the file at its `Sources/<name>/…` path, the same way a vault file opens. Atlas asks Obsidian whether it has a view for the file's extension (case does not matter: `.PDF` is `.pdf`): if it does, the file opens in a tab (a new tab for middle-click and **Open in new tab**); if it doesn't, Atlas hands it to Obsidian's open-in-default-app, which opens it in the Mac app for that type. Notes, canvases, PDFs, images, audio and video are Obsidian's own. Code files open in Obsidian when a plugin such as VS Code Workbench has registered the extension, and in the default app when none has. A file with no extension (`Makefile`, `LICENSE`) follows the same rule.

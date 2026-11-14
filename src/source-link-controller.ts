@@ -74,6 +74,12 @@ export class SourceLinkController {
 		return this.hook.resolveFile(linktext, sourcePath);
 	}
 
+	/** Why a source link is broken (E3 hover text), or null when it resolves, is not one, or the mode is off. */
+	describeBroken(linktext: string): string | null {
+		if (this.mode === "off") return null;
+		return this.hook.describeBrokenSourceLink(linktext);
+	}
+
 	/** Shows the "No file … in …" notice for a broken source link; true when `linktext` was one. */
 	noticeIfBroken(linktext: string): boolean {
 		return this.hook.noticeIfBrokenSourceLink(linktext);

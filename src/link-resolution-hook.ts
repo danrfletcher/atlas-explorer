@@ -143,14 +143,24 @@ export class LinkResolutionHook {
 		return this.resolve(linktext, sourcePath, original ?? ((l, s) => this.app.metadataCache.getFirstLinkpathDest(l, s)));
 	}
 
-	/** Shows the notice for a broken source link; returns true when `linktext` was one (so callers stop). */
-	noticeIfBrokenSourceLink(linktext: unknown): boolean {
-		if (!isSourceLinkSyntax(linktext)) return false;
+	/**
+	 * The sentence for a source link that does not open a file (E3: "2 matches in whoop:" plus the
+	 * tied paths), or null when `linktext` is not a source link or does resolve. The click notice and
+	 * the hover tooltip both use it.
+	 */
+	describeBrokenSourceLink(linktext: unknown): string | null {
+		if (!isSourceLinkSyntax(linktext)) return null;
 		const hash = linktext.indexOf("#");
 		const linkpath = hash === -1 ? linktext : linktext.slice(0, hash);
 		const outcome = resolveSourceLink(this.index, linkpath);
-		if (outcome.kind === "resolved" && this.live(outcome.file)) return false;
-		const message = outcome.kind === "unresolved" ? describeUnresolved(outcome, linkpath) : `No file in ${linkpath}`;
+		if (outcome.kind === "resolved" && this.live(outcome.file)) return null;
+		return outcome.kind === "unresolved" ? describeUnresolved(outcome, linkpath) : `No file in ${linkpath}`;
+	}
+
+	/** Shows the notice for a broken source link; returns true when `linktext` was one (so callers stop). */
+	noticeIfBrokenSourceLink(linktext: unknown): boolean {
+		const message = this.describeBrokenSourceLink(linktext);
+		if (message === null) return false;
 		new Notice(message);
 		return true;
 	}

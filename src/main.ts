@@ -35,6 +35,7 @@ import { refreshExcludedFilesPane } from "./tephra-exclude";
 import { registerTephraTeardown } from "./tephra-teardown";
 import { obsidianTephraRequest } from "./tephra-request-obsidian";
 import { openNodeWebSocket } from "./tephra-socket-node";
+import { registerBrokenSourceLinkHover } from "./source-link-hover";
 import { registerSourceLinkFallbackPostProcessor, sourceLinkLivePreviewPlugin } from "./source-link-fallback";
 import { ViewsManager } from "./views";
 import { FolderLiveRefresh } from "./folder-live-refresh";
@@ -303,6 +304,7 @@ export default class AtlasPlugin extends Plugin {
 			afterChange: (enabled) => this.onTephraToggled(enabled),
 		});
 		registerSourceLinkFallbackPostProcessor(this);
+		registerBrokenSourceLinkHover(this); // E3: hover text for a broken or ambiguous `@source:` link
 		// Installed now, not only at layout-ready, so the startup link-resolution pass already sees the
 		// hook; `sync()` runs again at layout-ready to add the leaf-level guard once a leaf exists.
 		this.sourceLinks.sync();
