@@ -222,7 +222,7 @@ describe("fence regression (source level)", () => {
 	it("FR-3/FR-4/FR-6 adds no command, native-explorer hook or setting", () => {
 		const src = read("src/create-module.ts");
 		expect(src).not.toMatch(/addCommand\(|addSettingTab|new Setting\(|registerEvent|workspace\.on\(|"file-menu"|"editor-menu"/);
-		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(24); // 19 + PR-1.S1's MCP server section (heading, enable toggle, port, token) + the Auto-promote linked items toggle
+		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(28); // 19 + PR-1.S1's MCP server section (heading, enable toggle, port, token) + the Auto-promote linked items toggle + atlas-22 PR-2's Tephra tab (master toggle, Sources heading, source row, per-source toggle)
 	});
 
 	it("FR-8 offers no undo, convert-back or demote", () => {

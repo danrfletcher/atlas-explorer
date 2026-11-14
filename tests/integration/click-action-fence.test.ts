@@ -131,3 +131,53 @@ describe("click-action-fence: the Click function (F3, F4, F6, F8, no shell)", ()
 		expect(view).toMatch(/allowFunction && folderNode\.apiSource\?\.clickFunction\?\.trim\(\)/);
 	});
 });
+
+/** Tephra multi-source PR-6 (G7, F2, F3, F8): opening a `Sources/` file never writes, never fakes a file and never
+ * reads outside the vault. Source-text checks read the real files; the behaviour check runs the real opener. */
+describe("source-open fence (F2, F3, F8)", () => {
+	const SRC = path.resolve(__dirname, "../../src");
+	const read = (file: string) => fs.readFileSync(path.join(SRC, file), "utf8");
+	const code = (file: string) => read(file).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+	const WRITE_API = /vault\.(modify|process|create|createFolder|rename|delete|trash|append)\b|\.processFrontMatter\b|adapter\.(write|append|remove|rename|mkdir|rmdir|writeBinary)\b|\bnew TFile\b|\bnew TFolder\b|from\s+["'](node:)?fs["']/;
+
+	it("F2/F3: src/source-open.ts has no write API, builds no TFile and imports no fs", () => {
+		expect(code("source-open.ts")).not.toMatch(WRITE_API);
+	});
+
+	it("F2/F3: openRef and its openTFile helper have no write API either, and only look files up in the vault index", () => {
+		const view = read("explorer-view.ts");
+		const start = view.indexOf("private async openRef(");
+		const end = view.indexOf("private revealInNativeExplorer(");
+		expect(start).toBeGreaterThan(0);
+		expect(end).toBeGreaterThan(start);
+		const body = view.slice(start, end).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+		expect(body).not.toMatch(WRITE_API);
+		expect(body).toMatch(/vault\.getAbstractFileByPath\(ref\.path\)/);
+	});
+
+	it("F8: the deny-list is checked before the registry in chooseOpener", () => {
+		const rule = code("source-open.ts");
+		const fn = rule.slice(rule.indexOf("export function chooseOpener"));
+		expect(fn.indexOf("DEFAULT_APP_ONLY_EXTENSIONS")).toBeGreaterThan(-1);
+		expect(fn.indexOf("DEFAULT_APP_ONLY_EXTENSIONS")).toBeLessThan(fn.indexOf("registered.has"));
+	});
+
+	it("F3: the real opener, given an app whose every write API throws, opens a note, a PDF and a docx without touching one", async () => {
+		const { openSourceFile } = await import("../../src/source-open");
+		const boom = (name: string) => () => {
+			throw new Error(`${name} must not be called while opening`);
+		};
+		const opened: string[] = [];
+		const app = {
+			viewRegistry: { typeByExtension: { md: "markdown", pdf: "pdf", rs: "workbench" } },
+			openWithDefaultApp: vi.fn(async (p: string) => void opened.push(`default:${p}`)),
+			workspace: { getLeaf: () => ({ openFile: async (f: { path: string }) => void opened.push(`leaf:${f.path}`) }) },
+			vault: { modify: boom("modify"), process: boom("process"), create: boom("create"), rename: boom("rename"), delete: boom("delete"), adapter: { write: boom("write") } },
+			fileManager: { processFrontMatter: boom("processFrontMatter") },
+		};
+		for (const [p, ext] of [["Sources/w/a.md", "md"], ["Sources/w/b.pdf", "pdf"], ["Sources/w/c.docx", "docx"], ["Sources/w/d.rs", "rs"]]) {
+			await openSourceFile(app as never, { path: p, name: p.split("/").pop()!, extension: ext } as never, false);
+		}
+		expect(opened).toEqual(["leaf:Sources/w/a.md", "leaf:Sources/w/b.pdf", "default:Sources/w/c.docx", "leaf:Sources/w/d.rs"]);
+	});
+});

@@ -67,12 +67,12 @@ Every folder is a unit: a **module** whose **interface** is a note saying what t
 - **Mark things with statuses.** Status sets with colors, inheritance down a tree, hide and truncate by status, click a dot to change one. → [Statuses](docs/statuses.md)
 - **Sort without losing your order.** Manual, A-Z, Modified, Time added or Status, with Reverse, on any item or the Bucket root. → [Sorting and reordering](docs/sorting.md)
 - **Fill a Folder from somewhere else.** Data sources read rows from a JSON API, a folder (inside or outside the vault, with YAML filters), a CSV file or a Markdown table, on any bucket item. → [Data sources](docs/data-sources.md)
-- **Link to anything.** Typing `[[` suggests files, modules and free blocks (found by content), and free-block links display as their text with a hover preview.
+- **Link to anything.** Typing `[[` suggests files, modules and free blocks (found by content), and free-block links display as their text with a hover preview. With the Tephra switch on, `[[text` searches only the source the note is in, `[[@` lists sources (**All sources** first), `[[@name:text` searches one source and `[[@*:text` searches all of them with a source pill on each row. After a file in another source or a non-note file, `#` and `^` search its headings, blocks and code symbols through Tephra. → [Settings](docs/settings.md)
 - **Let an agent in.** An optional, localhost-only MCP server lets an agent on your machine read and arrange your views and statuses. Desktop only. → [MCP server](docs/mcp-server.md)
 
 ## Settings
 
-Under **Settings → Atlas Explorer**, with two tabs, **Basic** and **Status**. Every setting is described on [Settings and commands](docs/settings.md).
+Under **Settings → Atlas Explorer**, with three tabs, **Basic**, **Status** and **Tephra**. Every setting is described on [Settings and commands](docs/settings.md).
 
 <img src="docs/images/settings.png" alt="The Basic tab of the Atlas Explorer settings" width="860">
 
@@ -91,6 +91,8 @@ Under **Settings → Atlas Explorer**, with two tabs, **Basic** and **Status**. 
 | MCP server (desktop only) | off, port `27202` |
 
 The **Status** tab holds status sets, the color palette, Glow, Retain icons and Retained icon color.
+
+The **Tephra** tab (desktop only) holds one switch, **Turn on Tephra multi-data source vault** (off by default), and, when it is on, the connection status and the list of Tephra sources. While it is on, Atlas links each top-level source into the vault as `Sources/<name>`, adds `Sources/` to the vault `.gitignore` and each source's `.git/` and `.gitignore` entries to Excluded files, and refuses to turn on if a `Sources` folder or file of yours is in the way. Turn it off before uninstalling Atlas: that removes the links and Excluded entries (never your files). With it on, the vault Inbox's **+** also offers **Add source…** (pick a folder, name it), and a source's Inbox header has **Remove**. Clicking a file in a source's Inbox section opens the real file under `Sources/<name>/…`: notes, PDFs, images and canvases open in Obsidian, code opens wherever a plugin such as VS Code Workbench registered its extension, and every other type (Word, PowerPoint, Excel, Google Docs and Sheets, zip files and so on) opens in its own Mac app. Edits save straight to the file in the source's folder. The `[[` popup becomes source-aware: `[[text` stays in the note's own source, `[[@` lists sources, `[[@name:text` and `[[@*:text` search one source or all of them, and it inserts `[[Name]]` for the same source or `[[@source:path]]` for another (the file's full path in that source only when its name clashes there). `#` and `^` after a source file search it through Tephra, and a block with no ID gets one from Tephra when picked. Tephra not running leaves `[[text`, `[[@` and `[[@name:text` working from the known sources and shows "Tephra offline" for `#`/`^`. Links across sources count like vault links: a note's `[[@whoop:Workout Plan]]` shows in Obsidian's Backlinks and graph, links from code, PDFs and Office files appear under **Also linked from (Tephra)** in the Backlinks panel (or the **Open Links pane** command's pane), and a deeper file in a source pops out in its Inbox section when a link reaches it from outside its module. `scripts/report-case-mismatch.mjs <vault>` counts links that differ in case from their target (read-only). See [Settings](docs/settings.md).
 
 ## Commands
 

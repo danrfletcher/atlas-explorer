@@ -15,6 +15,13 @@ import {
 import { outsideChildMtime, resolveOutsidePath } from "./folder-source-outside";
 import { DropDecision, DropZone, resolveDropDecision, resolveDropZone } from "./drop-zones";
 import { resolveUnit } from "./unit-display";
+import { InboxSection, groupInboxSections, parseUnitList, sourceSectionKey, sourceUnitsFromEntries } from "./inbox-sections";
+import { isInSourcesFolder, skipsSourcesFolder, sourceLinkPath } from "./sources-path";
+import { excludeEntryMatcher } from "./source-excludes";
+import { openSourceBlock, openSourceFile } from "./source-open";
+import { TEPHRA_VAULT_SOURCE_NAME } from "./settings";
+import { isUsableSourceName, type TephraSource } from "./tephra-client";
+import type { TephraConnection } from "./tephra-connection";
 import { attachLongPress } from "./long-press";
 import { pointOutsideRect } from "./module-contents-drag";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
@@ -116,7 +123,45 @@ export function stuckScrollTarget(headerTop: number, stackOffset: number, maxScr
  * collapsed section wait this long for the expansion before they scroll. */
 const COLLAPSE_TRANSITION_MS = 160;
 
-type SectionKey = "bucket" | "inbox";
+/** PR-4 (G1/E5): the one place Tephra's connection (a changed source list, a source gone or back, Tephra
+ * reachable or not) reaches the Atlas panes: every open explorer queues a render, so sections appear, go, turn
+ * "(missing)" or return without a reload. `main.ts` subscribes with exactly this; tests drive it with a real
+ * `TephraConnection`. `views` is read on each change, so a pane opened later is covered. Returns the unsubscribe. */
+export function refreshExplorersOnTephraChange(connection: Pick<TephraConnection, "onChange">, views: () => Iterable<unknown>): () => void {
+	return connection.onChange(() => {
+		for (const view of views()) {
+			if (view instanceof AtlasExplorerView) view.refreshForTephra();
+		}
+	});
+}
+
+/** `source:<name>` is a Tephra source's Inbox section (PR-4, G1). */
+type SectionKey = "bucket" | "inbox" | `source:${string}`;
+
+/** PR-4 (E12): with several Inbox sections each one has its own virtual window. They share one group so the
+ * explorer still holds a single `inboxRedraw` / `inboxDrawNow` for the pane, and a stale callback from an older
+ * render can tell it is stale by comparing against that one function. */
+interface InboxDrawGroup {
+	parts: Array<{ schedule: () => void; draw: () => void }>;
+	redraw: () => void;
+	drawNow: () => void;
+}
+
+function createInboxDrawGroup(): InboxDrawGroup {
+	const group: InboxDrawGroup = {
+		parts: [],
+		redraw: () => group.parts.forEach((part) => part.schedule()),
+		drawNow: () => group.parts.forEach((part) => part.draw()),
+	};
+	return group;
+}
+
+/** What the render knows about one Inbox section before it is drawn. */
+interface InboxSectionPlan {
+	section: InboxSection;
+	units: Unit[];
+	dismissed: Unit[];
+}
 
 /** The DOM a section's chevron and title act on, passed to the click handlers. */
 interface SectionParts {
@@ -990,12 +1035,29 @@ function clickRunnerFor(view: { clickActionRunner: ClickActionRunner | null }, a
  * the markup (a property, not an attribute) so the row's pinned markup is unchanged. */
 const apiRowFocusKeys = new WeakMap<HTMLElement, string>();
 
+/** G7: with the Tephra toggle on, a file under `Sources/` opens by the source-open rule (a registered Obsidian
+ * view, else the default app). Everything else, and everything with the toggle off (G16), takes the original
+ * `getLeaf(newTab).openFile` path unchanged. A plain function, not a method, so `openRef` needs nothing but
+ * `this.plugin`. */
+async function openTFile(plugin: Pick<AtlasPlugin, "app" | "settings">, file: TFile, newTab: boolean): Promise<void> {
+	if (skipsSourcesFolder(plugin.settings, Platform.isMobile) && isInSourcesFolder(file.path)) {
+		await openSourceFile(plugin.app, file, newTab);
+		return;
+	}
+	await plugin.app.workspace.getLeaf(newTab).openFile(file);
+}
+
 export class AtlasExplorerView extends ItemView {
 	private filterText = "";
 	private sortMode: "manual" | "alphabetical" = "manual";
 	/** Both sections start open on every load and are never persisted (PR-1.S1 / F8). */
 	private bucketCollapsed = false;
 	private inboxCollapsed = false;
+	/** PR-4 (G1): the Tephra sources whose Inbox section is collapsed. Like `inboxCollapsed`, never persisted:
+	 * every section starts open on load. */
+	private collapsedSources = new Set<string>();
+	/** PR-4: each source section's own shift-click order, keyed `source:<name>`. A range never leaves its section. */
+	private sourceSelectOrders = new Map<string, string[]>();
 	/** PR-1.B1: the one scroll body and the section parts the sticky headers and title clicks act on.
 	 * `bucketWrap`/`inboxWrap` (each section's `.atlas-meta-children`) stand in for the section
 	 * element itself when measuring natural (unstuck) position — `.atlas-section` is `display:
@@ -1007,6 +1069,8 @@ export class AtlasExplorerView extends ItemView {
 		bucketWrap: HTMLElement;
 		inboxHeader: HTMLElement;
 		inboxWrap: HTMLElement;
+		/** PR-4: the Tephra source sections after the vault's, in display order. */
+		sources: Array<{ key: SectionKey; section: HTMLElement; header: HTMLElement; wrap: HTMLElement }>;
 	} | null = null;
 	/** PR-1.F1: bumped by every header click, so a title scroll still waiting for an expansion is
 	 * dropped once a newer click supersedes it (E4, chevron-then-title). */
@@ -1528,6 +1592,12 @@ export class AtlasExplorerView extends ItemView {
 	 * these toggles. */
 	refresh(): void {
 		withRenderCause("settings", () => this.queueRender());
+	}
+
+	/** PR-4 (G1/E5): Tephra's source list or reachability changed (a source added, removed, gone or back), so the
+	 * Inbox sections may have. Queued like any other change: no full reload, and the scroll position is kept. */
+	refreshForTephra(): void {
+		withRenderCause("other", () => this.queueRender());
 	}
 
 	/** PR-7 (G21): called from `main.ts`'s vault `"modify"` listener on every file save — refreshes
@@ -2454,20 +2524,53 @@ export class AtlasExplorerView extends ItemView {
 			const dismissedUnits = this.showDismissed
 				? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
 				: [];
-			const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
-			await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
+			// PR-4 (G1): null while the Tephra toggle is off (or on mobile): then the Inbox is the one vault section,
+			// drawn by exactly the code that drew it before sections existed, and Tephra is never called.
+			const plan = this.tephraSectionsOn() ? await this.planInboxSections(inboxUnits, dismissedUnits, view, isCurrent) : null;
 			if (!isCurrent()) return;
+			const sectionPlans: InboxSectionPlan[] = plan ?? [{ section: { key: "inbox", kind: "vault", name: null, missing: false, units: inboxUnits }, units: inboxUnits, dismissed: dismissedUnits }];
+			const group = sectionPlans.length > 1 ? createInboxDrawGroup() : undefined;
+			if (group) {
+				this.stagedInboxRedraw = group.redraw;
+				this.stagedInboxDrawNow = group.drawNow;
+			}
+			this.sourceSelectOrders.clear();
+			const inboxEls: HTMLElement[] = [];
+			for (const entry of sectionPlans) {
+				const isSource = entry.section.kind === "source";
+				const el = scrollBody.createDiv({ cls: isSource ? "atlas-section atlas-inbox atlas-inbox-source" : "atlas-section atlas-inbox" });
+				if (isSource && entry.section.name !== null) el.dataset.source = entry.section.name;
+				await this.renderInboxSection(el, view, entry.units, entry.dismissed, scrollBody, restoreScrollTop, isCurrent, {
+					source: isSource ? entry.section : undefined,
+					group,
+				});
+				if (!isCurrent()) return;
+				inboxEls.push(el);
+			}
+			// Each section set the scroll top when it drew, and the later ones were not in the body yet: once every
+			// section is in, put it back and draw every window for the position it really has.
+			if (group) {
+				scrollBody.scrollTop = restoreScrollTop;
+				group.drawNow();
+			}
+			const inboxEl = inboxEls[0];
 			// The staged body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
 			// so later renders can read the live one from the DOM again.
 			this.pendingScrollTop = null;
-			// Both sections always render their header and wrap; a render without them has nothing to stack.
+			// Every section always renders its header and wrap; a render without them has nothing to stack.
 			const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
 			const bucketWrap = bucketEl.querySelector<HTMLElement>(":scope > .atlas-meta-children");
 			const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
 			const inboxWrap = inboxEl.querySelector<HTMLElement>(":scope > .atlas-meta-children");
+			const sourceEls = inboxEls.slice(1).flatMap((el) => {
+				const header = el.querySelector<HTMLElement>(":scope > .atlas-section-header");
+				const wrap = el.querySelector<HTMLElement>(":scope > .atlas-meta-children");
+				const name = el.dataset.source;
+				return header && wrap && name !== undefined ? [{ key: sourceSectionKey(name) as SectionKey, section: el, header, wrap }] : [];
+			});
 			this.stickyEls =
 				bucketHeader && bucketWrap && inboxHeader && inboxWrap
-					? { body: scrollBody, bucketHeader, bucketWrap, inboxHeader, inboxWrap }
+					? { body: scrollBody, bucketHeader, bucketWrap, inboxHeader, inboxWrap, sources: sourceEls }
 					: null;
 			// The post-render touches that make a pane look the way it does on screen (sticky-header
 			// variable, open-note highlight) are applied to the staged pane too, so the comparison below
@@ -2609,6 +2712,7 @@ export class AtlasExplorerView extends ItemView {
 		if (this.stickyEls) {
 			observer.observe(this.stickyEls.bucketHeader);
 			observer.observe(this.stickyEls.inboxHeader);
+			for (const source of this.stickyEls.sources) observer.observe(source.header);
 		}
 		this.inboxLayoutObserver = observer;
 	}
@@ -2632,7 +2736,24 @@ export class AtlasExplorerView extends ItemView {
 		if (s.body.style.getPropertyValue("--atlas-bucket-label-h") !== labelHeight) {
 			s.body.style.setProperty("--atlas-bucket-label-h", labelHeight);
 		}
-		const fits = s.body.clientHeight >= bucketHeaderHeight + inboxHeaderHeight + INBOX_ROW_HEIGHT;
+		// PR-4: the Tephra source headers stack under the Inbox's, in order, and pin to the bottom edge in the
+		// same order. Each one gets its top (the headers above it) and bottom (the headers after it) as variables
+		// on its section element, so with no source section nothing here writes anything.
+		const heights = s.sources.map((source) => source.header.getBoundingClientRect().height);
+		let above = bucketHeaderHeight + inboxHeaderHeight;
+		const totalSourceHeight = heights.reduce((sum, h) => sum + h, 0);
+		let below = totalSourceHeight;
+		const setVar = (el: HTMLElement, name: string, value: string): void => {
+			if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value);
+		};
+		s.sources.forEach((source, i) => {
+			below -= heights[i];
+			setVar(source.section, "--atlas-section-top", `${above}px`);
+			setVar(source.section, "--atlas-section-bottom", `${below}px`);
+			above += heights[i];
+		});
+		if (s.sources.length > 0) setVar(s.inboxHeader.parentElement ?? s.inboxHeader, "--atlas-section-bottom", `${totalSourceHeight}px`);
+		const fits = s.body.clientHeight >= bucketHeaderHeight + inboxHeaderHeight + totalSourceHeight + INBOX_ROW_HEIGHT;
 		if (s.body.classList.contains("atlas-sticky-disabled") === fits) {
 			s.body.toggleClass("atlas-sticky-disabled", !fits);
 		}
@@ -2647,11 +2768,18 @@ export class AtlasExplorerView extends ItemView {
 		const s = this.stickyEls;
 		if (!s) return 0;
 		const bodyTop = s.body.getBoundingClientRect().top;
-		const header = key === "bucket" ? s.bucketHeader : s.inboxHeader;
-		const wrap = key === "bucket" ? s.bucketWrap : s.inboxWrap;
+		// Every header before this one in display order stays stacked above it once it is stuck.
+		const entries = [
+			{ key: "bucket" as SectionKey, header: s.bucketHeader, wrap: s.bucketWrap },
+			{ key: "inbox" as SectionKey, header: s.inboxHeader, wrap: s.inboxWrap },
+			...s.sources,
+		];
+		const index = entries.findIndex((entry) => entry.key === key);
+		if (index === -1) return 0;
+		const { header, wrap } = entries[index];
 		const headerHeight = header.getBoundingClientRect().height;
 		const headerTop = wrap.getBoundingClientRect().top - bodyTop + s.body.scrollTop - headerHeight;
-		const stackOffset = key === "bucket" ? 0 : s.bucketHeader.getBoundingClientRect().height;
+		const stackOffset = entries.slice(0, index).reduce((sum, entry) => sum + entry.header.getBoundingClientRect().height, 0);
 		return stuckScrollTarget(headerTop, stackOffset, s.body.scrollHeight - s.body.clientHeight);
 	}
 
@@ -2663,13 +2791,17 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	private isSectionCollapsed(key: SectionKey): boolean {
-		return key === "bucket" ? this.bucketCollapsed : this.inboxCollapsed;
+		if (key === "bucket") return this.bucketCollapsed;
+		if (key === "inbox") return this.inboxCollapsed;
+		return this.collapsedSources.has(key.slice("source:".length));
 	}
 
 	/** Flips a section's state in place. The CSS transition on its wrapper does the animation. */
 	private setSectionCollapsed(key: SectionKey, collapsed: boolean, parts: SectionParts): void {
 		if (key === "bucket") this.bucketCollapsed = collapsed;
-		else this.inboxCollapsed = collapsed;
+		else if (key === "inbox") this.inboxCollapsed = collapsed;
+		else if (collapsed) this.collapsedSources.add(key.slice("source:".length));
+		else this.collapsedSources.delete(key.slice("source:".length));
 		setIcon(parts.chevron, collapsed ? "chevron-right" : "chevron-down");
 		parts.section.toggleClass("is-collapsed", collapsed);
 		parts.wrap.toggleClass("is-collapsed", collapsed);
@@ -3263,6 +3395,19 @@ export class AtlasExplorerView extends ItemView {
 				selection.clear();
 				const [lo, hi] = from <= to ? [from, to] : [to, from];
 				for (let i = lo; i <= hi; i++) selection.add(order[i]);
+			} else if (scope === "inbox" && from === -1 && to !== -1) {
+				// PR-4: the anchor is in another Inbox section. A range never crosses sections, so it selects only
+				// the anchor's own section: from the anchor to that section's edge facing the clicked one.
+				const lists = [this.inboxSelectOrder, ...this.sourceSelectOrders.values()];
+				const anchorList = lists.findIndex((list) => list.includes(this.selectionAnchor as string));
+				const clickedList = lists.indexOf(order);
+				if (anchorList !== -1 && clickedList !== -1) {
+					const own = lists[anchorList];
+					const a = own.indexOf(this.selectionAnchor);
+					const [lo, hi] = clickedList > anchorList ? [a, own.length - 1] : [0, a];
+					selection.clear();
+					for (let i = lo; i <= hi; i++) selection.add(own[i]);
+				}
 			}
 			withRenderCause("click", () => void this.render());
 			return true;
@@ -3795,24 +3940,38 @@ export class AtlasExplorerView extends ItemView {
 		dismissedUnits: Unit[],
 		scrollBody: HTMLElement,
 		restoreScrollTop: number,
-		isCurrent: () => boolean = () => true
+		isCurrent: () => boolean = () => true,
+		/** PR-4 (G1): `source` is set for a Tephra source's section (`[name]` header, no This view/Global toggle, "+"
+		 * limited to that source, its own collapse state and selection order); absent for the vault's Inbox, which is
+		 * drawn exactly as before sections existed. `group` is set only when several sections share the pane. */
+		opts: { source?: InboxSection; group?: InboxDrawGroup } = {}
 	): Promise<void> {
+		const source = opts.source;
+		const sourceName = source?.name ?? null;
+		const sectionKey: SectionKey = sourceName === null ? "inbox" : sourceSectionKey(sourceName) as SectionKey;
+		const collapsed = sourceName === null ? this.inboxCollapsed : this.collapsedSources.has(sourceName);
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
-		setIcon(chevron, this.inboxCollapsed ? "chevron-right" : "chevron-down");
-		const title = header.createSpan({ cls: "atlas-section-title", text: "Inbox" });
+		setIcon(chevron, collapsed ? "chevron-right" : "chevron-down");
+		const title = header.createSpan({ cls: "atlas-section-title", text: sourceName === null ? "Inbox" : `[${sourceName}]` });
 		// PR-5: the count badge reflects the real (undismissed) inbox size regardless of whether
 		// dismissed rows are currently revealed — "Show Dismissed" is a temporary peek, not a change
 		// to what's actually in the inbox, so the count shouldn't jump around as it's toggled.
 		header.createSpan({ cls: "atlas-badge atlas-count-badge", text: String(units.length) });
+		if (source?.missing) {
+			// E5: Tephra reports the source's folder gone. Told apart from Tephra being unreachable (PR-9), which never gets here.
+			header.addClass("is-missing");
+			header.createSpan({ cls: "atlas-section-missing", text: "(missing)" });
+		}
 		// PR-5 (G7): additive — the header's existing collapse `click` listener below is untouched.
 		header.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showInboxHeaderMenu(evt);
+			this.showInboxHeaderMenu(evt, sourceName);
 		});
 
+		// A source section has no This view/Global toggle: the mode is one setting for the whole Inbox.
 		const modeToggle = header.createDiv({ cls: "atlas-inbox-mode" });
-		for (const mode of ["view", "global"] as const) {
+		for (const mode of sourceName === null ? (["view", "global"] as const) : []) {
 			const btn = modeToggle.createSpan({ cls: "atlas-inbox-mode-btn", text: mode === "view" ? "This view" : "Global" });
 			if (view.inboxMode === mode) btn.addClass("is-active");
 			btn.addEventListener("click", (evt) => {
@@ -3827,19 +3986,21 @@ export class AtlasExplorerView extends ItemView {
 		// competing auto margin.
 		const addBtn = header.createDiv({ cls: "atlas-inbox-add-btn" });
 		setIcon(addBtn, "plus");
-		setTooltip(addBtn, "Add file to inbox");
+		setTooltip(addBtn, sourceName === null ? "Add file to inbox" : `Add file from ${sourceName}`);
 		addBtn.addEventListener("click", (evt) => {
 			evt.stopPropagation();
-			this.openAddFileModal();
+			if (sourceName !== null) this.openAddFileModal(sourceName);
+			else if (this.tephraSectionsOn()) this.showInboxAddMenu(evt); // PR-5 (G3): with Tephra on, "+" offers Add file… and Add source…
+			else this.openAddFileModal(); // toggle off: straight to the modal, exactly as before (G16)
 		});
 
 		// PR 11: same fix as the bucket section and the meta-folder chevron — content always renders
 		// into a dedicated wrapper so the collapse is a CSS transition, not a hard snap between
 		// "rendered" and "not rendered", and the state-persisting re-render is delayed to let the
 		// transition play first.
-		container.toggleClass("is-collapsed", this.inboxCollapsed);
+		container.toggleClass("is-collapsed", collapsed);
 		const sectionWrap = container.createDiv({ cls: "atlas-meta-children" });
-		sectionWrap.toggleClass("is-collapsed", this.inboxCollapsed);
+		sectionWrap.toggleClass("is-collapsed", collapsed);
 		const sectionInner = sectionWrap.createDiv({ cls: "atlas-meta-children-inner" });
 
 		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
@@ -3868,17 +4029,24 @@ export class AtlasExplorerView extends ItemView {
 		// below means most of these rows never actually exist in the DOM at once, so a shift-click on
 		// a row currently scrolled into view still needs this to know the full order, not just
 		// whatever's presently painted.
-		this.inboxSelectOrder = sorted.map((r) => unitRefKey(r.ref));
-		this.inboxRefByKey = new Map(sorted.map((r) => [unitRefKey(r.ref), r.ref]));
-		this.missingAddedInboxKeys = new Set(
-			sorted.filter((r) => r.info.missing && this.plugin.unitIndex.isAdded(r.ref)).map((r) => unitRefKey(r.ref))
-		);
+		const missingAddedKeys = sorted.filter((r) => r.info.missing && this.plugin.unitIndex.isAdded(r.ref)).map((r) => unitRefKey(r.ref));
+		if (sourceName === null) {
+			this.inboxSelectOrder = sorted.map((r) => unitRefKey(r.ref));
+			this.inboxRefByKey = new Map(sorted.map((r) => [unitRefKey(r.ref), r.ref]));
+			this.missingAddedInboxKeys = new Set(missingAddedKeys);
+		} else {
+			// A source section adds to what the vault section (drawn first) just set: one drag payload and one
+			// "missing" set for the whole Inbox, but a shift-click range of its own, never across sections.
+			this.sourceSelectOrders.set(sectionKey, sorted.map((r) => unitRefKey(r.ref)));
+			for (const r of sorted) this.inboxRefByKey.set(unitRefKey(r.ref), r.ref);
+			for (const key of missingAddedKeys) this.missingAddedInboxKeys.add(key);
+		}
 
 		// F11: the inbox can be thousands of rows (5,000 files + 2,000 free blocks scale target).
 		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
 		// PR 9 (issue 2) replaced inline inbox expansion with the Module Contents modal, so every
 		// inbox row is now fixed-height and the virtualized path always applies.
-		this.stagedInboxSignature = JSON.stringify(
+		const signature = JSON.stringify(
 			sorted.map((r) => [
 				unitRefKey(r.ref),
 				r.hidden,
@@ -3892,18 +4060,89 @@ export class AtlasExplorerView extends ItemView {
 				r.info.missing && this.plugin.unitIndex.isAdded(r.ref),
 			])
 		);
-		this.renderVirtualizedInboxRows(listEl, sorted, view, scrollBody, restoreScrollTop);
+		// The vault section's signature is the whole signature while it is alone; a source section's is added after it.
+		this.stagedInboxSignature = sourceName === null ? signature : `${this.stagedInboxSignature ?? ""}|${sectionKey}:${source?.missing === true}:${signature}`;
+		this.renderVirtualizedInboxRows(listEl, sorted, view, scrollBody, restoreScrollTop, opts.group, sourceName === null ? null : sectionKey);
 
 		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
-		chevron.addEventListener("click", () => this.onSectionChevronClick("inbox", parts));
-		title.addEventListener("click", () => this.onSectionTitleClick("inbox", parts));
+		chevron.addEventListener("click", () => this.onSectionChevronClick(sectionKey, parts));
+		title.addEventListener("click", () => this.onSectionTitleClick(sectionKey, parts));
+	}
+
+	/** PR-4 (G1): the Inbox sections for this render, or null when the Tephra toggle is off (the caller then
+	 * draws the one vault section the way it always was). Calls `unit.list` once per listed source for this
+	 * render and keeps nothing of it afterwards (F1): the units go into this render's `unitsByRefKey` and the
+	 * plan, and the next render asks again. A source Tephra reports gone (`source.list` status `missing`, or a
+	 * `unit.list` answer that says `offline`) gets its header and no rows (E5); a Tephra that doesn't answer
+	 * gives no source sections at all, never "(missing)" (offline is PR-9's). Caller checks `isCurrent()`. */
+	private async planInboxSections(inboxUnits: Unit[], dismissedUnits: Unit[], view: View, isCurrent: () => boolean): Promise<InboxSectionPlan[] | null> {
+		const { settings, viewsManager, unitIndex } = this.plugin;
+		if (!skipsSourcesFolder(settings, Platform.isMobile)) return null;
+		const connection = this.plugin.tephraConnection;
+		const snapshot = connection?.getSnapshot();
+		let sources: TephraSource[] = connection && snapshot?.state === "online" ? snapshot.sources : [];
+		const listable = sources.filter((source) => source.name !== TEPHRA_VAULT_SOURCE_NAME && isUsableSourceName(source.name) && source.status !== "missing");
+		const answers = connection ? await Promise.all(listable.map((source) => this.listSourceEntries(connection, source.name))) : [];
+		if (!isCurrent()) return null;
+
+		const goneNames = new Set<string>();
+		const listedUnits: Unit[] = [];
+		answers.forEach((parsed, i) => {
+			const name = listable[i].name;
+			if (!parsed) return;
+			if (parsed.offline) goneNames.add(name);
+			else listedUnits.push(...sourceUnitsFromEntries(name, parsed.entries));
+		});
+		if (goneNames.size > 0) sources = sources.map((source) => (goneNames.has(source.name) ? { ...source, status: "missing" } : source));
+		// This render's resolver knows the listed units; the next render builds its own map again.
+		for (const unit of listedUnits) {
+			const key = unitRefKey(unitToRef(unit));
+			if (!this.unitsByRefKey.has(key)) this.unitsByRefKey.set(key, unit);
+		}
+
+		// The same placed, suppressed and dismissed rules a vault unit gets.
+		const visible = viewsManager.getInboxUnits(listedUnits, view.id, view.inboxMode, unitIndex);
+		const dismissed = this.showDismissed ? viewsManager.getDismissedInboxUnits(listedUnits, view.id, view.inboxMode, unitIndex) : [];
+		const sections = groupInboxSections({ enabled: true, sources, units: [...visible, ...inboxUnits] });
+		const dismissedSections = groupInboxSections({ enabled: true, sources, units: [...dismissed, ...dismissedUnits] });
+		return sections.map((section, i) => ({ section, units: section.units, dismissed: dismissedSections[i].units }));
+	}
+
+	/** The Tephra toggle is on and this is desktop (G16). Read live; a pane built with no settings object counts as off. */
+	private tephraSectionsOn(): boolean {
+		const enabled = (this.plugin.settings as Partial<AtlasSettings> | undefined)?.tephraEnabled === true;
+		return skipsSourcesFolder({ tephraEnabled: enabled }, Platform.isMobile);
+	}
+
+	/** One `unit.list` call for a source's top level; null when Tephra didn't answer properly. */
+	private async listSourceEntries(connection: TephraConnection, name: string): Promise<ReturnType<typeof parseUnitList>> {
+		try {
+			const result = await connection.call("unit.list", { source: name });
+			return result.ok ? parseUnitList(result.result) : null;
+		} catch {
+			return null;
+		}
 	}
 
 	/** PR-3 (G2, G3): opens the "+" modal over every vault file minus whatever's already a unit or
 	 * placed somewhere, and on selection marks it "added" (terminal state — see `markAdded`) and
 	 * persists immediately, matching the click-driven-action convention `promoteAndPlace` uses. */
-	private openAddFileModal(): void {
+	private openAddFileModal(sourceName: string | null = null): void {
 		const { app, settings, unitIndex, viewsManager } = this.plugin;
+		// PR-4 (G1): with the Tephra toggle on the vault's "+" never offers anything under `Sources/`, and a
+		// source's "+" offers only what lives under its own `Sources/<name>/` (not what Tephra already lists as
+		// a top-level row, and not an ignored path).
+		const skipsSources = skipsSourcesFolder(settings, Platform.isMobile);
+		const sourceRoot = sourceName === null ? null : sourceLinkPath(sourceName);
+		const excludeMatchers = sourceName === null ? [] : (settings.tephraExcludes?.[sourceName] ?? []).map(excludeEntryMatcher).filter((m): m is (path: string) => boolean => m !== null);
+		const inScope = (path: string): boolean => {
+			if (sourceRoot !== null) {
+				if (!path.startsWith(`${sourceRoot}/`)) return false;
+				if (!path.slice(sourceRoot.length + 1).includes("/")) return false; // a top-level entry is already a row
+				return !excludeMatchers.some((matches) => matches(path));
+			}
+			return !(skipsSources && isInSourcesFolder(path));
+		};
 		// A unit `isSuppressedFromInbox` keeps out of the inbox (a link-only promotion while auto-promotion
 		// is off, or one the user hid) is not on screen as an inbox row, so it must stay pickable here:
 		// choosing it marks it "added", which is terminal and brings it into the inbox. Placed units are
@@ -3926,13 +4165,13 @@ export class AtlasExplorerView extends ItemView {
 		};
 		const candidates: (TFile | TFolder)[] = [
 			...candidateFilesForAdd(
-				app.vault.getFiles(),
+				app.vault.getFiles().filter((file) => inScope(file.path)),
 				units,
 				isPlacedAnywhere,
 				(ref) => unitIndex.isDismissed(ref, "global"),
 				interfaceNotePathFor
 			),
-			...candidateFoldersForAdd(app.vault.getAllLoadedFiles(), units, placed, settings),
+			...candidateFoldersForAdd(app.vault.getAllLoadedFiles().filter((entry) => inScope(entry.path)), units, placed, settings),
 		];
 		new AddFileSuggestModal(app, candidates, (item) => {
 			const ref: UnitRef = item instanceof TFolder ? { kind: "folder", path: item.path } : { kind: "file", path: item.path };
@@ -3942,7 +4181,7 @@ export class AtlasExplorerView extends ItemView {
 		}).open();
 	}
 
-	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, view: View, hidden = false): HTMLElement {
+	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, view: View, hidden = false, sectionKey: string | null = null): HTMLElement {
 		// PR-1.F2 (G10): only an "added" item that has gone missing gets the greyed row. A missing row that
 		// is not "added" (promoted, link-derived) keeps today's inbox behaviour.
 		const missingAdded = info.missing && this.plugin.unitIndex.isAdded(ref);
@@ -3979,7 +4218,9 @@ export class AtlasExplorerView extends ItemView {
 
 		this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
-			const consumed = this.handleSelectionClick(evt, key, "inbox", this.inboxSelectOrder);
+			// Looked up at click time: the rows are drawn from a window and outlive nothing but their section.
+			const order = sectionKey === null ? this.inboxSelectOrder : (this.sourceSelectOrders.get(sectionKey) ?? []);
+			const consumed = this.handleSelectionClick(evt, key, "inbox", order);
 			if (!consumed && !missingAdded) void this.openRef(ref);
 		});
 		// Middle-click is stricter than plain click: any missing inbox row does nothing, not just a missing added one.
@@ -4017,7 +4258,11 @@ export class AtlasExplorerView extends ItemView {
 		sorted: { ref: UnitRef; info: RowInfo; unit: Unit; hidden: boolean }[],
 		view: View,
 		scrollBody: HTMLElement,
-		restoreScrollTop: number
+		restoreScrollTop: number,
+		/** PR-4: set when several sections share the pane. Each registers its own window in it, and the group's
+		 * `redraw` is the one function the explorer keeps (`inboxRedraw`). Absent: exactly the single-list path. */
+		group?: InboxDrawGroup,
+		sectionKey: string | null = null
 	): void {
 		const spacer = listEl.createDiv({ cls: "atlas-inbox-spacer" });
 		spacer.style.height = `${sorted.length * INBOX_ROW_HEIGHT}px`;
@@ -4037,7 +4282,8 @@ export class AtlasExplorerView extends ItemView {
 		const drawWindow = () => {
 			frameQueued = false;
 			// Stale callbacks from an earlier render (or after close) must not touch the current DOM.
-			if (!spacer.isConnected || (this.inboxRedraw !== scheduleDraw && this.stagedInboxRedraw !== scheduleDraw)) return;
+			const owner = group ? group.redraw : scheduleDraw;
+			if (!spacer.isConnected || (this.inboxRedraw !== owner && this.stagedInboxRedraw !== owner)) return;
 			const listOffset = spacer.getBoundingClientRect().top - scrollBody.getBoundingClientRect().top + scrollBody.scrollTop;
 			const { start, end } = computeInboxWindow(scrollBody.scrollTop, listOffset, scrollBody.clientHeight, INBOX_ROW_HEIGHT, INBOX_OVERSCAN, sorted.length);
 			if (start === drawnStart && end === drawnEnd) return;
@@ -4047,7 +4293,9 @@ export class AtlasExplorerView extends ItemView {
 			// The row being dragged is kept in the DOM even when it scrolls out of the window (hidden),
 			// so the browser's drag source survives. Everything else is rebuilt for the new window.
 			// A window drawn into a staged pane (not yet on screen) never touches the live dragged row.
-			const dragged = this.inboxRedraw === scheduleDraw ? this.inboxDragRowEl : null;
+			const liveDragged = this.inboxRedraw === (group ? group.redraw : scheduleDraw) ? this.inboxDragRowEl : null;
+			// With several sections the dragged row lives in one of them; the others must not hide it.
+			const dragged = liveDragged && spacer.contains(liveDragged) ? liveDragged : null;
 			// A row's module-icon dwell timer dies with its element, and `dragleave` never fires for a
 			// removed node, so cancel any pending dwell before the rows it belongs to are swapped out.
 			// PR-1.S1 R3: only when the dwell actually belongs to a row in this spacer (and isn't the
@@ -4069,7 +4317,7 @@ export class AtlasExplorerView extends ItemView {
 					dragged.setCssStyles({ display: "" });
 					continue;
 				}
-				const row = this.renderInboxRow(spacer, ref, info, view, hidden);
+				const row = this.renderInboxRow(spacer, ref, info, view, hidden, sectionKey);
 				row.addClass("atlas-row-virtual");
 				row.style.top = `${i * INBOX_ROW_HEIGHT}px`;
 			}
@@ -4082,8 +4330,11 @@ export class AtlasExplorerView extends ItemView {
 		};
 
 		// Lives in `stagedInboxRedraw` until the pane it draws into goes on screen (`renderNow` moves it).
-		this.stagedInboxRedraw = scheduleDraw;
-		this.stagedInboxDrawNow = drawWindow;
+		if (group) group.parts.push({ schedule: scheduleDraw, draw: drawWindow });
+		else {
+			this.stagedInboxRedraw = scheduleDraw;
+			this.stagedInboxDrawNow = drawWindow;
+		}
 		drawWindow();
 		scrollBody.addEventListener("scroll", scheduleDraw);
 	}
@@ -5129,11 +5380,11 @@ export class AtlasExplorerView extends ItemView {
 		modal.open();
 	}
 
-	/** PR-5 (G7): the inbox section header's own right-click menu — a single toggle item, same
+	/** PR-5 (G7): the inbox section header's own right-click menu — the Show/Hide Dismissed toggle, same
 	 * `Menu`/`showAtMouseEvent` construction as the toolbar view-name menu and the row menus below.
 	 * Toggling flips the instance-level `showDismissed` flag and re-renders; no persisted write, same
-	 * as `inboxCollapsed`. */
-	private showInboxHeaderMenu(evt: MouseEvent): void {
+	 * as `inboxCollapsed`. Atlas-22 PR-5 (G5): a Tephra source's header (`sourceName` set) adds Remove below it. */
+	private showInboxHeaderMenu(evt: MouseEvent, sourceName: string | null = null): void {
 		const menu = new Menu();
 		menu.addItem((item) =>
 			item
@@ -5144,6 +5395,25 @@ export class AtlasExplorerView extends ItemView {
 					void this.render();
 				})
 		);
+		// PR-5 (G5): a Tephra source's header adds Remove (Rename is PR-11). The vault's header never does, and
+		// with the Tephra toggle off there are no source headers, so nothing here is reachable.
+		if (sourceName !== null && this.tephraSectionsOn()) {
+			menu.addSeparator();
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove")
+					.setIcon("trash")
+					.onClick(() => this.plugin.sourceActions.removeSource(sourceName))
+			);
+		}
+		menu.showAtMouseEvent(evt);
+	}
+
+	/** PR-5 (G3): the vault Inbox's "+" with the Tephra toggle on. "Add file…" is today's modal, unchanged. */
+	private showInboxAddMenu(evt: MouseEvent): void {
+		const menu = new Menu();
+		menu.addItem((item) => item.setTitle("Add file…").setIcon("file-plus").onClick(() => this.openAddFileModal()));
+		menu.addItem((item) => item.setTitle("Add source…").setIcon("folder-plus").onClick(() => void this.plugin.sourceActions.addSource()));
 		menu.showAtMouseEvent(evt);
 	}
 
@@ -5355,18 +5625,29 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- shared actions ------------------------------------------------------------------------
 
+	/** Opens a unit. Every path here is a vault path looked up in the vault index, so only a real `TFile` is
+	 * ever opened (F2). A block ref outside `Sources/` opens by `openLinkText`; a block ref in a source note
+	 * opens its exact TFile with the subpath as view state, so a same-named note elsewhere can't win and no
+	 * note is ever created. */
 	private async openRef(ref: UnitRef, newTab = false): Promise<void> {
 		if (ref.kind === "block") {
+			if (skipsSourcesFolder(this.plugin.settings, Platform.isMobile) && isInSourcesFolder(ref.path)) {
+				// G7: never `openLinkText` for a source note. Obsidian can't resolve a path through a Sources/ folder
+				// link and would create a note there. Open the exact TFile; a missing one opens nothing (E5).
+				const source = this.plugin.app.vault.getAbstractFileByPath(ref.path);
+				if (source instanceof TFile) await openSourceBlock(this.plugin.app, source, ref.subpath, newTab);
+				return;
+			}
 			this.plugin.app.workspace.openLinkText(`${ref.path}#${ref.subpath}`, "", newTab);
 			return;
 		}
 		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
 		if (ref.kind === "folder" && file instanceof TFolder) {
 			const note = findInterfaceNote(this.plugin.app, file, this.plugin.settings);
-			if (note) await this.plugin.app.workspace.getLeaf(newTab).openFile(note);
+			if (note) await openTFile(this.plugin, note, newTab);
 			return;
 		}
-		if (file instanceof TFile) await this.plugin.app.workspace.getLeaf(newTab).openFile(file);
+		if (file instanceof TFile) await openTFile(this.plugin, file, newTab);
 	}
 
 	private revealInNativeExplorer(path: string): void {

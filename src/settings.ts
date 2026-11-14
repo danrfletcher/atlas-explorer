@@ -3,6 +3,8 @@ import type AtlasPlugin from "./main";
 import { rewritePathString } from "./types";
 import { normalizeHexColor } from "./statuses";
 import { closeActivePopup, openColorPickerPopup } from "./status-popup";
+import { TEPHRA_INSTALL_COMMAND, TEPHRA_REPO_URL, isUsableSourceName, type TephraSource } from "./tephra-client";
+import type { TephraSnapshot } from "./tephra-connection";
 
 export interface AtlasSettings {
 	poolFolder: string;
@@ -45,6 +47,38 @@ export interface AtlasSettings {
 	 * `UnitIndex.isSuppressedFromInbox`; it never unplaces anything and never changes how links
 	 * resolve. Absent in an old `data.json` resolves to off, via `normalizeAutoPromotion`. */
 	autoPromotion: boolean;
+	/** G16: the master switch, "Turn on Tephra multi-data source vault" in the Tephra settings tab. Off by
+	 * default; off means Atlas works exactly as it did before Tephra (no client, no timer, no link hook).
+	 * While true on desktop, Atlas connects to Tephra and teaches Obsidian's link resolution about
+	 * `[[@source:path]]` (or, if that can't be done, renders those links itself). Written only by
+	 * `TephraController.setEnabled`; read through `normalizeTephraSettings`, so a hand-edited `data.json`
+	 * without a real boolean loads as off. */
+	tephraEnabled: boolean;
+	/** G15: per-source settings, keyed by Tephra source name. A source with no entry is on for everything
+	 * (`showInSearch` defaults to true). Entries are never removed by Atlas here: PR-3 cleans one up
+	 * together with the source's `Sources/` link. */
+	tephraSourceSettings: Record<string, TephraSourceSetting>;
+	/** G9 (PR-1, internal, no UI): force the Q13 fallback renderer even when the link-resolution hook
+	 * would install — for checking the fallback live. Only meaningful while `tephraEnabled` is on. */
+	tephraLinkFallback: boolean;
+	/** G2/R3-3/E13: the `Sources/<name>` folder links Atlas made, by source name, with the target each was
+	 * given. This record is what "Atlas owns this link" means: Atlas replaces or removes only a link listed
+	 * here, and `Sources/` is Atlas's only while every entry in it is a link listed here. Read through
+	 * `normalizeTephraLinks`. */
+	tephraLinks: Record<string, string>;
+	/** G2/R3-2: the Obsidian Excluded files entries Atlas added, by source name. Toggle-off removes exactly
+	 * these and no entry the user wrote. Read through `normalizeTephraExcludes`. */
+	tephraExcludes: Record<string, string[]>;
+	/** Advanced, no UI: a loopback `http://127.0.0.1:<port>` address for Tephra instead of the default
+	 * port, set by hand in `data.json` (to run a second Tephra on a scratch port). Anything that isn't a
+	 * loopback http address is ignored, because the Tephra token is sent to this address. Read through
+	 * `resolveTephraRpcUrl`. */
+	tephraUrl?: string;
+}
+
+export interface TephraSourceSetting {
+	/** "Show in Obsidian search & graph": off means `Sources/<name>/` is in Obsidian's Excluded files. */
+	showInSearch: boolean;
 }
 
 export const DEFAULT_TO_DELETE_FOLDER = "_to_delete";
@@ -65,12 +99,76 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	highlightOpenNote: true,
 	mcpServerEnabled: false,
 	autoPromotion: false,
+	tephraEnabled: false,
+	tephraSourceSettings: {},
+	tephraLinkFallback: false,
+	tephraLinks: {},
+	tephraExcludes: {},
 };
 
 /** PR-1 (G1): anything in `data.json` that isn't a real boolean (absent, a string, `null`...) is off,
  * the safe default, rather than being coerced by truthiness (`"false"` must not turn it on). */
 export function normalizeAutoPromotion(raw: unknown): boolean {
 	return typeof raw === "boolean" ? raw : false;
+}
+
+/** G16: only a real `true` turns a Tephra switch on; absent, a string like `"true"`, `"yes"`, `null`... are off. */
+export function normalizeTephraFlag(raw: unknown): boolean {
+	return raw === true;
+}
+
+/** G15: a hand-edited `data.json` can hold anything for `tephraSourceSettings` (`5`, `null`, an array...):
+ * only a plain object counts, otherwise `{}`. Entries that aren't objects are dropped; a missing or
+ * non-boolean `showInSearch` is the default (on). Always returns a fresh object, never `DEFAULT_SETTINGS`'. */
+export function normalizeTephraSourceSettings(raw: unknown): Record<string, TephraSourceSetting> {
+	const result: Record<string, TephraSourceSetting> = {};
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return result;
+	for (const [name, entry] of Object.entries(raw)) {
+		if (name === "__proto__" || typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+		const showInSearch = (entry as { showInSearch?: unknown }).showInSearch;
+		result[name] = { showInSearch: typeof showInSearch === "boolean" ? showInSearch : true };
+	}
+	return result;
+}
+
+/** G15/G16: the three Tephra keys of a loaded `settings` object, each made safe. */
+export function normalizeTephraSettings(raw: { tephraEnabled?: unknown; tephraSourceSettings?: unknown; tephraLinkFallback?: unknown }): Pick<AtlasSettings, "tephraEnabled" | "tephraSourceSettings" | "tephraLinkFallback"> {
+	return {
+		tephraEnabled: normalizeTephraFlag(raw.tephraEnabled),
+		tephraSourceSettings: normalizeTephraSourceSettings(raw.tephraSourceSettings),
+		tephraLinkFallback: normalizeTephraFlag(raw.tephraLinkFallback),
+	};
+}
+
+/** G2: `tephraLinks` from a hand-edited `data.json`. Only a plain object counts; an entry survives only when
+ * its key is one safe path segment (it becomes a path under `Sources/`, so `..` or `a/b` must never get
+ * through) and its value is an absolute path. Always a fresh object. */
+export function normalizeTephraLinks(raw: unknown): Record<string, string> {
+	const result: Record<string, string> = {};
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return result;
+	for (const [name, target] of Object.entries(raw)) {
+		if (!isUsableSourceName(name) || typeof target !== "string" || !target.startsWith("/")) continue;
+		result[name] = target;
+	}
+	return result;
+}
+
+/** R3-2: `tephraExcludes` from a hand-edited `data.json`: a plain object of string lists, with a safe key. */
+export function normalizeTephraExcludes(raw: unknown): Record<string, string[]> {
+	const result: Record<string, string[]> = {};
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return result;
+	for (const [name, list] of Object.entries(raw)) {
+		if (!isUsableSourceName(name) || !Array.isArray(list)) continue;
+		const entries = list.filter((entry): entry is string => typeof entry === "string" && entry !== "");
+		if (entries.length > 0) result[name] = entries;
+	}
+	return result;
+}
+
+/** True unless the source's own setting says off: a source Atlas hasn't seen yet shows in search & graph. */
+export function showsInSearch(settings: Pick<AtlasSettings, "tephraSourceSettings">, sourceName: string): boolean {
+	const entry = Object.prototype.hasOwnProperty.call(settings.tephraSourceSettings, sourceName) ? settings.tephraSourceSettings[sourceName] : undefined;
+	return entry?.showInSearch !== false;
 }
 
 /** PR-1.F2: a hand-edited `data.json` can hold any JSON value for `highlightOpenNote` (a string,
@@ -126,12 +224,17 @@ export function computeDefaultExcludedFolders(app: App, poolFolder: string): str
 	return Array.from(new Set([...dotFolders, poolFolder, DEFAULT_TO_DELETE_FOLDER]));
 }
 
-type SettingsTabId = "basic" | "status";
+type SettingsTabId = "basic" | "status" | "tephra";
+
+/** The vault itself is a Tephra source named `notes`; its row has no per-source toggles (G15). */
+export const TEPHRA_VAULT_SOURCE_NAME = "notes";
 
 export class AtlasSettingTab extends PluginSettingTab {
 	/** Not persisted — resets to "Basic" each time the settings panel is reopened, same as any
 	 * other Obsidian settings tab's in-session UI state. */
 	private activeTab: SettingsTabId = "basic";
+	/** Stops the live updates of the Tephra tab's connection section; set while that tab is on screen. */
+	private stopTephraUpdates: (() => void) | null = null;
 
 	constructor(app: App, private plugin: AtlasPlugin) {
 		super(app, plugin);
@@ -139,15 +242,28 @@ export class AtlasSettingTab extends PluginSettingTab {
 
 	display(): void {
 		const { containerEl } = this;
+		this.releaseTephraUpdates();
 		containerEl.empty();
 
 		const tabBar = containerEl.createDiv({ cls: "atlas-settings-tabs" });
 		this.renderTabButton(tabBar, "basic", "Basic");
 		this.renderTabButton(tabBar, "status", "Status");
+		this.renderTabButton(tabBar, "tephra", "Tephra");
 
 		const body = containerEl.createDiv({ cls: "atlas-settings-body" });
 		if (this.activeTab === "basic") this.renderBasicTab(body);
+		else if (this.activeTab === "tephra") this.renderTephraTab(body);
 		else this.renderStatusTab(body);
+	}
+
+	/** Closing the settings window: the Tephra tab's live updates must not outlive it. */
+	hide(): void {
+		this.releaseTephraUpdates();
+	}
+
+	private releaseTephraUpdates(): void {
+		this.stopTephraUpdates?.();
+		this.stopTephraUpdates = null;
 	}
 
 	private renderTabButton(tabBar: HTMLElement, id: SettingsTabId, label: string): void {
@@ -409,6 +525,118 @@ export class AtlasSettingTab extends PluginSettingTab {
 					this.plugin.mcpTokenStore.regenerate();
 					new Notice("Atlas: MCP token regenerated — the old token no longer works.");
 					this.display();
+				})
+			);
+	}
+
+	// ---------- Tephra tab (G15/G16) ----------
+
+	/** G15/G16: the explanation, the master toggle, and — only while the toggle is on — the connection
+	 * status and the list of Tephra sources. Atlas never starts or installs Tephra from here (F7): the tab
+	 * only shows the command. On mobile the toggle is disabled and Atlas behaves as with it off. */
+	private renderTephraTab(containerEl: HTMLElement): void {
+		const intro = containerEl.createEl("p", { cls: "setting-item-description atlas-tephra-intro" });
+		intro.appendText(
+			"Tephra is a local program that indexes any number of folders (\"sources\") on this Mac, including code repositories and other vaults, into one link graph. With it on, Atlas lists each source and can link between them. "
+		);
+		this.createRepoLink(intro);
+
+		const isMobile = Platform.isMobile;
+		if (isMobile) {
+			containerEl.createEl("p", {
+				text: "Tephra runs on a Mac only. On this device Atlas behaves as if this switch were off.",
+				cls: "setting-item-description atlas-tephra-mobile-note",
+			});
+		}
+
+		const enabled = this.plugin.settings.tephraEnabled && !isMobile;
+		new Setting(containerEl)
+			.setName("Turn on Tephra multi-data source vault")
+			.setDesc("Off by default. While off, Atlas works exactly as it did before Tephra: no connection, no background checks, no changes to your links.")
+			.addToggle((toggle) => {
+				toggle.setValue(enabled);
+				if (isMobile) toggle.setDisabled(true);
+				toggle.onChange(async (value) => {
+					await this.plugin.setTephraEnabled(value);
+					this.display();
+				});
+			});
+
+		containerEl.createEl("p", {
+			text: "Turn this switch off before uninstalling Atlas. Atlas's Tephra changes are only undone when it is switched off here; uninstalling or disabling Atlas leaves them in place.",
+			cls: "setting-item-description atlas-tephra-uninstall-note",
+		});
+
+		if (!enabled) return;
+
+		const live = containerEl.createDiv({ cls: "atlas-tephra-live" });
+		const connection = this.plugin.tephraConnection;
+		const render = (snapshot: TephraSnapshot) => this.renderTephraLive(live, snapshot);
+		render(connection?.getSnapshot() ?? { state: "off", checked: false, sources: [], error: null });
+		if (connection) {
+			// The 10 s check can change the status or the list while this tab is open: redraw only this section.
+			const unsubscribe = connection.onChange((snapshot) => {
+				const scroller = containerEl.closest(".vertical-tab-content");
+				const scrollTop = scroller?.scrollTop ?? 0;
+				render(snapshot);
+				if (scroller) scroller.scrollTop = scrollTop;
+			});
+			this.stopTephraUpdates = unsubscribe;
+		}
+	}
+
+	private createRepoLink(parent: HTMLElement): void {
+		const link = parent.createEl("a", { text: TEPHRA_REPO_URL, href: TEPHRA_REPO_URL });
+		link.setAttribute("target", "_blank");
+		link.setAttribute("rel", "noopener");
+	}
+
+	private renderTephraLive(containerEl: HTMLElement, snapshot: TephraSnapshot): void {
+		containerEl.empty();
+		const status = containerEl.createDiv({ cls: "atlas-tephra-connection" });
+		if (snapshot.state === "online") {
+			status.addClass("is-online");
+			status.createSpan({ text: "Connected to Tephra." });
+		} else if (!snapshot.checked) {
+			status.createSpan({ text: "Checking for Tephra…" });
+			return;
+		} else {
+			status.addClass("is-offline");
+			status.createEl("p", { text: "Tephra isn't running." });
+			const help = status.createEl("p", { cls: "setting-item-description" });
+			help.appendText("To install and start it, run ");
+			help.createEl("code", { text: TEPHRA_INSTALL_COMMAND });
+			help.appendText(" in a terminal. See ");
+			this.createRepoLink(help);
+			help.appendText(". Atlas checks again every 10 seconds, so this updates on its own once Tephra starts.");
+			return;
+		}
+
+		new Setting(containerEl).setName("Sources").setHeading();
+		if (snapshot.sources.length === 0) {
+			containerEl.createEl("p", { text: "Tephra has no sources yet.", cls: "setting-item-description" });
+			return;
+		}
+		for (const source of snapshot.sources) this.renderTephraSource(containerEl, source);
+	}
+
+	private renderTephraSource(containerEl: HTMLElement, source: TephraSource): void {
+		const card = containerEl.createDiv({ cls: "atlas-tephra-source" });
+		const row = new Setting(card).setName(source.name).setDesc(source.path).setClass("atlas-tephra-source-row");
+		row.controlEl?.createSpan({ text: source.status, cls: `atlas-tephra-source-status is-${source.status}` });
+		if (source.name === TEPHRA_VAULT_SOURCE_NAME) return; // the vault: no toggles
+
+		new Setting(card)
+			.setName("Show in Obsidian search & graph")
+			.setDesc(`When off, Sources/${source.name}/ is added to Obsidian's Excluded files.`)
+			.setClass("atlas-tephra-source-setting")
+			.addToggle((toggle) =>
+				toggle.setValue(showsInSearch(this.plugin.settings, source.name)).onChange(async (value) => {
+					this.plugin.settings.tephraSourceSettings[source.name] = { showInSearch: value };
+					await this.plugin.saveSettings();
+					// The Excluded files entry and Atlas's record of it change inside the Sources folder's job chain, which
+					// reads the setting when it reconciles: a sync already running can't undo this with a stale value.
+					await this.plugin.sourcesFolder.resync();
 				})
 			);
 	}

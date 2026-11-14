@@ -160,6 +160,31 @@
 	bottom: 0;
 }
 
+/* PR-4 (G1): Tephra source sections stack under the Inbox label. `updateStickyLayout()` writes
+ * `--atlas-section-top` (the headers above) and `--atlas-section-bottom` (the headers after) on each source
+ * section, and `--atlas-section-bottom` on the vault Inbox section, so N headers stack at the top in order and
+ * pin to the bottom edge in order. With no source section the variable is unset and the Inbox rule above is
+ * unchanged. Scoped to modifier classes: the shared header rule is not touched. */
+.atlas-inbox:not(.atlas-inbox-source) > .atlas-section-header {
+	bottom: var(--atlas-section-bottom, 0px);
+}
+
+.atlas-inbox.atlas-inbox-source > .atlas-section-header {
+	top: var(--atlas-section-top, 0px);
+	bottom: var(--atlas-section-bottom, 0px);
+}
+
+/* A source whose folder Tephra reports gone: the header and its "(missing)" marker go grey. */
+.atlas-section-header.is-missing {
+	color: var(--text-faint);
+}
+
+.atlas-section-missing {
+	color: var(--text-faint);
+	font-weight: normal;
+	text-transform: none;
+}
+
 /* PR-1.B1 (E2): the short-panel guard. Set on the scroll body when it's too short to show both
  * headers plus a row — both labels fall back into normal flow instead of overlapping the content. */
 .atlas-explorer-scroll.atlas-sticky-disabled .atlas-section-header {
@@ -1084,4 +1109,120 @@ input.atlas-name-input.atlas-name-invalid[type="text"]:not(:disabled) {
 .atlas-api-click-function-help p {
 	margin: 0 0 6px;
 	overflow-wrap: anywhere;
+}
+
+/* Q13 fallback (G9): `[[@source:…]]` links Atlas renders itself when the link-resolution hook can't be
+ * installed. Styled like Obsidian's internal links; scoped to this class so nothing else changes. */
+.atlas-source-link {
+	color: var(--link-color);
+	text-decoration: var(--link-decoration);
+	cursor: pointer;
+}
+.atlas-source-link:hover {
+	color: var(--link-color-hover);
+	text-decoration: var(--link-decoration-hover);
+}
+.atlas-source-link.is-unresolved {
+	color: var(--link-unresolved-color);
+	opacity: var(--link-unresolved-opacity);
+	text-decoration-style: var(--link-unresolved-decoration-style);
+}
+
+/* Tephra settings tab (G15): the source list. Names and paths can be long or non-Latin, so they wrap
+ * anywhere instead of stretching the tab; every rule is scoped to these classes. */
+.atlas-tephra-intro,
+.atlas-tephra-uninstall-note {
+	overflow-wrap: anywhere;
+}
+.atlas-tephra-connection.is-online {
+	color: var(--text-success, var(--text-normal));
+}
+.atlas-tephra-connection.is-offline p {
+	margin: 0 0 6px;
+	overflow-wrap: anywhere;
+}
+.atlas-tephra-source .setting-item-info {
+	min-width: 0;
+}
+.atlas-tephra-source .setting-item-name,
+.atlas-tephra-source .setting-item-description {
+	overflow-wrap: anywhere;
+}
+.atlas-tephra-source-setting {
+	margin-left: 16px;
+}
+.atlas-tephra-source-status {
+	flex: none;
+	padding: 0 8px;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-hover);
+	font-size: var(--font-ui-smaller);
+}
+.atlas-tephra-source-status.is-online {
+	color: var(--text-success, var(--text-normal));
+}
+.atlas-tephra-source-status.is-missing,
+.atlas-tephra-source-status.is-offline {
+	color: var(--text-muted);
+}
+
+/* G8: the `[[` popup's source rows. */
+.atlas-link-suggest-pill {
+	margin-left: 8px;
+	padding: 0 8px;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-hover);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+.atlas-link-suggest-item.atlas-link-suggest-missing .atlas-link-suggest-title,
+.atlas-link-suggest-item.atlas-link-suggest-message .atlas-link-suggest-title {
+	color: var(--text-faint);
+}
+
+/* E3: Atlas-owned hover box for a broken @source link. Not a .tooltip or .popover, so Obsidian never
+   removes it; src/source-link-hover.ts sets position, top and left. */
+.atlas-source-link-hover {
+	position: fixed;
+	z-index: var(--layer-tooltip, 70);
+	max-width: 420px;
+	padding: var(--size-4-1, 4px) var(--size-4-2, 8px);
+	background-color: var(--background-secondary);
+	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s, 4px);
+	box-shadow: var(--shadow-s);
+	font-size: var(--font-ui-smaller);
+	line-height: var(--line-height-tight, 1.3);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	pointer-events: none;
+}
+
+/* PR-8 (G10): "Also linked from (Tephra)" at the bottom of the core Backlinks panel, and in the Atlas Links pane.
+   Scoped to its own classes; Obsidian's .backlink-pane rules are not touched. */
+.atlas-tephra-backlinks {
+	padding: var(--size-4-2, 8px) var(--size-4-3, 12px);
+}
+.atlas-tephra-backlinks-title {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold, 600);
+	margin-bottom: var(--size-4-1, 4px);
+}
+.atlas-tephra-backlink-row {
+	padding: 2px var(--size-4-1, 4px);
+	border-radius: var(--radius-s, 4px);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	cursor: pointer;
+	overflow-wrap: anywhere;
+}
+.atlas-tephra-backlink-row:hover,
+.atlas-tephra-backlink-row:focus-visible {
+	background-color: var(--background-modifier-hover);
+}
+.atlas-tephra-backlinks-empty {
+	color: var(--text-faint);
+	font-size: var(--font-ui-small);
 }

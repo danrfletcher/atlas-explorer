@@ -1,5 +1,6 @@
 import { TAbstractFile, TFile, Vault } from "obsidian";
 import { collectRootEntries, validateName } from "./name-rules";
+import { isInSourcesFolder } from "./sources-path";
 
 /** `<14 digits>-<4 base36>`, the shape of a free block's filename (case-insensitive). */
 const ID_LIKE = /^\d{14}-[0-9a-z]{4}$/i;
@@ -66,6 +67,9 @@ export interface GraduationDeps {
 	scheduler: Scheduler;
 	getPoolFolder(): string;
 	getExcludedFolders(): string[];
+	/** R3-1: true while the Tephra toggle is on. Then a file under `Sources/` is never a graduation candidate,
+	 * and nothing is recorded or forgotten for it. Optional: absent means the toggle is off. */
+	skipsSources?(): boolean;
 	notify(message: string, durationMs: number): void;
 	/** Called after a move Atlas made; shows the "links weren't updated" notice when the Obsidian setting is off. */
 	afterMove(): void;
@@ -130,6 +134,7 @@ export class GraduationController {
 		if (this.disposed) return "ignored";
 		if (this.ownReverts.delete(file.path)) return "swallowed";
 
+		if (this.inSkippedSources(file.path) || this.inSkippedSources(oldPath)) return "ignored";
 		const poolFolder = this.deps.getPoolFolder();
 		if (!(file instanceof TFile)) return "ignored";
 		if (classifyRename(oldPath, file.path, true, poolFolder).action !== "graduate") return "ignored";
@@ -148,8 +153,13 @@ export class GraduationController {
 	}
 
 	handleDelete(file: TAbstractFile): void {
+		if (this.inSkippedSources(file.path)) return;
 		// A hidden file is dropped from the index on purpose; its record ends with the dialog.
 		if (file instanceof TFile && !this.pending.get(file)?.hidden) this.forget(file);
+	}
+
+	private inSkippedSources(path: string): boolean {
+		return isInSourcesFolder(path) && this.deps.skipsSources?.() === true;
 	}
 
 	/** `metadataCache` `resolved`: the link graph has caught up with whatever the rename touched. */

@@ -325,3 +325,95 @@ describe("Atlas #13 PR-1 — a placed note that is not a unit (Dan's Responsibil
 		expect(ctx.app.vault.getAbstractFileByPath("Modules/NoNote/NoNote.md")).toBeNull();
 	});
 });
+
+/** Tephra multi-source PR-6 (G7, E5): the same middle-click rules for rows whose path is `Sources/<name>/...`. The
+ * real `renderNode` / `renderInboxRow` / `openRef` / opener rule; only the workspace is the recording fake above. */
+describe("source rows (Tephra toggle on): middle-click opens by the source-open rule", () => {
+	const note: UnitRef = { kind: "file", path: "Sources/whoop/Workout Plan.md" };
+	const docx: UnitRef = { kind: "file", path: "Sources/whoop/Plan.docx" };
+	const code: UnitRef = { kind: "file", path: "Sources/tephra/crates/tephrad/src/registry.rs" };
+	const crates: UnitRef = { kind: "folder", path: "Sources/tephra/crates" };
+	const defaultApp = (): string[] => (ctx.app as unknown as { defaultAppOpens: string[] }).defaultAppOpens;
+
+	beforeEach(() => {
+		(ctx.plugin.settings as { tephraEnabled: boolean }).tephraEnabled = true;
+		const v = ctx.app.vault;
+		for (const dir of ["Sources", "Sources/whoop", "Sources/tephra", "Sources/tephra/crates", "Sources/tephra/crates/tephrad", "Sources/tephra/crates/tephrad/src"]) v.seedFolder(dir);
+		for (const f of [note.path, docx.path, code.path]) v.seedFile(f);
+		v.calls.length = 0;
+	});
+
+	it("a bucket row and an inbox row for a source note open in a new leaf, by the full Sources/ path", async () => {
+		aux(label(await bucketRow(ctx, note, "Workout Plan")));
+		aux(label(inboxRow(ctx, note, "Workout Plan")));
+		await settle();
+		expect(ctx.workspace.getLeaf.mock.calls).toEqual([[true], [true]]);
+		expect(ctx.workspace.leaves.filter((l) => l.opened).map((l) => l.opened!.path)).toEqual([note.path, note.path]);
+		expect(defaultApp()).toEqual([]);
+	});
+
+	it("a source file with no Obsidian view goes to the default app instead of a leaf", async () => {
+		aux(label(inboxRow(ctx, docx, "Plan")));
+		await settle();
+		expect(defaultApp()).toEqual([docx.path]);
+		expect(ctx.workspace.getLeaf).not.toHaveBeenCalled();
+	});
+
+	it("a code file opens in a leaf only while a plugin has registered its extension", async () => {
+		const registry = (ctx.app as unknown as { viewRegistry: { typeByExtension: Record<string, string> } }).viewRegistry.typeByExtension;
+		aux(label(inboxRow(ctx, code, "registry.rs")));
+		await settle();
+		expect(defaultApp()).toEqual([code.path]);
+		registry.rs = "workbench";
+		aux(label(inboxRow(ctx, code, "registry.rs")));
+		await settle();
+		expect(ctx.workspace.leaves.filter((l) => l.opened).map((l) => l.opened!.path)).toEqual([code.path]);
+	});
+
+	it("the rules are the vault rows' rules: modifiers and controls do nothing, a plain middle-click does", async () => {
+		const row = inboxRow(ctx, note, "Workout Plan");
+		for (const init of [{ shiftKey: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }]) aux(label(row), init);
+		const dot = row.appendChild(document.createElement("span"));
+		dot.className = "atlas-status-dot";
+		aux(dot);
+		await settle();
+		expect(ctx.workspace.getLeaf).not.toHaveBeenCalled();
+		aux(label(row));
+		await settle();
+		expect(ctx.workspace.getLeaf).toHaveBeenCalledExactlyOnceWith(true);
+	});
+
+	it("E5: a source row whose file is gone (rendered missing, or deleted after render) does nothing and creates nothing", async () => {
+		const stale = inboxRow(ctx, note, "Workout Plan");
+		const missing = inboxRow(ctx, { kind: "file", path: "Sources/gone/Ghost.md" }, "Ghost", true);
+		await ctx.app.vault.delete(ctx.app.vault.getAbstractFileByPath(note.path)!);
+		ctx.app.vault.calls.length = 0;
+		aux(label(stale));
+		aux(label(missing));
+		await settle();
+		expect(ctx.workspace.getLeaf).not.toHaveBeenCalled();
+		expect(ctx.workspace.openLinkText).not.toHaveBeenCalled();
+		expect(defaultApp()).toEqual([]);
+		expect(ctx.app.vault.calls).toEqual([]);
+	});
+
+	it("a source module with no interface note does nothing and creates no <Folder>/<Folder>.md", async () => {
+		aux(label(inboxRow(ctx, crates, "crates")));
+		await settle();
+		expect(ctx.workspace.getLeaf).not.toHaveBeenCalled();
+		expect(ctx.app.vault.getAbstractFileByPath("Sources/tephra/crates/crates.md")).toBeNull();
+		expect(ctx.app.vault.calls).toEqual([]);
+	});
+
+	it("a block row inside a source note opens its exact file in a new tab with the subpath as view state, never by openLinkText", async () => {
+		const blockRef: UnitRef = { kind: "block", path: note.path, subpath: "^k3f9a2" };
+		aux(label(inboxRow(ctx, blockRef, "Idea")));
+		await settle();
+		expect(ctx.workspace.openLinkText).not.toHaveBeenCalled();
+		expect(ctx.workspace.getLeaf).toHaveBeenCalledExactlyOnceWith(true);
+		const leaf = ctx.workspace.leaves.find((l) => l.opened)!;
+		expect(leaf.opened!.path).toBe(note.path);
+		expect(leaf.openFile).toHaveBeenCalledExactlyOnceWith(expect.anything(), { eState: { subpath: "#^k3f9a2" } });
+		expect(ctx.app.vault.calls).toEqual([]);
+	});
+});

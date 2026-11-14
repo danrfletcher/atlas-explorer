@@ -15,6 +15,13 @@ export interface NameDialogOptions {
 	 * "Add" rather than "Create File" / "Create". Validation, the clash rule and the red/green
 	 * classes are all unaffected by this — only the button's own text changes. */
 	confirmLabel?: string;
+	/** PR-5 (G3): replaces the vault's name rules. Add source passes its own source-name rules; every other
+	 * caller leaves this out and keeps `validateName`. */
+	validate?: (name: string) => { valid: true } | { valid: false; message: string };
+	/** PR-5 (G3): runs once on confirm, after validation passes. It resolves a reason to keep the dialog open
+	 * (the typed name stays, only the reason is shown, and confirm works again) or `null` to accept, which
+	 * closes the dialog and resolves the name. While it runs a second confirm does nothing. */
+	onSubmit?: (name: string) => Promise<string | null>;
 }
 
 /** Only one name dialog may be open at a time. */
@@ -41,6 +48,8 @@ class NameDialog extends Modal {
 	private messageEl!: HTMLElement;
 	private createBtn!: HTMLButtonElement;
 	private settled = false;
+	/** An `onSubmit` is running: confirm does nothing until it answers. */
+	private submitting = false;
 
 	constructor(
 		app: App,
@@ -95,30 +104,59 @@ class NameDialog extends Modal {
 	/** Reads the live vault root every time, so a note created while the dialog is open is caught. */
 	private validate(): boolean {
 		const { mode, ignoreRootPaths, poolFolder, excludedFolders } = this.options;
-		const result = validateName(this.inputEl.value, {
-			mode,
-			ignoreRootPaths,
-			poolFolder,
-			excludedFolders,
-			root: mode === "non-empty" ? [] : collectRootEntries(this.app.vault),
-		} satisfies NameRuleOptions);
+		const result = this.options.validate
+			? this.options.validate(this.inputEl.value)
+			: validateName(this.inputEl.value, {
+					mode,
+					ignoreRootPaths,
+					poolFolder,
+					excludedFolders,
+					root: mode === "non-empty" ? [] : collectRootEntries(this.app.vault),
+				} satisfies NameRuleOptions);
 
-		this.inputEl.toggleClass("atlas-name-valid", result.valid);
-		this.inputEl.toggleClass("atlas-name-invalid", !result.valid);
-		this.inputEl.setAttribute("aria-invalid", String(!result.valid));
-		this.createBtn.disabled = !result.valid;
-		this.messageEl.setText(result.valid ? "" : result.message);
-		this.messageEl.toggleClass("atlas-hidden", result.valid);
+		this.showResult(result.valid, result.valid ? "" : result.message);
 		return result.valid;
 	}
 
+	private showResult(valid: boolean, message: string): void {
+		this.inputEl.toggleClass("atlas-name-valid", valid);
+		this.inputEl.toggleClass("atlas-name-invalid", !valid);
+		this.inputEl.setAttribute("aria-invalid", String(!valid));
+		this.createBtn.disabled = !valid || this.submitting;
+		this.messageEl.setText(valid ? "" : message);
+		this.messageEl.toggleClass("atlas-hidden", valid);
+	}
+
 	private submit(): void {
-		if (this.settled) return;
+		if (this.settled || this.submitting) return;
 		if (!this.validate()) {
 			this.inputEl.focus();
 			return;
 		}
-		this.settle(this.inputEl.value);
+		const { onSubmit } = this.options;
+		if (!onSubmit) {
+			this.settle(this.inputEl.value);
+			return;
+		}
+		const value = this.inputEl.value;
+		this.submitting = true;
+		this.createBtn.disabled = true;
+		void onSubmit(value).then(
+			(refusal) => this.finishSubmit(value, refusal),
+			() => this.finishSubmit(value, "Something went wrong. Try again.")
+		);
+	}
+
+	private finishSubmit(value: string, refusal: string | null): void {
+		this.submitting = false;
+		if (this.settled) return; // cancelled while it ran
+		if (refusal === null) {
+			this.settle(value);
+			return;
+		}
+		this.showResult(false, refusal);
+		this.createBtn.disabled = false;
+		this.inputEl.focus();
 	}
 
 	/** Resolves exactly once, releasing the one-dialog guard before handing control to the caller. */
