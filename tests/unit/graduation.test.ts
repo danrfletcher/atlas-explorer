@@ -52,7 +52,24 @@ interface Rig {
 	toasts(): string[];
 }
 
-function rig(seed: (app: App) => void = () => {}): Rig {
+/** R3-6: a stand-in for Tephra's rename acknowledgement. `ack()` is what the rename forwarder does when Tephra answers. */
+interface FakeAcks {
+	active: boolean;
+	waits: Array<{ oldPath: string; newPath: string; cb: () => void; stopped: boolean }>;
+	ack(oldPath: string, newPath: string): void;
+}
+const fakeAcks = (active: boolean): FakeAcks => {
+	const acks: FakeAcks = {
+		active,
+		waits: [],
+		ack(oldPath, newPath) {
+			for (const wait of acks.waits) if (!wait.stopped && wait.oldPath === oldPath && wait.newPath === newPath) wait.cb();
+		},
+	};
+	return acks;
+};
+
+function rig(seed: (app: App) => void = () => {}, acks?: FakeAcks): Rig {
 	const app = new App();
 	app.vault.seedFolder("_pool");
 	seed(app);
@@ -71,6 +88,16 @@ function rig(seed: (app: App) => void = () => {}): Rig {
 		afterMove,
 		onHiddenMove,
 		openDialog: openDialog as never,
+		tephraAcks: acks && {
+			isActive: () => acks.active,
+			whenAcknowledged: (oldPath, newPath, cb) => {
+				const wait = { oldPath, newPath, cb, stopped: false };
+				acks.waits.push(wait);
+				return () => {
+					wait.stopped = true;
+				};
+			},
+		},
 	});
 	app.vault.on("rename", (file: never, oldPath: string) => ctrl.handleRename(file, oldPath));
 	app.vault.on("delete", (file: never) => ctrl.handleDelete(file));
@@ -799,5 +826,118 @@ describe("UT-9 / AC-5..8 the clash dialog", () => {
 		close(null);
 		await flush();
 		expect(r.renameFile).not.toHaveBeenCalled();
+	});
+});
+
+describe("R3-6 graduation waits for Tephra's acknowledgement while the toggle is on", () => {
+	const NEW = "_pool/Quarry drone LiDAR.md";
+
+	it("online: the move happens on the acknowledgement of the triggering rename, not on resolved/modify, and before FALLBACK_MS", async () => {
+		const acks = fakeAcks(true);
+		const r = rig(undefined, acks);
+		const f = r.app.vault.seedFile(ID);
+		await r.userRename(f, NEW);
+		expect(acks.waits).toHaveLength(1);
+		expect(acks.waits[0]).toMatchObject({ oldPath: ID, newPath: NEW });
+		// Obsidian's own settle does nothing now: a `resolved` and a `modify` neither start nor move anything
+		r.app.metadataCache.trigger("resolved");
+		await r.scheduler.advance(SETTLE_MS * 3);
+		expect(r.renameFile).not.toHaveBeenCalled();
+		acks.ack(ID, NEW);
+		await flush();
+		expect(r.renameFile).toHaveBeenCalledTimes(1);
+		expect(exists(r, "Quarry drone LiDAR.md")).toBe(true);
+		expect(r.scheduler.size).toBe(0); // the fallback timer went with it
+	});
+
+	it("an acknowledgement of some other rename does not move it", async () => {
+		const acks = fakeAcks(true);
+		const r = rig(undefined, acks);
+		const f = r.app.vault.seedFile(ID);
+		await r.userRename(f, NEW);
+		acks.ack("_pool/other.md", "_pool/other2.md");
+		await flush();
+		expect(r.renameFile).not.toHaveBeenCalled();
+	});
+
+	it("offline or never acknowledged: graduates on FALLBACK_MS, and not a moment earlier", async () => {
+		const acks = fakeAcks(true);
+		const r = rig(undefined, acks);
+		const f = r.app.vault.seedFile(ID);
+		await r.userRename(f, NEW);
+		await r.scheduler.advance(FALLBACK_MS - 1);
+		expect(r.renameFile).not.toHaveBeenCalled();
+		await r.scheduler.advance(1);
+		expect(r.renameFile).toHaveBeenCalledTimes(1);
+		expect(acks.waits[0].stopped).toBe(true); // a late acknowledgement can't start a second run
+		acks.ack(ID, NEW);
+		await flush();
+		expect(r.renameFile).toHaveBeenCalledTimes(1);
+	});
+
+	it("the graduation's own move is a second rename, after the first (both reach the vault's rename event in order)", async () => {
+		const acks = fakeAcks(true);
+		const r = rig(undefined, acks);
+		const seen: Array<[string, string]> = [];
+		r.app.vault.on("rename", (file: never, oldPath: string) => void seen.push([oldPath, (file as TFile).path]));
+		const f = r.app.vault.seedFile(ID);
+		await r.userRename(f, NEW);
+		await r.scheduler.advance(FALLBACK_MS);
+		expect(seen).toEqual([
+			[ID, NEW],
+			[NEW, "Quarry drone LiDAR.md"],
+		]);
+	});
+
+	it("a chain of renames waits on the last one only; the first one's acknowledgement does not move it", async () => {
+		const acks = fakeAcks(true);
+		const r = rig(undefined, acks);
+		const f = r.app.vault.seedFile(ID);
+		await r.userRename(f, "_pool/B.md");
+		await r.userRename(f, "_pool/C.md");
+		expect(acks.waits.map((w) => w.stopped)).toEqual([true, false]);
+		acks.ack(ID, "_pool/B.md");
+		await flush();
+		expect(r.renameFile).not.toHaveBeenCalled();
+		acks.ack("_pool/B.md", "_pool/C.md");
+		await flush();
+		expect(r.renameFile).toHaveBeenCalledTimes(1);
+		expect(file(r, "C.md")).toBe(f);
+	});
+
+	it("the toggle going off while it waits: the fallback still moves it", async () => {
+		const acks = fakeAcks(true);
+		const r = rig(undefined, acks);
+		const f = r.app.vault.seedFile(ID);
+		await r.userRename(f, NEW);
+		acks.active = false;
+		await r.scheduler.advance(FALLBACK_MS);
+		expect(r.renameFile).toHaveBeenCalledTimes(1);
+	});
+
+	it("dispose cancels the wait", async () => {
+		const acks = fakeAcks(true);
+		const r = rig(undefined, acks);
+		const f = r.app.vault.seedFile(ID);
+		await r.userRename(f, NEW);
+		r.ctrl.dispose();
+		expect(acks.waits[0].stopped).toBe(true);
+		await r.scheduler.advance(FALLBACK_MS * 2);
+		expect(r.renameFile).not.toHaveBeenCalled();
+	});
+
+	it("toggle off (`tephraAcks` inactive or absent): exactly today's behaviour, settle on resolved, no wait registered", async () => {
+		for (const acks of [undefined, fakeAcks(false)]) {
+			Notice.reset();
+			const r = rig(undefined, acks);
+			const f = r.app.vault.seedFile(ID);
+			await r.userRename(f, NEW);
+			expect(acks?.waits ?? []).toHaveLength(0);
+			r.app.metadataCache.trigger("resolved");
+			await r.scheduler.advance(SETTLE_MS - 1);
+			expect(r.renameFile).not.toHaveBeenCalled();
+			await r.scheduler.advance(1);
+			expect(r.renameFile).toHaveBeenCalledTimes(1);
+		}
 	});
 });

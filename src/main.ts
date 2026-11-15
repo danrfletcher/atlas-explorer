@@ -636,7 +636,7 @@ export default class AtlasPlugin extends Plugin {
 	 * has run (rewrites refs, detaches a move-out) — it's a debounced timer, so it can never fire inline. */
 	onVaultRenameEvent(file: TAbstractFile, oldPath: string): void {
 		// PR-10 (G11): first, so the rename is on disk in the queue before anything below can throw. Inert with the toggle off.
-		this.tephraRenames.record(oldPath, file.path, file instanceof TFolder);
+		this.tephraRenames?.record(oldPath, file.path, file instanceof TFolder);
 		this.rewriteNoAutoPromoteOnRename(oldPath, file.path); // before onVaultRename: its folder branch rebuilds the index
 		const promotionsChanged = this.unitIndex.onVaultRename(file, oldPath);
 		this.viewsManager.onVaultRename(oldPath, file.path); // saves itself if anything changed
@@ -713,9 +713,9 @@ export default class AtlasPlugin extends Plugin {
 			this.sourcesFolder.start();
 			// PR-10 (G11): the old value is saved before Obsidian's setting is switched off. Renames made while the
 			// toggle was off are not queued, and so are not sent now; ones queued before it went off still are.
-			this.tephraRenames.load();
-			void this.tephraLinkSetting.enable();
-			this.tephraRenames.kick();
+			this.tephraRenames?.load();
+			void this.tephraLinkSetting?.enable();
+			this.tephraRenames?.kick();
 		}
 		else this.tephraGraphSync.unbind(); // PR-8: forgets the in-memory edges and recomputes
 		this.tephraBacklinks.refresh(true); // PR-8: adds the section on, removes it (and any request in flight) off
