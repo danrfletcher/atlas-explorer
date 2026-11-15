@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import AtlasPlugin from "../../src/main";
 import { nodeQueueStorage } from "../../src/tephra-rename-queue-fs";
 import { TEPHRA_RENAME_QUEUE_FILE, TephraRenameQueue } from "../../src/tephra-rename-queue";
 
@@ -54,5 +55,43 @@ describe("nodeQueueStorage", () => {
 		expect(corrupt).toHaveLength(1);
 		expect(readFileSync(corrupt[0].asidePath!, "utf8")).toBe("{broken");
 		expect(readdirSync(dir).sort()).toEqual([`${TEPHRA_RENAME_QUEUE_FILE}.corrupt-1`]);
+	});
+});
+
+/** R1: the queue file follows the plugin's real folder (`manifest.dir`), not `manifest.id`. The plugin's own path
+ * method is called; the queue then writes through the real file system into a real temp vault. */
+describe("the plugin's queue path (manifest.dir vs manifest.id)", () => {
+	const pluginFor = (vault: string, manifest: { id: string; dir?: string }) => {
+		const plugin = Object.create(AtlasPlugin.prototype) as AtlasPlugin & Record<string, unknown>;
+		plugin.manifest = manifest as never;
+		plugin.app = { vault: { configDir: ".obsidian" } } as never;
+		plugin.getVaultBasePath = () => vault;
+		return plugin as unknown as { tephraRenameQueuePath(): string };
+	};
+
+	it("lands in manifest.dir when the folder is named differently from the id, and the rename survives a restart", () => {
+		const vault = tempDir();
+		mkdirSync(join(vault, ".obsidian/plugins/atlas"), { recursive: true });
+		const path = pluginFor(vault, { id: "atlas-explorer", dir: ".obsidian/plugins/atlas" }).tephraRenameQueuePath();
+		expect(path).toBe(`${vault}/.obsidian/plugins/atlas/${TEPHRA_RENAME_QUEUE_FILE}`);
+
+		open(path).enqueue("a.md", "b.md");
+		expect(readdirSync(join(vault, ".obsidian/plugins"))).toEqual(["atlas"]); // no stray atlas-explorer folder
+		const restarted = open(path);
+		restarted.load();
+		expect(restarted.first()).toMatchObject({ oldPath: "a.md", newPath: "b.md" });
+	});
+
+	it("falls back to <configDir>/plugins/<id> only when the host gives no manifest.dir", () => {
+		const vault = tempDir();
+		expect(pluginFor(vault, { id: "atlas-explorer" }).tephraRenameQueuePath()).toBe(`${vault}/.obsidian/plugins/atlas-explorer/${TEPHRA_RENAME_QUEUE_FILE}`);
+	});
+});
+
+describe("nodeQueueStorage: a missing folder", () => {
+	it("is created, so a rename is never lost to ENOENT", () => {
+		const path = join(tempDir(), "no/such/folder", TEPHRA_RENAME_QUEUE_FILE);
+		nodeQueueStorage.write(path, "x");
+		expect(readFileSync(path, "utf8")).toBe("x");
 	});
 });

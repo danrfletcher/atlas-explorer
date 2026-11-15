@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { TEPHRA_RENAME_QUEUE_FILE, TephraRenameQueue, type QueueStorage } from "../../src/tephra-rename-queue";
+import { TEPHRA_RENAME_QUEUE_FILE, TephraRenameQueue, reportQueueWriteErrorOnce, type QueueStorage } from "../../src/tephra-rename-queue";
 
 /** G11: the on-disk queue of renames Tephra hasn't acknowledged. An in-memory adapter stands in for the file system
  * (every `write` is recorded, so "written before the call returns" and "never interleaved" can be read off the log) and a
@@ -315,5 +315,22 @@ describe("a corrupt or unreadable file", () => {
 		queue.load();
 		expect(corrupt).toEqual([]);
 		expect(queue.enqueue("c", "d").seq).toBe(6);
+	});
+});
+
+describe("reportQueueWriteErrorOnce (R1: a failed write is shown to the user, once)", () => {
+	it("logs every failure but raises one notice, and a real failing queue write reaches it", () => {
+		const log = vi.fn();
+		const notify = vi.fn();
+		const storage = new MemoryStorage();
+		storage.failWrites = true;
+		const queue = new TephraRenameQueue({ storage, path: PATH, now: () => 1, onCorrupt: () => {}, onWriteError: reportQueueWriteErrorOnce({ log, notify }) });
+		queue.enqueue("a.md", "b.md");
+		queue.enqueue("b.md", "c.md");
+		queue.enqueue("c.md", "d.md");
+		expect(log).toHaveBeenCalledTimes(3);
+		expect(notify).toHaveBeenCalledTimes(1);
+		expect(notify.mock.calls[0][0]).toMatch(/couldn't save the list of renames waiting for Tephra/);
+		expect(queue.size()).toBe(3); // still held in memory
 	});
 });

@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import { dirname } from "path";
 import type { QueueStorage } from "./tephra-rename-queue";
 
 /**
@@ -17,6 +18,8 @@ export const nodeQueueStorage: QueueStorage = {
 		}
 	},
 	write(path, text) {
+		// A missing folder must never cost a rename: create it rather than fail with ENOENT.
+		fs.mkdirSync(dirname(path), { recursive: true });
 		const temp = `${path}.tmp`;
 		fs.writeFileSync(temp, text, "utf8");
 		fs.renameSync(temp, path);

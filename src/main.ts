@@ -50,7 +50,7 @@ import { closeNameDialog, openNameDialog } from "./name-dialog";
 import { GraduationController } from "./graduation";
 import { noticeIfLinksNotUpdated } from "./links-notice";
 import { TephraLinkSetting } from "./tephra-link-setting";
-import { TephraRenameQueue, TEPHRA_RENAME_QUEUE_FILE } from "./tephra-rename-queue";
+import { TephraRenameQueue, reportQueueWriteErrorOnce, resolveTephraRenameQueuePath } from "./tephra-rename-queue";
 import { nodeQueueStorage } from "./tephra-rename-queue-fs";
 import { TephraRenameForwarder } from "./tephra-rename-forwarder";
 import { registerTestHarness } from "./test-harness";
@@ -324,7 +324,10 @@ export default class AtlasPlugin extends Plugin {
 					console.error(`[Atlas] The Tephra rename queue was ${reason}; ${asidePath ? `kept aside as ${asidePath}` : "it could not be moved aside"}.`);
 					new Notice(`Atlas: the saved list of renames waiting for Tephra was damaged (${reason}). It was ${asidePath ? "kept aside" : "left in place"} and a new one started. Links for renames made while Tephra was off may need a fix.`, 15_000);
 				},
-				onWriteError: (error) => console.error("[Atlas] couldn't write the Tephra rename queue", error),
+				onWriteError: reportQueueWriteErrorOnce({
+					log: (error) => console.error("[Atlas] couldn't write the Tephra rename queue", error),
+					notify: (message) => void new Notice(message, 15_000),
+				}),
 			}),
 			scheduler: { setTimeout: (cb, ms) => window.setTimeout(cb, ms), clearTimeout: (handle) => window.clearTimeout(handle as number) },
 			now: () => Date.now(),
@@ -812,10 +815,14 @@ export default class AtlasPlugin extends Plugin {
 		return this.settings.tephraEnabled && !Platform.isMobile;
 	}
 
-	/** PR-10: where the Tephra rename queue lives: the plugin's own folder under the vault's config folder. */
+	/** PR-10: where the Tephra rename queue lives: the plugin's own folder (`manifest.dir`, which may not be named after the id). */
 	private tephraRenameQueuePath(): string {
-		const base = this.getVaultBasePath();
-		return `${base}/${this.app.vault.configDir}/plugins/${this.manifest.id}/${TEPHRA_RENAME_QUEUE_FILE}`;
+		return resolveTephraRenameQueuePath({
+			basePath: this.getVaultBasePath(),
+			configDir: this.app.vault.configDir,
+			manifestDir: this.manifest.dir,
+			manifestId: this.manifest.id,
+		});
 	}
 
 	/** The live Tephra connection, or null while the toggle is off (or on mobile). */

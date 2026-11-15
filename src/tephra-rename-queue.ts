@@ -7,8 +7,33 @@
  * can never interleave, and the storage replaces the file atomically, so a reader never sees half a file.
  */
 
-/** Where the queue lives, under the plugin folder (`.obsidian/plugins/<id>/`). */
+/** The queue's file name, kept in the plugin's own folder (`manifest.dir`, e.g. `.obsidian/plugins/atlas/`). */
 export const TEPHRA_RENAME_QUEUE_FILE = "tephra-rename-queue.json";
+
+/**
+ * Absolute path of the queue file. It lives in the plugin's own folder, which Obsidian reports as the
+ * vault-relative `manifest.dir`: the folder's name is the user's choice and need not match `manifest.id`
+ * (the spec's own example is `.obsidian/plugins/atlas/`). `<configDir>/plugins/<id>` is only the fallback
+ * for a host that doesn't set `manifest.dir`.
+ */
+export function resolveTephraRenameQueuePath(parts: { basePath: string; configDir: string; manifestDir?: string; manifestId: string }): string {
+	const dir = parts.manifestDir ? parts.manifestDir : `${parts.configDir}/plugins/${parts.manifestId}`;
+	return `${parts.basePath}/${dir}/${TEPHRA_RENAME_QUEUE_FILE}`;
+}
+
+/**
+ * Wraps the user-facing half of a failed queue write so the user hears about it once, not on every rename
+ * of a burst: `log` runs for every failure, `notify` only for the first.
+ */
+export function reportQueueWriteErrorOnce(deps: { log(error: unknown): void; notify(message: string): void }): (error: unknown) => void {
+	let told = false;
+	return (error) => {
+		deps.log(error);
+		if (told) return;
+		told = true;
+		deps.notify("Atlas: couldn't save the list of renames waiting for Tephra. Renames made while Tephra is off may be lost if Obsidian restarts, and their links may need a fix.");
+	};
+}
 
 /** The file system the queue uses; `tephra-rename-queue-fs.ts` backs it with Node, tests with a Map. */
 export interface QueueStorage {
