@@ -84,6 +84,12 @@ Links across sources behave like links in the vault. `[[@whoop:Workout Plan]]` i
 
 In a source's Inbox section, a deeper file pops out with the **promoted** pill when a link reaches it from outside its own module. A module is the source's top-level folder (`Sources/<name>/<top>`); a link from another source, or from your vault, always counts as from outside, and a link from the same module never does. Links in notes are read from Obsidian; links in code, PDFs and Office files are read from Tephra and kept in memory for the session only, so after a restart with Tephra off they are missing until it is back.
 
+### Renames and Obsidian's link setting
+
+With the switch on, every rename or move you make in Obsidian is sent to Tephra (the old and the new path), so links written from other files can follow. Atlas never rewrites a link or a note itself. While Tephra is offline the renames wait in a small file next to the plugin (`tephra-rename-queue.json`, paths only, never note content) and go out in order once Tephra answers. They survive an Obsidian restart, and turning the switch off keeps them for the next time it is on. If Tephra says the file changed ("file changed, try again"), Atlas retries three times, one second apart, then tells you in a notice. When you rename a free block, Atlas waits for Tephra's answer before it moves the file out of the pool (at most 1.5 seconds when Tephra is offline).
+
+While the switch is on, Atlas turns Obsidian's own **Automatically update internal links** off, so Obsidian and Tephra don't both rewrite links, and remembers your old value. Turning the switch off puts it back exactly as it was (also when it was never set). Quitting Obsidian or disabling Atlas leaves it as it is, because the switch is still on. While the switch is on, Atlas does not show its "links were not updated" notice after a move. If you turn **Automatically update internal links** back on yourself while the switch is on, Atlas switches it off again the next time it loads or you open the Tephra tab.
+
 Obsidian matches link names without regard to case and Tephra matches exactly, so a link such as `[[leg day]]` to `Leg Day.md` shows in Obsidian's Backlinks but not in the Tephra section. To count how many links in a vault differ in case from their target, run `node scripts/report-case-mismatch.mjs <vault-path>` (read-only; add `--json` for JSON).
 
 ### The Tephra status bar and offline sections
