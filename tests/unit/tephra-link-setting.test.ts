@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { App } from "obsidian";
-import { ALWAYS_UPDATE_LINKS_KEY, TephraLinkSetting } from "../../src/tephra-link-setting";
+import { ALWAYS_UPDATE_LINKS_KEY, TephraLinkSetting, readStoredVaultConfig } from "../../src/tephra-link-setting";
 import { isAutoUpdateLinksOn } from "../../src/links-notice";
 import { normalizeSavedLinkSetting, type SavedLinkSetting } from "../../src/settings";
 
@@ -32,7 +32,9 @@ function rig(initial: { present: boolean; value?: unknown } = { present: false }
 	const errors: string[] = [];
 	let failSave = false;
 	const setting = new TephraLinkSetting({
-		getConfig: (key) => app.vault.getConfig(key),
+		// Real Obsidian's `getConfig` answers its default (`false`) for an absent key; the mock's returns `undefined`.
+		getConfig: (key) => app.vault.getConfig(key) ?? false,
+		getStoredConfig: (key) => readStoredVaultConfig(app.vault, key),
 		setConfig: (key, value) => {
 			if (value === undefined) delete app.vault.config[key];
 			else app.vault.setConfig(key, value);
@@ -72,6 +74,25 @@ describe("turning the toggle on: save first, then switch Obsidian's setting off"
 		expect(r.configAtSave[0]).toBe(initial.present ? initial.value : undefined); // the save ran before the write
 		expect(config(r)).toBe(false);
 		expect(isAutoUpdateLinksOn(r.app)).toBe(false);
+	});
+
+	it("T1: an absent key is saved as absent even though getConfig answers false for it (real Obsidian)", async () => {
+		const r = rig({ present: false });
+		expect(r.app.vault.config).not.toHaveProperty(ALWAYS_UPDATE_LINKS_KEY);
+		await r.setting.enable();
+		expect(r.memory.saved).toEqual({ present: false });
+		expect(r.disk.saved).toEqual({ present: false });
+		await r.setting.restore();
+		expect(hasKey(r)).toBe(false);
+	});
+
+	it("T1: a stored `false` is still saved as present false (distinct from absent)", async () => {
+		const r = rig({ present: true, value: false });
+		await r.setting.enable();
+		expect(r.memory.saved).toEqual({ present: true, value: false });
+		await r.setting.restore();
+		expect(hasKey(r)).toBe(true);
+		expect(config(r)).toBe(false);
 	});
 
 	it("a failed save leaves Obsidian's setting alone, saves nothing and says so", async () => {
@@ -221,5 +242,19 @@ describe("normalizeSavedLinkSetting (a hand-edited data.json)", () => {
 		[{}, null],
 	])("%j -> %j", (raw, expected) => {
 		expect(normalizeSavedLinkSetting(raw)).toEqual(expected);
+	});
+});
+
+describe("readStoredVaultConfig: the value as stored, not Obsidian's default", () => {
+	it("reads the raw config, where an absent key stays undefined while getConfig says false", () => {
+		const vault = { config: { other: 1 } as Record<string, unknown>, getConfig: () => false };
+		expect(readStoredVaultConfig(vault, ALWAYS_UPDATE_LINKS_KEY)).toBeUndefined();
+		vault.config[ALWAYS_UPDATE_LINKS_KEY] = true;
+		expect(readStoredVaultConfig(vault, ALWAYS_UPDATE_LINKS_KEY)).toBe(true);
+	});
+
+	it("falls back to getConfig when the raw config object isn't there", () => {
+		expect(readStoredVaultConfig({ getConfig: () => true }, ALWAYS_UPDATE_LINKS_KEY)).toBe(true);
+		expect(readStoredVaultConfig({}, ALWAYS_UPDATE_LINKS_KEY)).toBeUndefined();
 	});
 });

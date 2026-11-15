@@ -5,7 +5,7 @@ import { App } from "obsidian";
 import AtlasPlugin from "../../src/main";
 import { TephraController } from "../../src/tephra-controller";
 import { TephraTeardownRegistry } from "../../src/tephra-teardown";
-import { ALWAYS_UPDATE_LINKS_KEY, TephraLinkSetting } from "../../src/tephra-link-setting";
+import { ALWAYS_UPDATE_LINKS_KEY, TephraLinkSetting, readStoredVaultConfig } from "../../src/tephra-link-setting";
 import { normalizeSavedLinkSetting, type SavedLinkSetting } from "../../src/settings";
 import type { TephraConnection } from "../../src/tephra-connection";
 
@@ -22,7 +22,8 @@ function build(initial: unknown) {
 	};
 	const tephraActive = () => settings.tephraEnabled;
 	const linkSetting = new TephraLinkSetting({
-		getConfig: (key) => app.vault.getConfig(key),
+		getConfig: (key) => app.vault.getConfig(key) ?? false, // real Obsidian answers its default for an absent key
+		getStoredConfig: (key) => readStoredVaultConfig(app.vault, key),
 		setConfig: (key, value) => {
 			if (value === undefined) delete app.vault.config[key];
 			else app.vault.setConfig(key, value);

@@ -3,9 +3,24 @@ import type { SavedLinkSetting } from "./settings";
 /** The Obsidian vault-config key behind Settings → Files & links → "Automatically update internal links". */
 export const ALWAYS_UPDATE_LINKS_KEY = "alwaysUpdateLinks";
 
+/**
+ * Reads `key` as stored in the vault config, so an absent key is `undefined` (T1). `vault.config` is Obsidian's raw
+ * parsed `app.json`, which omits a key that was never set; `vault.getConfig` fills in the default instead. When the raw
+ * object isn't there (an Obsidian without it) this falls back to `getConfig`, the best answer left.
+ */
+export function readStoredVaultConfig(vault: unknown, key: string): unknown {
+	const v = vault as { config?: unknown; getConfig?: (key: string) => unknown };
+	if (v.config !== null && typeof v.config === "object") return (v.config as Record<string, unknown>)[key];
+	return v.getConfig?.(key);
+}
+
 export interface TephraLinkSettingDeps {
-	/** `app.vault.getConfig(key)`: `undefined` when the key is absent. */
+	/** `app.vault.getConfig(key)`: the effective value. Real Obsidian returns its default (`false`) for an absent key, so this
+	 * cannot tell "absent" from "false"; use `getStoredConfig` for that. */
 	getConfig(key: string): unknown;
+	/** The value as stored in the vault config (`app.json`): `undefined` when the key is absent. This is what decides
+	 * "present or absent" for the saved old value. */
+	getStoredConfig(key: string): unknown;
 	/** `app.vault.setConfig(key, value)`. Passing `undefined` puts the key back to absent. */
 	setConfig(key: string, value: unknown): void;
 	/** What Atlas saved (`settings.tephraSavedLinkSetting`), or null when it has saved nothing. */
@@ -70,7 +85,8 @@ export class TephraLinkSetting {
 			}
 		}
 		if (epoch !== this.epoch || !deps.isActive() || deps.getSaved() === null) return;
-		if (deps.getConfig(ALWAYS_UPDATE_LINKS_KEY) !== false) deps.setConfig(ALWAYS_UPDATE_LINKS_KEY, false);
+		// Compared with the stored value: an absent key reads `false` through `getConfig` but still gets an explicit `false` here.
+		if (deps.getStoredConfig(ALWAYS_UPDATE_LINKS_KEY) !== false) deps.setConfig(ALWAYS_UPDATE_LINKS_KEY, false);
 	}
 
 	/** Puts back what `ensureOff()` saved. Safe to run more than once, and a no-op when nothing is saved. */
@@ -87,7 +103,8 @@ export class TephraLinkSetting {
 	}
 
 	private describeCurrent(): SavedLinkSetting {
-		const value = this.deps.getConfig(ALWAYS_UPDATE_LINKS_KEY);
+		// The stored value, not `getConfig`: real Obsidian's `getConfig` answers `false` for a key that is absent.
+		const value = this.deps.getStoredConfig(ALWAYS_UPDATE_LINKS_KEY);
 		// A non-boolean is read as "absent" everywhere else (`isAutoUpdateLinksOn`), so it is saved as absent.
 		return typeof value === "boolean" ? { present: true, value } : { present: false };
 	}

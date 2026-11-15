@@ -49,7 +49,7 @@ import { registerF10Commands } from "./f10-commands";
 import { closeNameDialog, openNameDialog } from "./name-dialog";
 import { GraduationController } from "./graduation";
 import { noticeIfLinksNotUpdated } from "./links-notice";
-import { TephraLinkSetting } from "./tephra-link-setting";
+import { TephraLinkSetting, readStoredVaultConfig } from "./tephra-link-setting";
 import { TephraRenameQueue, reportQueueWriteErrorOnce, resolveTephraRenameQueuePath } from "./tephra-rename-queue";
 import { nodeQueueStorage } from "./tephra-rename-queue-fs";
 import { TephraRenameForwarder } from "./tephra-rename-forwarder";
@@ -300,6 +300,7 @@ export default class AtlasPlugin extends Plugin {
 		const tephraOn = () => this.tephraActive();
 		this.tephraLinkSetting = new TephraLinkSetting({
 			getConfig: (key) => (this.app.vault as unknown as { getConfig(key: string): unknown }).getConfig(key),
+			getStoredConfig: (key) => readStoredVaultConfig(this.app.vault, key),
 			setConfig: (key, value) => (this.app.vault as unknown as { setConfig(key: string, value: unknown): void }).setConfig(key, value),
 			getSaved: () => normalizeSavedLinkSetting(this.settings.tephraSavedLinkSetting),
 			setSaved: (saved) => {

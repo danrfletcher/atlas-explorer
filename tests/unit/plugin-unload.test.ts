@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { App } from "obsidian";
 import { FolderSourceOutsideWatchers } from "../../src/folder-source-outside-watcher";
-import { ALWAYS_UPDATE_LINKS_KEY, TephraLinkSetting } from "../../src/tephra-link-setting";
+import { ALWAYS_UPDATE_LINKS_KEY, TephraLinkSetting, readStoredVaultConfig } from "../../src/tephra-link-setting";
 import { TephraRenameForwarder } from "../../src/tephra-rename-forwarder";
 import { TephraRenameQueue, type QueueStorage } from "../../src/tephra-rename-queue";
 import { normalizeSavedLinkSetting, type SavedLinkSetting } from "../../src/settings";
@@ -63,6 +63,7 @@ describe("AtlasPlugin.onunload — Tephra rename queue and Obsidian's link setti
 			const settings: { tephraSavedLinkSetting?: SavedLinkSetting | null } = {};
 			const setting = new TephraLinkSetting({
 				getConfig: (key) => app.vault.getConfig(key),
+				getStoredConfig: (key) => readStoredVaultConfig(app.vault, key),
 				setConfig: (key, value) => app.vault.setConfig(key, value),
 				getSaved: () => normalizeSavedLinkSetting(settings.tephraSavedLinkSetting),
 				setSaved: (saved) => {
