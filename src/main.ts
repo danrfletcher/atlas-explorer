@@ -23,6 +23,8 @@ import { SourceLinkController } from "./source-link-controller";
 import { TephraClient, TEPHRA_RPC_URL, resolveTephraRpcUrl } from "./tephra-client";
 import { TephraConnection } from "./tephra-connection";
 import { TephraController } from "./tephra-controller";
+import { TephraStatusBar } from "./tephra-status-bar";
+import { TephraStarter } from "./tephra-start";
 import { SourcesFolder } from "./sources-folder";
 import { SourceActions } from "./source-actions";
 import { pickFolder } from "./pick-folder";
@@ -131,6 +133,12 @@ export default class AtlasPlugin extends Plugin {
 	/** G16: owns the Tephra connection. Nothing is built or started unless the toggle is on and this is
 	 * desktop; `onunload` only stops its timer. */
 	tephraController: TephraController;
+	/** PR-9 (G13): the status-bar item. It exists only while the Tephra toggle is on (it follows the live connection). */
+	tephraStatusBar: TephraStatusBar;
+	/** PR-9 (F7): runs `tephractl daemon start`, and only when Dan clicks Start in the status bar. */
+	tephraStarter: TephraStarter;
+	/** The Atlas settings tab; kept so the status bar can open it on its Tephra tab. */
+	private settingTab: AtlasSettingTab;
 	/** PR-8 (G10): "Also linked from (Tephra)" in the Backlinks panel, or in the Atlas Links pane. */
 	tephraBacklinks: TephraBacklinksSection;
 	/** PR-8 (G12): Tephra's non-note edges for the unit index; in memory only. */
@@ -219,7 +227,8 @@ export default class AtlasPlugin extends Plugin {
 		this.apiSourceController = new ApiSourceController();
 		this.csvSourceController = new CsvSourceController();
 		this.markdownTableSourceController = new MarkdownTableSourceController();
-		this.addSettingTab(new AtlasSettingTab(this.app, this));
+		this.settingTab = new AtlasSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		this.linkSuggest = new AtlasLinkSuggest(this);
 		this.registerEditorSuggest(this.linkSuggest);
@@ -290,6 +299,12 @@ export default class AtlasPlugin extends Plugin {
 				if (promotionsChanged) this.refreshExplorerViews();
 			},
 		});
+		this.tephraStarter = new TephraStarter({ check: () => this.tephraConnection?.check() ?? Promise.resolve() });
+		this.tephraStatusBar = new TephraStatusBar({
+			addItem: () => this.addStatusBarItem(),
+			openSettings: () => this.openTephraSettings(),
+			start: () => void this.tephraStarter.start(), // F7: a click on Start is the only caller
+		});
 		this.tephraController = new TephraController({
 			getEnabled: () => this.settings.tephraEnabled,
 			setEnabled: (enabled) => {
@@ -319,6 +334,13 @@ export default class AtlasPlugin extends Plugin {
 				// PR-4 (G1/E5): sections appear, go, turn "(missing)" or come back with the source list.
 				refreshExplorersOnTephraChange(connection, () => this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE).map((leaf) => leaf.view));
 				this.tephraGraphSync.bind(connection); // PR-8: edges on first online and per `graph:changed` burst
+				// PR-9 (G13): the status bar follows this connection; Tephra answering by itself ends "starting", and a
+				// drop empties the Backlinks section (it re-fills when graph sync sees Tephra online again).
+				this.tephraStatusBar.attach(connection, this.tephraStarter);
+				connection.onOnlineChange((online) => {
+					if (online) this.tephraStarter.cancel();
+					else this.tephraBacklinks.refresh(true);
+				});
 				return connection;
 			},
 			reportTeardownFailures: (failures) => {
@@ -336,12 +358,12 @@ export default class AtlasPlugin extends Plugin {
 		// G16: builds the connection only when the saved toggle is on and this isn't mobile.
 		if (skipsSourcesFolder(this.settings, Platform.isMobile)) this.sourcesFolder.start();
 		this.tephraController.startIfEnabled();
-		// G2/E6: Obsidian regaining focus asks Tephra for a fresh source list (and so a `Sources/` sync). The
-		// connection's own `graph:changed` push channel (`openNodeWebSocket`) lands on the same check. E6 is met in
+		// G2/E6/G13: Obsidian regaining focus asks Tephra for a fresh source list (and so a `Sources/` sync and the
+		// status bar's answer). That listener belongs to the connection (`TephraConnection.start()` adds it, `stop()`
+		// removes it), so with the toggle off there is no focus handler at all. The connection's own `graph:changed` push channel (`openNodeWebSocket`) lands on the same check. E6 is met in
 		// two bounds: a push is followed within 5 s (about a second in practice); Tephra (dev b04c1cf) sends no
 		// push for `source.register` / `source.unregister`, so those are seen at the next 10 s check (within 12 s)
 		// or on focus (within 2 s). The 5 s bound for those two needs a Tephra change, tracked on the Tephra side.
-		this.registerDomEvent(window, "focus", () => this.tephraConnection?.requestCheck());
 
 		// PR-2 (T12): must run before registerView() below registers the view factory, so the
 		// G13 indicator and the "Sort children…" menu item resolve a real icon the very first
@@ -608,6 +630,8 @@ export default class AtlasPlugin extends Plugin {
 		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);
 		this.sourcesFolder?.dispose(); // E8: stops new syncs only; no link, `.gitignore` line or Excluded entry changes
+		this.tephraStatusBar?.hide(); // PR-9: the item goes with the plugin; nothing else changes
+		this.tephraStarter?.cancel();
 		this.tephraController?.dispose(); // E8: stops the timer only; the teardown steps run on the toggle's off path alone
 		this.tephraGraphSync?.unbind(false); // PR-8: stops following Tephra; nothing is written
 		this.tephraBacklinks?.detach(); // removes the section from the Backlinks panel
@@ -694,7 +718,24 @@ export default class AtlasPlugin extends Plugin {
 
 	/** G16: the Tephra toggle. Turning it off runs the registered teardown steps first; see `TephraController`. */
 	setTephraEnabled(enabled: boolean): Promise<void> {
-		return this.tephraController.setEnabled(enabled);
+		const settled = this.tephraController.setEnabled(enabled);
+		// PR-9 (G13): off removes the status-bar item in this same tick, not after the teardown; on with a connection
+		// already live (an off flip collapsed into this on) puts it back. A fresh connection attaches in `createConnection`.
+		if (!enabled) this.tephraStatusBar?.hide();
+		else {
+			const connection = this.tephraConnection;
+			if (connection && this.tephraStatusBar) this.tephraStatusBar.attach(connection, this.tephraStarter);
+		}
+		return settled;
+	}
+
+	/** PR-9 (G13): opens Atlas's settings on the Tephra tab (the status bar's online item). Uses Obsidian's own
+	 * settings modal (`app.setting`, not in the public typings), and does nothing if this build doesn't have it. */
+	openTephraSettings(): void {
+		this.settingTab.showTab("tephra");
+		const setting = (this.app as unknown as { setting?: { open?: () => void; openTabById?: (id: string) => unknown } }).setting;
+		setting?.open?.();
+		setting?.openTabById?.(this.manifest.id);
 	}
 
 	/** The live Tephra connection, or null while the toggle is off (or on mobile). */

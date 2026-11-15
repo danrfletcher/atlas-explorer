@@ -1,5 +1,6 @@
 import type { ScheduleTimeout } from "./api-http";
 import type { TephraCallResult, TephraError, TephraPushHandlers, TephraPushResult, TephraSocketHandle, TephraSource, TephraSourcesResult } from "./tephra-client";
+import type { Unit } from "./types";
 
 /** G13/G16: the connection checks Tephra this often while the toggle is on. */
 export const TEPHRA_CHECK_INTERVAL_MS = 10_000;
@@ -61,6 +62,16 @@ export function isGraphChangedMessage(text: string): boolean {
 	return message.method === "graph:changed" && !("id" in message);
 }
 
+/** Calls `onFocus` whenever the Obsidian window regains focus; returns a function that stops listening.
+ * Injectable so tests drive focus without a window. */
+export type ListenFocus = (onFocus: () => void) => () => void;
+
+const defaultListenFocus: ListenFocus = (onFocus) => {
+	if (typeof window === "undefined") return () => {};
+	window.addEventListener("focus", onFocus);
+	return () => window.removeEventListener("focus", onFocus);
+};
+
 /** Starts a repeating timer (every `ms`) and returns a function that stops it. Injectable so tests control time. */
 export type ScheduleInterval = (ms: number, tick: () => void) => () => void;
 
@@ -99,6 +110,13 @@ const OFF_SNAPSHOT: TephraSnapshot = { state: "off", checked: false, sources: []
  * can't open or drops, the timer, the focus check and the failed-call check carry on, and it reconnects
  * with a growing wait. A reconnect also asks for a check, since pushes may have been missed in between.
  *
+ * PR-9 (G13): the window's `focus` event asks for a check too, and the listener exists only between `start()`
+ * and `stop()` (with the toggle off there is no focus handler, no timer and no call). Whoever needs the
+ * online/offline answer (the status bar, the Inbox sections, the Backlinks section, the rename queue) reads
+ * `isOnline()` / `onOnlineChange`; `onChange` carries the full snapshot. In memory only, the connection also
+ * holds the last source list and the last unit list per source, so an offline section can keep the rows it had
+ * (E1); `stop()` forgets them, and nothing here is ever written to `data.json` (F1).
+ *
  * One check runs at a time (a second request while one is in flight joins it). The client can't abort a
  * request, so `stop()` drops the in-flight check's result instead: after `stop()` no state changes and no
  * listener fires, and `isChecking()` is false.
@@ -108,7 +126,12 @@ export class TephraConnection {
 	private listeners = new Set<(snapshot: TephraSnapshot) => void>();
 	private checkListeners = new Set<(snapshot: TephraSnapshot) => void>();
 	private graphListeners = new Set<() => void>();
+	private onlineListeners = new Set<(online: boolean) => void>();
 	private stopTimer: (() => void) | null = null;
+	private stopFocus: (() => void) | null = null;
+	/** In memory only (F1): what the last successful `source.list` returned, and the last `unit.list` units per source. */
+	private lastSources: TephraSource[] | null = null;
+	private lastUnits = new Map<string, Unit[]>();
 	private inFlight: Promise<void> | null = null;
 	/** Bumped by `stop()`: a check that started in an earlier run must not write its result. */
 	private generation = 0;
@@ -131,7 +154,8 @@ export class TephraConnection {
 		private readonly client: TephraConnectionClient,
 		private readonly scheduleInterval: ScheduleInterval = defaultScheduleInterval,
 		private readonly intervalMs: number = TEPHRA_CHECK_INTERVAL_MS,
-		pushOptions: TephraPushOptions = {}
+		pushOptions: TephraPushOptions = {},
+		private readonly listenFocus: ListenFocus = defaultListenFocus
 	) {
 		this.scheduleTimeout = pushOptions.scheduleTimeout ?? defaultScheduleTimeout;
 		this.cooldownMs = pushOptions.cooldownMs ?? TEPHRA_PUSH_COOLDOWN_MS;
@@ -164,6 +188,34 @@ export class TephraConnection {
 		return () => this.checkListeners.delete(listener);
 	}
 
+	/** PR-9: true while the last check reached Tephra. False when offline, unchecked or off. */
+	isOnline(): boolean {
+		return this.snapshot.state === "online";
+	}
+
+	/** PR-9: subscribes to the online/offline flip only: called once per real change of `isOnline()` (never for a
+	 * source-list change or a repeated failure), after the snapshot listeners. Returns the unsubscribe function. */
+	onOnlineChange(listener: (online: boolean) => void): () => void {
+		this.onlineListeners.add(listener);
+		return () => this.onlineListeners.delete(listener);
+	}
+
+	/** PR-9: the sources the last successful check listed, or null if no check has succeeded since `start()`.
+	 * Survives going offline so the offline Inbox sections still know their names. */
+	getLastSources(): TephraSource[] | null {
+		return this.lastSources;
+	}
+
+	/** PR-9: remembers a source's last good unit list, for the offline section. Ignored when stopped. */
+	rememberUnits(name: string, units: Unit[]): void {
+		if (this.stopTimer) this.lastUnits.set(name, units);
+	}
+
+	/** PR-9: the units last remembered for a source, or null. */
+	getRememberedUnits(name: string): Unit[] | null {
+		return this.lastUnits.get(name) ?? null;
+	}
+
 	/** PR-8: subscribes to every `graph:changed` notification, raw (not held to the check cooldown: the listener
 	 * debounces for itself). Only a real notification on the live push channel calls it, never a timer tick or a
 	 * focus check. Returns the unsubscribe function. */
@@ -181,6 +233,7 @@ export class TephraConnection {
 	start(): void {
 		if (this.stopTimer) return;
 		this.stopTimer = this.scheduleInterval(this.intervalMs, () => void this.check());
+		this.stopFocus = this.listenFocus(() => this.requestCheck());
 		this.setSnapshot({ state: "offline", checked: false, sources: [], error: null });
 		void this.check();
 		void this.startPush();
@@ -190,6 +243,10 @@ export class TephraConnection {
 	stop(): void {
 		this.stopTimer?.();
 		this.stopTimer = null;
+		this.stopFocus?.();
+		this.stopFocus = null;
+		this.lastSources = null;
+		this.lastUnits.clear();
 		this.generation++;
 		this.inFlight = null;
 		this.recheckQueued = false;
@@ -330,8 +387,10 @@ export class TephraConnection {
 
 	private finishCheck(generation: number, result: TephraSourcesResult): void {
 		if (generation !== this.generation) return; // stopped (or restarted) while this was in flight
-		if (result.ok) this.setSnapshot({ state: "online", checked: true, sources: result.sources, error: null });
-		else this.setSnapshot({ state: "offline", checked: true, sources: [], error: result.error });
+		if (result.ok) {
+			this.lastSources = result.sources;
+			this.setSnapshot({ state: "online", checked: true, sources: result.sources, error: null });
+		} else this.setSnapshot({ state: "offline", checked: true, sources: [], error: result.error });
 		if (result.ok) void this.startPush(); // Tephra answered: if the channel isn't up and no retry is waiting, try now
 		for (const listener of [...this.checkListeners]) {
 			try {
@@ -344,12 +403,22 @@ export class TephraConnection {
 
 	private setSnapshot(next: TephraSnapshot): void {
 		if (snapshotsEqual(this.snapshot, next)) return;
+		const wasOnline = this.snapshot.state === "online";
 		this.snapshot = next;
 		for (const listener of [...this.listeners]) {
 			try {
 				listener(next);
 			} catch (error) {
 				console.error("[Atlas] a Tephra connection listener threw", error);
+			}
+		}
+		const online = next.state === "online";
+		if (online === wasOnline) return;
+		for (const listener of [...this.onlineListeners]) {
+			try {
+				listener(online);
+			} catch (error) {
+				console.error("[Atlas] a Tephra online listener threw", error);
 			}
 		}
 	}

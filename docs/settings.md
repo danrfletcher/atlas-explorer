@@ -86,6 +86,14 @@ In a source's Inbox section, a deeper file pops out with the **promoted** pill w
 
 Obsidian matches link names without regard to case and Tephra matches exactly, so a link such as `[[leg day]]` to `Leg Day.md` shows in Obsidian's Backlinks but not in the Tephra section. To count how many links in a vault differ in case from their target, run `node scripts/report-case-mismatch.mjs <vault-path>` (read-only; add `--json` for JSON).
 
+### The Tephra status bar and offline sections
+
+With the Tephra switch on, the status bar shows what Atlas knows about Tephra: **Tephra · 3 sources** when it answers (click it to open this tab), **Tephra · checking…** until the first answer, **Tephra offline · Start** when it doesn't, and **Tephra starting…** while a start is under way. A refused token also reads "Tephra offline"; hover text says "Tephra refused the token". Hover text is Atlas's own element and shows on hover and on keyboard focus.
+
+**Start** is the only thing that runs a program: a click runs `tephractl daemon start` (no shell), once, and shows one notice if it fails. Atlas never starts Tephra on its own: not when you turn the switch on, not when a check fails, not on focus. With the switch off there is no status-bar item, no timer and no focus check. Atlas checks every 10 seconds and when the window gets focus, and a failed call shows "offline" at once.
+
+While Tephra is offline each source's Inbox section keeps its header, marked **(Tephra offline)**, and shows the last list Atlas held in memory for it. If Atlas started with Tephra down, the sections come from the `Sources/<name>` links it made earlier and show no rows until Tephra answers. "Offline" is not "missing": a source's folder can't be told gone without asking Tephra. Right after load or toggle-on, before Tephra has answered once, only the vault's Inbox shows (the status bar says "checking…"); the source sections, labelled or not, appear with the first answer. Nothing from this is saved to `data.json`.
+
 ### Turning it off
 
 Atlas reads Tephra's token from `$XDG_DATA_HOME/tephra/token`, else `~/.local/share/tephra/token`. It re-reads it once if Tephra answers 401, and never stores or logs it.

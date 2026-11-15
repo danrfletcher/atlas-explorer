@@ -323,6 +323,30 @@ export class App {
 		openLinkText: async (_linktext: string, _sourcePath: string, _newLeaf?: boolean): Promise<void> => {},
 	};
 
+	/** Like Obsidian's internal `app.setting` (not in the public typings): `open()` shows the settings window and
+	 * `openTabById(id)` selects a plugin's tab in it, which calls that tab's `display()` as Obsidian does. Tests
+	 * register tabs with `settingTabs`; `openedTabId` is what is showing, `null` while the window is closed. */
+	settingTabs = new Map<string, { display(): void; hide?(): void }>();
+	setting = {
+		openedTabId: null as string | null,
+		isOpen: false,
+		open: (): void => {
+			this.setting.isOpen = true;
+		},
+		close: (): void => {
+			this.setting.isOpen = false;
+			if (this.setting.openedTabId) this.settingTabs.get(this.setting.openedTabId)?.hide?.();
+			this.setting.openedTabId = null;
+		},
+		openTabById: (id: string): void => {
+			const tab = this.settingTabs.get(id);
+			if (!tab) return;
+			if (this.setting.openedTabId && this.setting.openedTabId !== id) this.settingTabs.get(this.setting.openedTabId)?.hide?.();
+			this.setting.openedTabId = id;
+			tab.display();
+		},
+	};
+
 	/** Like Obsidian's internal `app.viewRegistry`: file extension (lower-case, no dot) -> view type. Core types
 	 * only; a test adds what a plugin such as VS Code Workbench would register (`rs`, `ts`, `toml`, ...). */
 	viewRegistry: { typeByExtension: Record<string, string> } = {
@@ -489,7 +513,19 @@ export class Menu {
 		return this.items.map((item) => item.title);
 	}
 }
-export class Plugin {}
+/** Obsidian's `Plugin`, to the extent tests need it. `addStatusBarItem()` returns a real element and records it
+ * (`statusBarItems`, in order, including ones since removed); items are fields set lazily because several tests
+ * build a plugin with `Object.create(AtlasPlugin.prototype)`, which runs no constructor. */
+export class Plugin {
+	manifest: { id: string } = { id: "atlas" };
+	statusBarItems?: HTMLElement[];
+	addStatusBarItem(): HTMLElement {
+		const item = document.createElement("div");
+		item.className = "status-bar-item plugin-atlas";
+		(this.statusBarItems ??= []).push(item);
+		return item;
+	}
+}
 export class PluginSettingTab {
 	containerEl: HTMLElement = document.createElement("div");
 	constructor(public app?: App, public plugin?: unknown) {}

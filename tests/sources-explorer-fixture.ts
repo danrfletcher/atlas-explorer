@@ -54,8 +54,16 @@ export interface SourcesRig {
 	unitIndex: UnitIndex;
 	viewsManager: ViewsManager;
 	connection: TephraConnection;
-	/** What the fake daemon answers; change it, then `push()` or `check()`. */
-	daemon: { sources: FakeSourceRow[]; units: Record<string, FakeListing>; requests: Array<{ method: string; params: unknown }> };
+	/** What the fake daemon answers; change it, then `push()` or `check()`. `down`: every request fails as a stopped
+	 * Tephra's would (connection refused; set it before `check()`, or at the start with the `down` option). `gate`:
+	 * requests wait on it before they are answered, so a test can hold a check in flight. */
+	daemon: {
+		sources: FakeSourceRow[];
+		units: Record<string, FakeListing>;
+		requests: Array<{ method: string; params: unknown }>;
+		down: boolean;
+		gate: Promise<void> | null;
+	};
 	plugin: Record<string, unknown>;
 	/** A `graph:changed` frame on the push channel, then everything it sets going (the check, the queued render). */
 	push: () => Promise<void>;
@@ -70,7 +78,7 @@ const TOKEN = "c".repeat(64);
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 export async function makeSourcesRig(
-	options: { sources?: FakeSourceRow[]; settings?: Partial<AtlasSettings>; vaultPaths?: readonly string[]; units?: Record<string, FakeListing> } = {}
+	options: { sources?: FakeSourceRow[]; settings?: Partial<AtlasSettings>; vaultPaths?: readonly string[]; units?: Record<string, FakeListing>; down?: boolean } = {}
 ): Promise<SourcesRig> {
 	const vaultPaths = options.vaultPaths ?? sourcesVaultPaths();
 	const app = new App();
@@ -91,10 +99,14 @@ export async function makeSourcesRig(
 		],
 		units: options.units ?? { tephra: fixtureEntries("tephra", vaultPaths), whoop: fixtureEntries("whoop", vaultPaths) },
 		requests: [],
+		down: options.down ?? false,
+		gate: null,
 	};
 	const fake = await startFakeTephra({ port: 0, tokenFile, sources: (() => daemon.sources) as never, units: (() => daemon.units) as never });
 	const request: TephraRequestFn = async ({ url, method, headers, body }) => {
 		daemon.requests.push(JSON.parse(body) as { method: string; params: unknown });
+		if (daemon.gate) await daemon.gate; // a test holds the answer (an unfinished first check)
+		if (daemon.down) throw new Error("connect ECONNREFUSED 127.0.0.1:4812"); // Tephra stopped: the client reads this as `network`
 		const response = await fetch(url.replace(":4812", `:${fake.port}`), { method, headers, body });
 		return { status: response.status, text: await response.text() } as Awaited<ReturnType<TephraRequestFn>>;
 	};

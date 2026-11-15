@@ -15,6 +15,9 @@ export interface InboxSection {
 	name: string | null;
 	/** Tephra reports the source's folder gone (E5). The header says so and the section has no rows. */
 	missing: boolean;
+	/** PR-9 (G13/E1): Tephra isn't answering, so this source's list is the last one held in memory. The header says
+	 * "(Tephra offline)" and the rows stay. Never set on the vault section, and never together with `missing`. */
+	offline: boolean;
 	units: Unit[];
 }
 
@@ -25,9 +28,12 @@ export function sourceSectionKey(name: string): string {
 export interface GroupInboxSectionsInput {
 	/** The Tephra toggle is on and this isn't mobile. Off gives exactly one vault section holding every unit. */
 	enabled: boolean;
-	/** What the last `source.list` returned; `[]` while Tephra is offline or not yet checked (PR-9 adds
-	 * offline sections, so until then an unreachable Tephra shows the vault section alone, never "missing"). */
+	/** What the last `source.list` returned; while Tephra is offline, the last list it returned (or the names Atlas
+	 * already linked under `Sources/`), with `offline` set. */
 	sources: TephraSource[];
+	/** PR-9 (G13/E1): Tephra isn't answering. Every source section is then `offline` (never `missing`: a folder
+	 * can't be told gone without asking Tephra) and keeps the units it is given. Ignored while `enabled` is false. */
+	offline?: boolean;
 	/** Every unit the explorer knows: the vault's (index) plus what `unit.list` returned for each source. */
 	units: Unit[];
 }
@@ -62,7 +68,8 @@ export function owningSourceName(path: string, sourceNames: readonly string[]): 
  * A–Z (case-insensitive), each holding the units under its own `Sources/<name>/…`. The source Tephra calls
  * `notes` is the vault itself and gets no section of its own. A source whose folder is gone is `missing` and
  * holds no rows; its data (placed refs, added items) is untouched elsewhere. A unit under `Sources/` that no
- * listed source owns appears in no section. A unit whose ref is seen twice keeps its first occurrence, so
+ * listed source owns appears in no section. With `offline` every source section is `offline` instead (rows kept, no
+ * `missing`: PR-9). A unit whose ref is seen twice keeps its first occurrence, so
  * the caller puts the `unit.list` units ahead of the index's.
  */
 export function groupInboxSections(input: GroupInboxSectionsInput): InboxSection[] {
@@ -73,7 +80,7 @@ export function groupInboxSections(input: GroupInboxSectionsInput): InboxSection
 		seen.add(key);
 		return true;
 	});
-	if (!input.enabled) return [{ key: VAULT_SECTION_KEY, kind: "vault", name: null, missing: false, units }];
+	if (!input.enabled) return [{ key: VAULT_SECTION_KEY, kind: "vault", name: null, missing: false, offline: false, units }];
 
 	const seenNames = new Set<string>();
 	const sources = input.sources
@@ -86,9 +93,16 @@ export function groupInboxSections(input: GroupInboxSectionsInput): InboxSection
 	const names = sources.map((source) => source.name);
 
 	const sections: InboxSection[] = [
-		{ key: VAULT_SECTION_KEY, kind: "vault", name: null, missing: false, units: units.filter((unit) => !isInSourcesFolder(unit.path)) },
+		{ key: VAULT_SECTION_KEY, kind: "vault", name: null, missing: false, offline: false, units: units.filter((unit) => !isInSourcesFolder(unit.path)) },
 		...sources.map(
-			(source): InboxSection => ({ key: sourceSectionKey(source.name), kind: "source", name: source.name, missing: source.status === "missing", units: [] })
+			(source): InboxSection => ({
+				key: sourceSectionKey(source.name),
+				kind: "source",
+				name: source.name,
+				missing: input.offline !== true && source.status === "missing",
+				offline: input.offline === true,
+				units: [],
+			})
 		),
 	];
 	const byName = new Map(sections.filter((s) => s.name !== null).map((s) => [s.name as string, s]));

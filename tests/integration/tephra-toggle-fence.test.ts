@@ -63,10 +63,11 @@ describe("static fence", () => {
 		}
 	});
 
-	it("`tephractl` appears in src only as the displayed install command constant", () => {
+	it("`tephractl` appears in src only as the displayed install command and PR-9's start argv (F7)", () => {
 		const hits = srcFiles.filter((f) => code(`src/${f}`).includes("tephractl"));
-		expect(hits).toEqual(["tephra-client.ts"]);
+		expect(hits).toEqual(["tephra-client.ts", "tephra-start.ts"]);
 		expect(code("src/tephra-client.ts").match(/.*tephractl.*/g)).toEqual(['export const TEPHRA_INSTALL_COMMAND = "tephractl daemon install";']);
+		expect(code("src/tephra-start.ts").match(/.*tephractl.*/g)).toEqual(['export const TEPHRA_START_ARGV: readonly string[] = ["tephractl", "daemon", "start"];']);
 	});
 
 	it("only the request module and the settings/exclude helpers import obsidian at runtime among Tephra files", () => {

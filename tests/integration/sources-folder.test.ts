@@ -875,11 +875,13 @@ describe("wiring in main.ts (the pieces the harness above mirrors)", () => {
 	const main = readFileSync(join(__dirname, "../../src/main.ts"), "utf8");
 	const rel = (p: string): string => readFileSync(join(__dirname, "../..", p), "utf8");
 
-	it("main.ts registers the teardown step, asks beforeEnable, feeds every check into sync, and asks for a check on focus", () => {
+	it("main.ts registers the teardown step, asks beforeEnable, feeds every check into sync, and asks for a check on focus (PR-9: the connection owns the focus listener)", () => {
 		expect(main).toMatch(/registerTephraTeardown\(\{ name: "Sources folder links", run: \(\) => this\.sourcesFolder\.teardown\(\) \}\)/);
 		expect(main).toMatch(/beforeEnable: async \(\) => \{[\s\S]*checkCanEnable\(\)/);
 		expect(main).toMatch(/connection\.onCheck\(\(snapshot\) => \{\s*if \(snapshot\.state === "online"\) void this\.sourcesFolder\.sync\(snapshot\.sources\)/);
-		expect(main).toMatch(/registerDomEvent\(window, "focus", \(\) => this\.tephraConnection\?\.requestCheck\(\)\)/);
+		// PR-9 (G16): no handler for the whole life of the plugin; the connection adds it on start() and removes it on stop().
+		expect(main).not.toMatch(/registerDomEvent\(window, "focus"/);
+		expect(rel("src/tephra-connection.ts")).toMatch(/this\.stopFocus = this\.listenFocus\(\(\) => this\.requestCheck\(\)\)/);
 		expect(main).toMatch(/this\.sourcesFolder\?\.dispose\(\)/);
 		// R1: the connection is built with a client that can open Tephra's push channel, and the toggle flip rebuilds the index.
 		expect(main).toMatch(/new TephraClient\(\{ request: obsidianTephraRequest, openSocket: openNodeWebSocket, url \}\)/);

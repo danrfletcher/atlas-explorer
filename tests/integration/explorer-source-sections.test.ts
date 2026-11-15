@@ -128,7 +128,7 @@ describe("Inbox sections per Tephra source (G1)", () => {
 		expect(rowsOf(source)).toEqual([]);
 	});
 
-	it("Tephra not running: just the vault's Inbox, nothing marked missing (offline is PR-9's)", async () => {
+	it("Tephra not running and no source known yet: just the vault's Inbox, nothing marked missing (PR-9's offline sections need a source name to draw)", async () => {
 		h = makeSectionHarness({ bucketRows: 3, inboxRows: 2 });
 		plug(h, { state: "offline", calls: [], sources: [{ name: "tephra", path: "/t", status: "online" }], listings: {} });
 		await h.render();
@@ -395,5 +395,111 @@ describe("Inbox sections per Tephra source (G1)", () => {
 		scrollTo(2001); // one pixel: the same rows are wanted
 		expect(built.mock.calls.length).toBe(afterJump);
 		expect(perFrame.some((n) => n === 0)).toBe(true);
+	});
+});
+
+// PR-9 (G13/E1): Tephra isn't answering. The sections stay, headed "(Tephra offline)", with the last list the
+// connection kept in memory; nothing is marked missing and nothing is asked of Tephra.
+describe("Inbox sections while Tephra is offline (G13/E1)", () => {
+	/** `plug`, plus the in-memory lists the real connection keeps (`rememberUnits` and friends). */
+	function plugRemembering(harness: SectionHarness, fake: Fake, links: Record<string, string> = {}) {
+		plug(harness, fake);
+		const plugin = (harness.explorer as unknown as { plugin: Record<string, unknown> }).plugin;
+		(plugin.settings as Record<string, unknown>).tephraLinks = links;
+		const connection = plugin.tephraConnection as Record<string, unknown>;
+		const units = new Map<string, unknown[]>();
+		let last: TephraSource[] | null = null;
+		const getSnapshot = connection.getSnapshot as () => { state: string; sources: TephraSource[] };
+		connection.getSnapshot = () => {
+			const snapshot = getSnapshot();
+			if (snapshot.state === "online") last = snapshot.sources;
+			return snapshot;
+		};
+		connection.rememberUnits = (name: string, list: unknown[]) => void units.set(name, list);
+		connection.getRememberedUnits = (name: string) => units.get(name) ?? null;
+		connection.getLastSources = () => last;
+	}
+
+	const sources: TephraSource[] = [
+		{ name: "tephra", path: "/t", status: "online" },
+		{ name: "whoop", path: "/w", status: "online" },
+	];
+
+	it("online then offline: each source keeps its header and its last rows, marked '(Tephra offline)', no unit.list call", async () => {
+		h = makeSectionHarness({ bucketRows: 3, inboxRows: 2 });
+		const fake: Fake = { state: "online", calls: [], sources, listings: { tephra: listing(entry("README.md", "markdown")), whoop: listing(entry("sleep.csv", "markdown")) } };
+		plugRemembering(h, fake);
+		await h.render();
+		expect(titles(h)).toEqual(["Inbox", "[tephra]", "[whoop]"]);
+		expect(h.panel().textContent).not.toContain("(Tephra offline)");
+
+		fake.state = "offline";
+		fake.calls.length = 0;
+		await h.render();
+		expect(titles(h)).toEqual(["Inbox", "[tephra]", "[whoop]"]);
+		const [vault, tephra, whoop] = [...h.panel().querySelectorAll<HTMLElement>(".atlas-inbox")];
+		expect(vault.textContent).not.toContain("(Tephra offline)");
+		expect(rowsOf(vault)).toHaveLength(2);
+		for (const section of [tephra, whoop]) {
+			expect(section.textContent).toContain("(Tephra offline)");
+			expect(section.textContent).not.toContain("(missing)");
+			expect(section.querySelector(".atlas-section-header")!.classList.contains("is-tephra-offline")).toBe(true);
+			expect(section.querySelector(".atlas-section-header")!.classList.contains("is-missing")).toBe(false);
+		}
+		expect(rowsOf(tephra).join("|")).toContain("README.md");
+		expect(rowsOf(whoop).join("|")).toContain("sleep.csv");
+		expect(fake.calls).toEqual([]);
+	});
+
+	it("coming back online clears the marker and fetches the lists again", async () => {
+		h = makeSectionHarness({ bucketRows: 3, inboxRows: 1 });
+		const fake: Fake = { state: "online", calls: [], sources, listings: { tephra: listing(entry("README.md", "markdown")), whoop: listing() } };
+		plugRemembering(h, fake);
+		await h.render();
+		fake.state = "offline";
+		await h.render();
+		expect(h.panel().textContent).toContain("(Tephra offline)");
+		fake.state = "online";
+		fake.listings.tephra = listing(entry("NEW.md", "markdown"));
+		await h.render();
+		expect(h.panel().textContent).not.toContain("(Tephra offline)");
+		const tephra = h.panel().querySelector<HTMLElement>('.atlas-inbox[data-source="tephra"]')!;
+		expect(rowsOf(tephra).join("|")).toContain("NEW.md");
+		expect(rowsOf(tephra).join("|")).not.toContain("README.md");
+	});
+
+	it("started with Tephra down: sections come from the Sources/ links Atlas made earlier, header only", async () => {
+		h = makeSectionHarness({ bucketRows: 3, inboxRows: 1 });
+		plugRemembering(h, { state: "offline", calls: [], sources: [], listings: {} }, { whoop: "/vault/Sources/whoop", tephra: "/vault/Sources/tephra" });
+		await h.render();
+		expect(titles(h)).toEqual(["Inbox", "[tephra]", "[whoop]"]);
+		for (const section of [...h.panel().querySelectorAll<HTMLElement>(".atlas-inbox-source")]) {
+			expect(section.textContent).toContain("(Tephra offline)");
+			expect(rowsOf(section)).toEqual([]);
+		}
+	});
+
+	it("offline is not missing: a source that was reported missing online reads '(Tephra offline)' once Tephra drops", async () => {
+		h = makeSectionHarness({ bucketRows: 3, inboxRows: 1 });
+		const fake: Fake = { state: "online", calls: [], sources: [{ name: "gone", path: "/g", status: "missing" }], listings: {} };
+		plugRemembering(h, fake);
+		await h.render();
+		expect(h.panel().textContent).toContain("(missing)");
+		fake.state = "offline";
+		await h.render();
+		expect(h.panel().textContent).toContain("(Tephra offline)");
+		expect(h.panel().textContent).not.toContain("(missing)");
+	});
+
+	it("nothing about it is written to data.json: no save call, no settings change", async () => {
+		h = makeSectionHarness({ bucketRows: 3, inboxRows: 1 });
+		const fake: Fake = { state: "online", calls: [], sources, listings: { tephra: listing(entry("README.md", "markdown")), whoop: listing() } };
+		plugRemembering(h, fake, { tephra: "/vault/Sources/tephra" });
+		const plugin = (h.explorer as unknown as { plugin: { settings: unknown } }).plugin;
+		const before = JSON.stringify(plugin.settings);
+		await h.render();
+		fake.state = "offline";
+		await h.render();
+		expect(JSON.stringify(plugin.settings)).toBe(before);
 	});
 });

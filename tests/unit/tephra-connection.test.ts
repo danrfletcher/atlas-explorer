@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TEPHRA_CHECK_INTERVAL_MS, TephraConnection, type TephraConnectionClient, type TephraSnapshot } from "../../src/tephra-connection";
-import type { TephraCallResult, TephraSource, TephraSourcesResult } from "../../src/tephra-client";
+import { TephraClient, type TephraCallResult, type TephraRequestFn, type TephraSource, type TephraSourcesResult } from "../../src/tephra-client";
+import type { Unit } from "../../src/types";
 
 const WHOOP: TephraSource = { name: "whoop", path: "/w", status: "online" };
 const NOTES: TephraSource = { name: "notes", path: "/n", status: "online" };
@@ -340,5 +341,318 @@ describe("stop() and the rapid-toggle rule", () => {
 		await vi.advanceTimersByTimeAsync(0);
 		expect(connection.isChecking()).toBe(true);
 		expect(fake.listCalls).toBe(2);
+	});
+});
+
+
+// ---------------------------------------------------------------------------------------------------------
+// PR-9 (G13/E1): every way an outcome can arrive ends in the right state, with exactly one change event per
+// real change. The connection and the client are real; only the HTTP transport is a scripted stand-in whose
+// mode the test switches (Tephra up, refusing connections, not answering, 401, 5xx, a JSON-RPC error).
+// ---------------------------------------------------------------------------------------------------------
+
+type Mode = "up" | "refused" | "silent" | "401" | "503" | "rpc-error";
+
+function rig(initial: Mode = "up") {
+	let mode: Mode = initial;
+	let sources: TephraSource[] = [NOTES, WHOOP];
+	const requests: string[] = [];
+	const request: TephraRequestFn = async ({ body }) => {
+		const { method, id } = JSON.parse(body) as { method: string; id: number };
+		requests.push(method);
+		switch (mode) {
+			case "refused":
+				throw new Error("ECONNREFUSED");
+			case "silent":
+				return new Promise(() => {}); // never answers: the client's own timeout ends it
+			case "401":
+				return { status: 401, text: "" } as Awaited<ReturnType<TephraRequestFn>>;
+			case "503":
+				return { status: 503, text: "oops" } as Awaited<ReturnType<TephraRequestFn>>;
+			case "rpc-error": // Tephra answers, but refuses every method except `source.list`
+				if (method === "source.list") return { status: 200, text: JSON.stringify({ jsonrpc: "2.0", id, result: sources }) } as Awaited<ReturnType<TephraRequestFn>>;
+				return { status: 200, text: JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: "no such source" } }) } as Awaited<ReturnType<TephraRequestFn>>;
+			default:
+				return { status: 200, text: JSON.stringify({ jsonrpc: "2.0", id, result: method === "source.list" ? sources : { entries: [] } }) } as Awaited<ReturnType<TephraRequestFn>>;
+		}
+	};
+	const client = new TephraClient({ request, readFile: async () => "a".repeat(64), tokenPath: () => "/t/token" });
+	const connection = new TephraConnection(client);
+	const snapshots: TephraSnapshot[] = [];
+	const online: boolean[] = [];
+	connection.onChange((snapshot) => snapshots.push(snapshot));
+	connection.onOnlineChange((value) => online.push(value));
+	return {
+		connection,
+		snapshots,
+		online,
+		requests,
+		setMode: (next: Mode) => (mode = next),
+		setSources: (next: TephraSource[]) => (sources = next),
+	};
+}
+
+const settle = () => vi.advanceTimersByTimeAsync(0);
+
+describe("PR-9: how an outcome arrives", () => {
+	const failures: Array<{ mode: Mode; kind: string }> = [
+		{ mode: "refused", kind: "network" },
+		{ mode: "401", kind: "unauthorized" },
+		{ mode: "503", kind: "http" },
+	];
+
+	for (const { mode, kind } of failures) {
+		it(`a failed RPC call (${mode}) flips to offline at once, with one change event and no 10 s wait`, async () => {
+			const r = rig();
+			r.connection.start();
+			await settle();
+			expect(r.connection.getSnapshot().state).toBe("online");
+			r.snapshots.length = 0;
+			r.online.length = 0;
+
+			r.setMode(mode);
+			const result = await r.connection.call("unit.list", { source: "whoop" });
+			await settle();
+
+			expect(result.ok).toBe(false);
+			expect(r.connection.getSnapshot()).toMatchObject({ state: "offline", checked: true, sources: [], error: { kind } });
+			expect(r.snapshots).toHaveLength(1);
+			expect(r.online).toEqual([false]);
+			// no tick passed: it was the failed call, not the poll
+			expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1);
+			r.connection.stop();
+		});
+
+		it(`the 10 s poll finding ${mode} flips to offline with one change event`, async () => {
+			const r = rig();
+			r.connection.start();
+			await settle();
+			r.snapshots.length = 0;
+			r.online.length = 0;
+			r.setMode(mode);
+			await vi.advanceTimersByTimeAsync(TEPHRA_CHECK_INTERVAL_MS);
+			expect(r.connection.getSnapshot()).toMatchObject({ state: "offline", error: { kind } });
+			expect(r.snapshots).toHaveLength(1);
+			expect(r.online).toEqual([false]);
+			// still down at the next poll: same answer, no new event
+			await vi.advanceTimersByTimeAsync(TEPHRA_CHECK_INTERVAL_MS * 3);
+			expect(r.snapshots).toHaveLength(1);
+			expect(r.online).toEqual([false]);
+			r.connection.stop();
+		});
+	}
+
+	it("a call that times out is offline with kind timeout (after the client's own 5 s limit), one event", async () => {
+		const r = rig();
+		r.connection.start();
+		await settle();
+		r.snapshots.length = 0;
+		r.setMode("silent");
+		const pending = r.connection.call("unit.list", { source: "whoop" });
+		await vi.advanceTimersByTimeAsync(5000); // the call times out; its failure starts a check
+		expect((await pending).ok).toBe(false);
+		expect(r.connection.getSnapshot().state).toBe("online"); // the check is still waiting on its own timeout
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(r.connection.getSnapshot()).toMatchObject({ state: "offline", error: { kind: "timeout" } });
+		expect(r.snapshots).toHaveLength(1);
+		r.connection.stop();
+	});
+
+	it("an RPC success changes nothing: no event and no extra check", async () => {
+		const r = rig();
+		r.connection.start();
+		await settle();
+		r.snapshots.length = 0;
+		const before = r.requests.filter((m) => m === "source.list").length;
+		expect((await r.connection.call("unit.list", { source: "whoop" })).ok).toBe(true);
+		await settle();
+		expect(r.snapshots).toHaveLength(0);
+		expect(r.online).toEqual([true]); // the one flip when it first came online
+		expect(r.requests.filter((m) => m === "source.list").length).toBe(before);
+		r.connection.stop();
+	});
+
+	it("an RPC refusal (a JSON-RPC error) while source.list still answers: stays online, no event", async () => {
+		const r = rig();
+		r.connection.start();
+		await settle();
+		r.snapshots.length = 0;
+		r.setMode("rpc-error");
+		expect((await r.connection.call("unit.list", { source: "x" })).ok).toBe(false);
+		await settle();
+		expect(r.connection.getSnapshot().state).toBe("online");
+		expect(r.snapshots).toHaveLength(0);
+		expect(r.requests.filter((m) => m === "source.list").length).toBeGreaterThan(1); // the failed call did ask for a check
+		r.connection.stop();
+	});
+
+	it("coming back is one event, with the new list; the online flip is published once each way", async () => {
+		const r = rig("refused");
+		r.connection.start();
+		await settle();
+		expect(r.connection.isOnline()).toBe(false);
+		r.snapshots.length = 0;
+		r.online.length = 0;
+		r.setMode("up");
+		await vi.advanceTimersByTimeAsync(TEPHRA_CHECK_INTERVAL_MS);
+		expect(r.connection.isOnline()).toBe(true);
+		expect(r.snapshots).toHaveLength(1);
+		expect(r.snapshots[0]).toMatchObject({ state: "online", sources: [NOTES, WHOOP] });
+		expect(r.online).toEqual([true]);
+		r.connection.stop();
+		expect(r.online).toEqual([true, false]); // stop() leaves online: off is not online
+	});
+
+	it("a change of reason while offline (refused, then a 401) is a real change: one event, and no online flip", async () => {
+		const r = rig("refused");
+		r.connection.start();
+		await settle();
+		r.snapshots.length = 0;
+		r.online.length = 0;
+		r.setMode("401");
+		await vi.advanceTimersByTimeAsync(TEPHRA_CHECK_INTERVAL_MS);
+		expect(r.snapshots).toHaveLength(1);
+		expect(r.connection.getSnapshot().error?.kind).toBe("unauthorized");
+		expect(r.online).toEqual([]);
+		r.connection.stop();
+	});
+
+	it("a source list that changes while online is a snapshot change but not an online flip", async () => {
+		const r = rig();
+		r.connection.start();
+		await settle();
+		r.snapshots.length = 0;
+		r.online.length = 0;
+		r.setSources([NOTES]);
+		await vi.advanceTimersByTimeAsync(TEPHRA_CHECK_INTERVAL_MS);
+		expect(r.snapshots).toHaveLength(1);
+		expect(r.online).toEqual([]);
+		r.connection.stop();
+	});
+
+	it("flapping: success and failure alternating across polls ends each time in the last result's state, one timer, one event per flip", async () => {
+		const fake = fakeClient();
+		const connection = new TephraConnection(fake.client);
+		const states: string[] = [];
+		const online: boolean[] = [];
+		connection.onChange((s) => states.push(s.state));
+		connection.onOnlineChange((v) => online.push(v));
+		connection.start();
+		fake.answer({ ok: true, sources: [NOTES] });
+		await settle();
+		for (let i = 0; i < 6; i++) {
+			await vi.advanceTimersByTimeAsync(TEPHRA_CHECK_INTERVAL_MS);
+			fake.answer(i % 2 === 0 ? down : { ok: true, sources: [NOTES] });
+			await settle();
+			expect(connection.getSnapshot().state).toBe(i % 2 === 0 ? "offline" : "online");
+			expect(vi.getTimerCount()).toBe(1); // the interval chain only: timers never stack
+		}
+		expect(states).toEqual(["offline", "online", "offline", "online", "offline", "online", "offline", "online"]);
+		expect(online).toEqual([true, false, true, false, true, false, true]);
+		connection.stop();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+});
+
+describe("PR-9: the focus check", () => {
+	it("an injected focus source: focus checks straight away, and stop() removes the listener", async () => {
+		const fake = fakeClient();
+		let handler: (() => void) | null = null;
+		let removed = 0;
+		const connection = new TephraConnection(fake.client, undefined, undefined, undefined, (onFocus) => {
+			handler = onFocus;
+			return () => {
+				removed++;
+				handler = null;
+			};
+		});
+		expect(handler).toBeNull(); // nothing listens before start
+		connection.start();
+		fake.answer({ ok: true, sources: [NOTES] });
+		await settle();
+		expect(fake.listCalls).toBe(1);
+		handler!();
+		expect(fake.listCalls).toBe(2); // checked at once, no 10 s wait
+		fake.answer({ ok: true, sources: [NOTES] });
+		await settle();
+		connection.stop();
+		expect(removed).toBe(1);
+		expect(handler).toBeNull();
+	});
+
+	it("the real window's focus event asks for a check while running, and after stop() nothing runs (fake timers)", async () => {
+		const fake = fakeClient();
+		const connection = new TephraConnection(fake.client);
+		connection.start();
+		fake.answer({ ok: true, sources: [NOTES] });
+		await settle();
+		window.dispatchEvent(new Event("focus"));
+		expect(fake.listCalls).toBe(2);
+		fake.answer(down);
+		await settle();
+		expect(connection.getSnapshot().state).toBe("offline"); // the focus check's answer shows now, not at the tick
+
+		connection.stop();
+		const callsAtStop = fake.listCalls;
+		window.dispatchEvent(new Event("focus"));
+		await vi.advanceTimersByTimeAsync(TEPHRA_CHECK_INTERVAL_MS * 5);
+		expect(fake.listCalls).toBe(callsAtStop);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("start() twice adds one focus listener: one focus makes one check", async () => {
+		const fake = fakeClient();
+		const connection = new TephraConnection(fake.client);
+		connection.start();
+		connection.start();
+		fake.answer({ ok: true, sources: [] });
+		await settle();
+		window.dispatchEvent(new Event("focus"));
+		expect(fake.listCalls).toBe(2);
+		connection.stop();
+	});
+});
+
+describe("PR-9: what the connection remembers in memory for an offline section", () => {
+	const unit = (path: string): Unit => ({ type: "root-file", path });
+
+	it("keeps the last source list and unit lists through going offline, and forgets them at stop()", async () => {
+		const r = rig();
+		r.connection.start();
+		await settle();
+		r.connection.rememberUnits("whoop", [unit("Sources/whoop/a.md")]);
+		r.setMode("refused");
+		await vi.advanceTimersByTimeAsync(TEPHRA_CHECK_INTERVAL_MS);
+		expect(r.connection.getSnapshot().sources).toEqual([]);
+		expect(r.connection.getLastSources()).toEqual([NOTES, WHOOP]);
+		expect(r.connection.getRememberedUnits("whoop")).toEqual([unit("Sources/whoop/a.md")]);
+		r.connection.stop();
+		expect(r.connection.getLastSources()).toBeNull();
+		expect(r.connection.getRememberedUnits("whoop")).toBeNull();
+		r.connection.rememberUnits("whoop", [unit("Sources/whoop/b.md")]); // stopped: ignored
+		expect(r.connection.getRememberedUnits("whoop")).toBeNull();
+	});
+
+	it("started while Tephra is down: no source list is known", async () => {
+		const r = rig("refused");
+		r.connection.start();
+		await settle();
+		expect(r.connection.getLastSources()).toBeNull();
+		r.connection.stop();
+	});
+});
+
+describe("PR-9: unload and toggle-off clear the interval and the focus listener", () => {
+	it("after stop() no check runs, however long the fake clock runs, and a focus event does nothing", async () => {
+		const r = rig();
+		r.connection.start();
+		await settle();
+		r.connection.stop();
+		const count = r.requests.length;
+		await vi.advanceTimersByTimeAsync(120_000);
+		window.dispatchEvent(new Event("focus"));
+		await settle();
+		expect(r.requests.length).toBe(count);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });

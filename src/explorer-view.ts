@@ -2528,7 +2528,7 @@ export class AtlasExplorerView extends ItemView {
 			// drawn by exactly the code that drew it before sections existed, and Tephra is never called.
 			const plan = this.tephraSectionsOn() ? await this.planInboxSections(inboxUnits, dismissedUnits, view, isCurrent) : null;
 			if (!isCurrent()) return;
-			const sectionPlans: InboxSectionPlan[] = plan ?? [{ section: { key: "inbox", kind: "vault", name: null, missing: false, units: inboxUnits }, units: inboxUnits, dismissed: dismissedUnits }];
+			const sectionPlans: InboxSectionPlan[] = plan ?? [{ section: { key: "inbox", kind: "vault", name: null, missing: false, offline: false, units: inboxUnits }, units: inboxUnits, dismissed: dismissedUnits }];
 			const group = sectionPlans.length > 1 ? createInboxDrawGroup() : undefined;
 			if (group) {
 				this.stagedInboxRedraw = group.redraw;
@@ -3959,9 +3959,13 @@ export class AtlasExplorerView extends ItemView {
 		// to what's actually in the inbox, so the count shouldn't jump around as it's toggled.
 		header.createSpan({ cls: "atlas-badge atlas-count-badge", text: String(units.length) });
 		if (source?.missing) {
-			// E5: Tephra reports the source's folder gone. Told apart from Tephra being unreachable (PR-9), which never gets here.
+			// E5: Tephra reports the source's folder gone. Told apart from Tephra being unreachable (`offline`, below).
 			header.addClass("is-missing");
 			header.createSpan({ cls: "atlas-section-missing", text: "(missing)" });
+		} else if (source?.offline) {
+			// PR-9 (G13/E1): Tephra isn't answering. The rows below are the last list; going offline is not a delete.
+			header.addClass("is-tephra-offline");
+			header.createSpan({ cls: "atlas-section-offline", text: "(Tephra offline)" });
 		}
 		// PR-5 (G7): additive — the header's existing collapse `click` listener below is untouched.
 		header.addEventListener("contextmenu", (evt) => {
@@ -4061,7 +4065,7 @@ export class AtlasExplorerView extends ItemView {
 			])
 		);
 		// The vault section's signature is the whole signature while it is alone; a source section's is added after it.
-		this.stagedInboxSignature = sourceName === null ? signature : `${this.stagedInboxSignature ?? ""}|${sectionKey}:${source?.missing === true}:${signature}`;
+		this.stagedInboxSignature = sourceName === null ? signature : `${this.stagedInboxSignature ?? ""}|${sectionKey}:${source?.missing === true}:${source?.offline === true}:${signature}`;
 		this.renderVirtualizedInboxRows(listEl, sorted, view, scrollBody, restoreScrollTop, opts.group, sourceName === null ? null : sectionKey);
 
 		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
@@ -4070,30 +4074,57 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR-4 (G1): the Inbox sections for this render, or null when the Tephra toggle is off (the caller then
-	 * draws the one vault section the way it always was). Calls `unit.list` once per listed source for this
-	 * render and keeps nothing of it afterwards (F1): the units go into this render's `unitsByRefKey` and the
-	 * plan, and the next render asks again. A source Tephra reports gone (`source.list` status `missing`, or a
-	 * `unit.list` answer that says `offline`) gets its header and no rows (E5); a Tephra that doesn't answer
-	 * gives no source sections at all, never "(missing)" (offline is PR-9's). Caller checks `isCurrent()`. */
+	 * draws the one vault section the way it always was). PR-9: also null until the connection has had its first
+	 * answer (`snapshot.checked`), since "offline" before that is a guess; the vault's Inbox draws alone and the
+	 * answer's change event queues the render that adds the source sections. Online, it calls `unit.list` once per listed source for
+	 * this render; the units go into this render's `unitsByRefKey` and the plan. A source Tephra reports gone
+	 * (`source.list` status `missing`, or a `unit.list` answer that says `offline`) gets its header and no rows (E5).
+	 *
+	 * PR-9 (G13/E1): while Tephra isn't answering there is no call at all. Every non-vault section is `offline`
+	 * ("(Tephra offline)") and holds the last unit list the connection kept in memory for it (none yet when Atlas
+	 * started with Tephra down: header only). Which sections: the last source list Tephra gave this session, else
+	 * the names Atlas already linked under `Sources/` (`settings.tephraLinks`). A `unit.list` that fails while the
+	 * state still says online also falls back to the last list, and the failed call is what flips the state. Nothing
+	 * of this is written to `data.json` (F1). Caller checks `isCurrent()`. */
 	private async planInboxSections(inboxUnits: Unit[], dismissedUnits: Unit[], view: View, isCurrent: () => boolean): Promise<InboxSectionPlan[] | null> {
 		const { settings, viewsManager, unitIndex } = this.plugin;
 		if (!skipsSourcesFolder(settings, Platform.isMobile)) return null;
 		const connection = this.plugin.tephraConnection;
 		const snapshot = connection?.getSnapshot();
-		let sources: TephraSource[] = connection && snapshot?.state === "online" ? snapshot.sources : [];
-		const listable = sources.filter((source) => source.name !== TEPHRA_VAULT_SOURCE_NAME && isUsableSourceName(source.name) && source.status !== "missing");
-		const answers = connection ? await Promise.all(listable.map((source) => this.listSourceEntries(connection, source.name))) : [];
-		if (!isCurrent()) return null;
-
+		const online = connection !== null && connection !== undefined && snapshot?.state === "online";
+		// Before the first `source.list` answers, offline would be a guess (the status bar says "checking…" for the
+		// same reason): the vault's Inbox draws alone, and the source sections, with or without a label, follow when
+		// the answer arrives (the connection's change event queues that render).
+		if (!online && snapshot !== undefined && snapshot.checked === false) return null;
+		let sources: TephraSource[] = online ? snapshot.sources : this.offlineSourceList(connection ?? null);
 		const goneNames = new Set<string>();
 		const listedUnits: Unit[] = [];
-		answers.forEach((parsed, i) => {
-			const name = listable[i].name;
-			if (!parsed) return;
-			if (parsed.offline) goneNames.add(name);
-			else listedUnits.push(...sourceUnitsFromEntries(name, parsed.entries));
-		});
-		if (goneNames.size > 0) sources = sources.map((source) => (goneNames.has(source.name) ? { ...source, status: "missing" } : source));
+
+		if (online) {
+			const listable = sources.filter((source) => source.name !== TEPHRA_VAULT_SOURCE_NAME && isUsableSourceName(source.name) && source.status !== "missing");
+			const answers = await Promise.all(listable.map((source) => this.listSourceEntries(connection, source.name)));
+			if (!isCurrent()) return null;
+			answers.forEach((parsed, i) => {
+				const name = listable[i].name;
+				if (!parsed) {
+					listedUnits.push(...(connection.getRememberedUnits?.(name) ?? []));
+					return;
+				}
+				if (parsed.offline) {
+					goneNames.add(name);
+					connection.rememberUnits?.(name, []);
+					return;
+				}
+				const units = sourceUnitsFromEntries(name, parsed.entries);
+				connection.rememberUnits?.(name, units);
+				listedUnits.push(...units);
+			});
+			if (goneNames.size > 0) sources = sources.map((source) => (goneNames.has(source.name) ? { ...source, status: "missing" } : source));
+		} else if (connection) {
+			for (const source of sources) {
+				if (source.name !== TEPHRA_VAULT_SOURCE_NAME && isUsableSourceName(source.name)) listedUnits.push(...(connection.getRememberedUnits?.(source.name) ?? []));
+			}
+		}
 		// This render's resolver knows the listed units; the next render builds its own map again.
 		for (const unit of listedUnits) {
 			const key = unitRefKey(unitToRef(unit));
@@ -4103,9 +4134,19 @@ export class AtlasExplorerView extends ItemView {
 		// The same placed, suppressed and dismissed rules a vault unit gets.
 		const visible = viewsManager.getInboxUnits(listedUnits, view.id, view.inboxMode, unitIndex);
 		const dismissed = this.showDismissed ? viewsManager.getDismissedInboxUnits(listedUnits, view.id, view.inboxMode, unitIndex) : [];
-		const sections = groupInboxSections({ enabled: true, sources, units: [...visible, ...inboxUnits] });
-		const dismissedSections = groupInboxSections({ enabled: true, sources, units: [...dismissed, ...dismissedUnits] });
+		const sections = groupInboxSections({ enabled: true, offline: !online, sources, units: [...visible, ...inboxUnits] });
+		const dismissedSections = groupInboxSections({ enabled: true, offline: !online, sources, units: [...dismissed, ...dismissedUnits] });
 		return sections.map((section, i) => ({ section, units: section.units, dismissed: dismissedSections[i].units }));
+	}
+
+	/** PR-9: the source sections to draw while Tephra isn't answering: the list its last good check returned, else
+	 * the names of the `Sources/<name>` links Atlas made earlier (`settings.tephraLinks`, already on disk in
+	 * `data.json`). Either way they only name sections; their status is never read. */
+	private offlineSourceList(connection: TephraConnection | null): TephraSource[] {
+		const last = connection?.getLastSources?.();
+		if (last) return last;
+		const names = Object.keys((this.plugin.settings as Partial<AtlasSettings>).tephraLinks ?? {});
+		return names.map((name): TephraSource => ({ name, path: "", status: "offline" }));
 	}
 
 	/** The Tephra toggle is on and this is desktop (G16). Read live; a pane built with no settings object counts as off. */

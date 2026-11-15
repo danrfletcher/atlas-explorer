@@ -256,6 +256,13 @@ export class AtlasSettingTab extends PluginSettingTab {
 		else this.renderStatusTab(body);
 	}
 
+	/** PR-9 (G13): selects a tab before the panel is opened (the status bar opens it on the Tephra tab). If this
+	 * tab is already on screen it redraws at once; otherwise Obsidian's own `display()` call will draw it. */
+	showTab(id: SettingsTabId): void {
+		this.activeTab = id;
+		if (this.containerEl.isConnected) this.display();
+	}
+
 	/** Closing the settings window: the Tephra tab's live updates must not outlive it. */
 	hide(): void {
 		this.releaseTephraUpdates();

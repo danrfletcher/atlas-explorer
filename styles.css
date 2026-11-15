@@ -185,6 +185,45 @@
 	text-transform: none;
 }
 
+/* PR-9 (G13/E1): Tephra isn't answering. The header and its "(Tephra offline)" marker go grey like a missing one,
+ * but the rows stay (the last list). A modifier of its own: the shared row and header rules are untouched. */
+.atlas-section-header.is-tephra-offline {
+	color: var(--text-faint);
+}
+
+.atlas-section-offline {
+	color: var(--text-faint);
+	font-weight: normal;
+	text-transform: none;
+}
+
+/* PR-9 (G13): the status-bar item and its hover text (an Atlas-owned element, never Obsidian's tooltip). */
+.status-bar-item.atlas-tephra-status {
+	cursor: pointer;
+}
+
+.atlas-tephra-status[data-state="offline"] .atlas-tephra-status-text {
+	color: var(--text-muted);
+}
+
+.atlas-tephra-status .atlas-tephra-start {
+	text-decoration: underline;
+	cursor: pointer;
+}
+
+.atlas-tephra-tooltip {
+	position: fixed;
+	z-index: var(--layer-tooltip, 1000);
+	max-width: 320px;
+	padding: var(--size-4-1, 4px) var(--size-4-2, 8px);
+	border-radius: var(--radius-s, 4px);
+	background-color: var(--background-modifier-message, var(--background-secondary));
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	pointer-events: none;
+	box-shadow: var(--shadow-s);
+}
+
 /* PR-1.B1 (E2): the short-panel guard. Set on the scroll body when it's too short to show both
  * headers plus a row — both labels fall back into normal flow instead of overlapping the content. */
 .atlas-explorer-scroll.atlas-sticky-disabled .atlas-section-header {
