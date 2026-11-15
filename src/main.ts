@@ -387,10 +387,13 @@ export default class AtlasPlugin extends Plugin {
 				// drop empties the Backlinks section (it re-fills when graph sync sees Tephra online again).
 				this.tephraStatusBar.attach(connection, this.tephraStarter);
 				connection.onOnlineChange((online) => {
-					if (online) {
-						this.tephraStarter.cancel();
-						this.tephraRenames.kick(); // PR-10: Tephra is back: send the queued renames, oldest first
-					} else this.tephraBacklinks.refresh(true);
+					if (online) this.tephraStarter.cancel();
+					else this.tephraBacklinks.refresh(true);
+				});
+				// PR-10 (G11): every finished check that finds Tephra online sends what is queued, oldest first. Not only a
+				// change to online: a send that failed while Tephra stayed up (a timeout) is tried again at the next check.
+				connection.onCheck((snapshot) => {
+					if (snapshot.state === "online") this.tephraRenames.kick();
 				});
 				return connection;
 			},
