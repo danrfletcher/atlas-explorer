@@ -74,6 +74,23 @@ export interface AtlasSettings {
 	 * loopback http address is ignored, because the Tephra token is sent to this address. Read through
 	 * `resolveTephraRpcUrl`. */
 	tephraUrl?: string;
+	/** G11 (PR-10): what Obsidian's "Automatically update internal links" (`alwaysUpdateLinks`) was before
+	 * Atlas switched it off for the Tephra toggle. `null` or absent: Atlas has saved nothing and manages
+	 * nothing. Written before the setting is changed, put back (and cleared) only when the toggle goes off,
+	 * never on unload. Read through `normalizeSavedLinkSetting`. */
+	tephraSavedLinkSetting?: SavedLinkSetting | null;
+}
+
+/** The saved `alwaysUpdateLinks`: `present: false` means the key was not in the vault config at all. */
+export type SavedLinkSetting = { present: false } | { present: true; value: boolean };
+
+/** G11: `tephraSavedLinkSetting` from a hand-edited `data.json`: only the two exact shapes count, else null. */
+export function normalizeSavedLinkSetting(raw: unknown): SavedLinkSetting | null {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+	const { present, value } = raw as { present?: unknown; value?: unknown };
+	if (present === false) return { present: false };
+	if (present === true && typeof value === "boolean") return { present: true, value };
+	return null;
 }
 
 export interface TephraSourceSetting {
@@ -542,6 +559,8 @@ export class AtlasSettingTab extends PluginSettingTab {
 	 * status and the list of Tephra sources. Atlas never starts or installs Tephra from here (F7): the tab
 	 * only shows the command. On mobile the toggle is disabled and Atlas behaves as with it off. */
 	private renderTephraTab(containerEl: HTMLElement): void {
+		// PR-10 (G11): opening the Tephra tab puts Obsidian's link updating back off if Dan turned it on. A no-op with the toggle off.
+		void this.plugin.tephraLinkSetting?.ensureOff();
 		const intro = containerEl.createEl("p", { cls: "setting-item-description atlas-tephra-intro" });
 		intro.appendText(
 			"Tephra is a local program that indexes any number of folders (\"sources\") on this Mac, including code repositories and other vaults, into one link graph. With it on, Atlas lists each source and can link between them. "

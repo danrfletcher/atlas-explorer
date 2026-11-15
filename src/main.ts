@@ -7,6 +7,7 @@ import {
 	normalizeAutoPromotion,
 	normalizeHighlightOpenNote,
 	normalizeNoAutoPromoteFolders,
+	normalizeSavedLinkSetting,
 	normalizeTephraExcludes,
 	normalizeTephraLinks,
 	normalizeTephraSettings,
@@ -48,6 +49,10 @@ import { registerF10Commands } from "./f10-commands";
 import { closeNameDialog, openNameDialog } from "./name-dialog";
 import { GraduationController } from "./graduation";
 import { noticeIfLinksNotUpdated } from "./links-notice";
+import { TephraLinkSetting } from "./tephra-link-setting";
+import { TephraRenameQueue, TEPHRA_RENAME_QUEUE_FILE } from "./tephra-rename-queue";
+import { nodeQueueStorage } from "./tephra-rename-queue-fs";
+import { TephraRenameForwarder } from "./tephra-rename-forwarder";
 import { registerTestHarness } from "./test-harness";
 import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
 import { ApiHeadersStore } from "./api-headers-store";
@@ -133,6 +138,10 @@ export default class AtlasPlugin extends Plugin {
 	/** G16: owns the Tephra connection. Nothing is built or started unless the toggle is on and this is
 	 * desktop; `onunload` only stops its timer. */
 	tephraController: TephraController;
+	/** PR-10 (G11): keeps Obsidian's "Automatically update internal links" off while the toggle is on, and puts it back on the off path. */
+	tephraLinkSetting: TephraLinkSetting;
+	/** PR-10 (G11): sends every vault rename to Tephra through the on-disk queue. Inert while the toggle is off. */
+	tephraRenames: TephraRenameForwarder;
 	/** PR-9 (G13): the status-bar item. It exists only while the Tephra toggle is on (it follows the live connection). */
 	tephraStatusBar: TephraStatusBar;
 	/** PR-9 (F7): runs `tephractl daemon start`, and only when Dan clicks Start in the status bar. */
@@ -211,7 +220,12 @@ export default class AtlasPlugin extends Plugin {
 			getExcludedFolders: () => this.settings.excludedFolders,
 			skipsSources: () => skipsSourcesFolder(this.settings, Platform.isMobile),
 			notify: (message, durationMs) => void new Notice(message, durationMs),
-			afterMove: () => void noticeIfLinksNotUpdated(this.app),
+			afterMove: () => void noticeIfLinksNotUpdated(this.app, undefined, () => this.tephraActive()),
+			// R3-6: with the toggle on, a pool rename waits for Tephra's acknowledgement, not Obsidian's link rewrite.
+			tephraAcks: {
+				isActive: () => this.tephraActive(),
+				whenAcknowledged: (oldPath, newPath, cb) => this.tephraRenames.whenAcknowledged(oldPath, newPath, cb),
+			},
 			onHiddenMove: (oldPath, newPath) => this.handleHiddenMove(oldPath, newPath),
 			openDialog: (options) => openNameDialog(this.app, options),
 		});
@@ -283,7 +297,42 @@ export default class AtlasPlugin extends Plugin {
 		// G16/R3-3: the toggle's off path unlinks what Atlas linked and removes the entries Atlas excluded. Never
 		// run on unload (E8): only `TephraController.setEnabled(false)` reaches the registry.
 		this.register(registerTephraTeardown({ name: "Sources folder links", run: () => this.sourcesFolder.teardown() }));
-		const tephraOn = () => this.settings.tephraEnabled && !Platform.isMobile;
+		const tephraOn = () => this.tephraActive();
+		this.tephraLinkSetting = new TephraLinkSetting({
+			getConfig: (key) => (this.app.vault as unknown as { getConfig(key: string): unknown }).getConfig(key),
+			setConfig: (key, value) => (this.app.vault as unknown as { setConfig(key: string, value: unknown): void }).setConfig(key, value),
+			getSaved: () => normalizeSavedLinkSetting(this.settings.tephraSavedLinkSetting),
+			setSaved: (saved) => {
+				this.settings.tephraSavedLinkSetting = saved;
+			},
+			save: () => this.flushSave(),
+			isActive: tephraOn,
+			isMobile: () => Platform.isMobile,
+			onError: (message, error) => {
+				console.error("[Atlas]", message, error);
+				new Notice(message, 10_000);
+			},
+		});
+		// Restored on the toggle's off path only; never on unload (E8).
+		this.register(registerTephraTeardown({ name: "Obsidian link-update setting", run: () => this.tephraLinkSetting.restore() }));
+		this.tephraRenames = new TephraRenameForwarder({
+			queue: new TephraRenameQueue({
+				storage: nodeQueueStorage,
+				path: this.tephraRenameQueuePath(),
+				now: () => Date.now(),
+				onCorrupt: ({ asidePath, reason }) => {
+					console.error(`[Atlas] The Tephra rename queue was ${reason}; ${asidePath ? `kept aside as ${asidePath}` : "it could not be moved aside"}.`);
+					new Notice(`Atlas: the saved list of renames waiting for Tephra was damaged (${reason}). It was ${asidePath ? "kept aside" : "left in place"} and a new one started. Links for renames made while Tephra was off may need a fix.`, 15_000);
+				},
+				onWriteError: (error) => console.error("[Atlas] couldn't write the Tephra rename queue", error),
+			}),
+			scheduler: { setTimeout: (cb, ms) => window.setTimeout(cb, ms), clearTimeout: (handle) => window.clearTimeout(handle as number) },
+			now: () => Date.now(),
+			isActive: tephraOn,
+			getConnection: () => this.tephraConnection,
+			notify: (message) => void new Notice(message, 10_000),
+			log: (message, detail) => console.warn(message, detail ?? ""),
+		});
 		this.tephraBacklinks = new TephraBacklinksSection({
 			app: this.app,
 			isEnabled: tephraOn,
@@ -338,8 +387,10 @@ export default class AtlasPlugin extends Plugin {
 				// drop empties the Backlinks section (it re-fills when graph sync sees Tephra online again).
 				this.tephraStatusBar.attach(connection, this.tephraStarter);
 				connection.onOnlineChange((online) => {
-					if (online) this.tephraStarter.cancel();
-					else this.tephraBacklinks.refresh(true);
+					if (online) {
+						this.tephraStarter.cancel();
+						this.tephraRenames.kick(); // PR-10: Tephra is back: send the queued renames, oldest first
+					} else this.tephraBacklinks.refresh(true);
 				});
 				return connection;
 			},
@@ -358,6 +409,11 @@ export default class AtlasPlugin extends Plugin {
 		// G16: builds the connection only when the saved toggle is on and this isn't mobile.
 		if (skipsSourcesFolder(this.settings, Platform.isMobile)) this.sourcesFolder.start();
 		this.tephraController.startIfEnabled();
+		// PR-10 (G11): a toggle that is on at load reads the queue, and puts Obsidian's link updating back off if Dan turned it on.
+		if (this.tephraActive()) {
+			this.tephraRenames.load();
+			void this.tephraLinkSetting.ensureOff();
+		}
 		// G2/E6/G13: Obsidian regaining focus asks Tephra for a fresh source list (and so a `Sources/` sync and the
 		// status bar's answer). That listener belongs to the connection (`TephraConnection.start()` adds it, `stop()`
 		// removes it), so with the toggle off there is no focus handler at all. The connection's own `graph:changed` push channel (`openNodeWebSocket`) lands on the same check. E6 is met in
@@ -576,6 +632,8 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-1 (G5): a vault `rename` event. The live refresh is queued only after `viewsManager.onVaultRename`
 	 * has run (rewrites refs, detaches a move-out) — it's a debounced timer, so it can never fire inline. */
 	onVaultRenameEvent(file: TAbstractFile, oldPath: string): void {
+		// PR-10 (G11): first, so the rename is on disk in the queue before anything below can throw. Inert with the toggle off.
+		this.tephraRenames.record(oldPath, file.path, file instanceof TFolder);
 		this.rewriteNoAutoPromoteOnRename(oldPath, file.path); // before onVaultRename: its folder branch rebuilds the index
 		const promotionsChanged = this.unitIndex.onVaultRename(file, oldPath);
 		this.viewsManager.onVaultRename(oldPath, file.path); // saves itself if anything changed
@@ -632,6 +690,7 @@ export default class AtlasPlugin extends Plugin {
 		this.sourcesFolder?.dispose(); // E8: stops new syncs only; no link, `.gitignore` line or Excluded entry changes
 		this.tephraStatusBar?.hide(); // PR-9: the item goes with the plugin; nothing else changes
 		this.tephraStarter?.cancel();
+		this.tephraRenames?.dispose(); // PR-10 (E8): stops timers; the queue file and Obsidian's link setting stay as they are
 		this.tephraController?.dispose(); // E8: stops the timer only; the teardown steps run on the toggle's off path alone
 		this.tephraGraphSync?.unbind(false); // PR-8: stops following Tephra; nothing is written
 		this.tephraBacklinks?.detach(); // removes the section from the Backlinks panel
@@ -647,7 +706,14 @@ export default class AtlasPlugin extends Plugin {
 	 * left when a teardown unlink failed) is a module until the toggle goes on, and a leftover user `Sources/`
 	 * becomes one again when it goes off. So both directions rebuild, then repaint the open explorers. */
 	onTephraToggled(enabled: boolean): void {
-		if (enabled) this.sourcesFolder.start();
+		if (enabled) {
+			this.sourcesFolder.start();
+			// PR-10 (G11): the old value is saved before Obsidian's setting is switched off. Renames made while the
+			// toggle was off are not queued, and so are not sent now; ones queued before it went off still are.
+			this.tephraRenames.load();
+			void this.tephraLinkSetting.enable();
+			this.tephraRenames.kick();
+		}
 		else this.tephraGraphSync.unbind(); // PR-8: forgets the in-memory edges and recomputes
 		this.tephraBacklinks.refresh(true); // PR-8: adds the section on, removes it (and any request in flight) off
 		const before = this.sourceLinks.getMode();
@@ -736,6 +802,17 @@ export default class AtlasPlugin extends Plugin {
 		const setting = (this.app as unknown as { setting?: { open?: () => void; openTabById?: (id: string) => unknown } }).setting;
 		setting?.open?.();
 		setting?.openTabById?.(this.manifest.id);
+	}
+
+	/** True while the Tephra toggle is on and this is desktop: mobile behaves as with the toggle off. */
+	tephraActive(): boolean {
+		return this.settings.tephraEnabled && !Platform.isMobile;
+	}
+
+	/** PR-10: where the Tephra rename queue lives: the plugin's own folder under the vault's config folder. */
+	private tephraRenameQueuePath(): string {
+		const base = this.getVaultBasePath();
+		return `${base}/${this.app.vault.configDir}/plugins/${this.manifest.id}/${TEPHRA_RENAME_QUEUE_FILE}`;
 	}
 
 	/** The live Tephra connection, or null while the toggle is off (or on mobile). */

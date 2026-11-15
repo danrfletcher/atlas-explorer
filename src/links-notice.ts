@@ -23,8 +23,11 @@ export function isAutoUpdateLinksOn(app: App, read: LinksConfigReader = readAlwa
 }
 
 /** Call after a move/rename Atlas triggered: one notice when Obsidian won't have rewritten links in
- * notes. Atlas's own views and refs are rewritten regardless. Returns whether a notice was shown. */
-export function noticeIfLinksNotUpdated(app: App, read: LinksConfigReader = readAlwaysUpdateLinks): boolean {
+ * notes. Atlas's own views and refs are rewritten regardless. Returns whether a notice was shown.
+ * `suppressed` (R3-6): true while the Tephra toggle is on. Then Atlas has switched Obsidian's setting off
+ * on purpose and Tephra rewrites the links, so the notice would be false and is never shown. */
+export function noticeIfLinksNotUpdated(app: App, read: LinksConfigReader = readAlwaysUpdateLinks, suppressed?: () => boolean): boolean {
+	if (suppressed?.() === true) return false;
 	if (isAutoUpdateLinksOn(app, read)) return false;
 	new Notice(LINKS_NOT_UPDATED_MESSAGE, NOTICE_DURATION_MS);
 	return true;
