@@ -42,7 +42,7 @@ Open the command palette and search for "Atlas Explorer".
 | `Atlas Explorer: Add block` | Creates a new free block in the pool folder and opens it with the cursor ready to type, with no filename prompt. |
 | `Atlas Explorer: Open explorer` | Opens or focuses the Atlas view in the left sidebar. |
 | `Atlas Explorer: Switch view…` | Fuzzy-picks another view and makes it active. |
-| `Atlas Explorer: Place active file in view…` | Fuzzy-picks a view, then a folder (or the bucket root) within it, and places the active file there: the keyboard and mobile equivalent of dragging it in. |
+| `Atlas Explorer: Place active file in view…` | Fuzzy-picks a view, then a folder (or the view root) within it, and places the active file there: the keyboard and mobile equivalent of dragging it in. |
 | `Atlas Explorer: Reveal active file in Atlas` | Opens the explorer and, if the active file isn't placed anywhere, says so. |
 | `Atlas Explorer: New view` | Prompts for a name and creates a new, empty view. |
 | `Atlas Explorer: Rebuild index` | Forces a full re-scan of every unit in the vault, and logs timings to the console. |

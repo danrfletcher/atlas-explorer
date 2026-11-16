@@ -21,7 +21,7 @@ Other settings on that tab:
 
 ## Assigning statuses
 
-A bucket item with children (a unit or a Folder; the option only appears when there's something underneath it) has a **Statuses** entry on its right-click menu. The **view name** has the same entry for the top level of the whole view (also only when the bucket has something in it). Both open the same dialog. The item that holds the assignment is the **governor**: its status set applies to its *children*, never to itself.
+A view item with children (a unit or a Folder; the option only appears when there's something underneath it) has a **Statuses** entry on its right-click menu. The **view name** has the same entry for the top level of the whole view (also only when the view has something in it). Both open the same dialog. The item that holds the assignment is the **governor**: its status set applies to its *children*, never to itself.
 
 - **Enable statuses**: the master toggle. Everything else is greyed out (but kept) while it's off.
 - **Status set**: which set governs this item's (or the view's) children.
@@ -33,7 +33,7 @@ A bucket item with children (a unit or a Folder; the option only appears when th
 
 **Hide always beats truncate:** a hidden item is never counted in, or shown as part of, a truncated group.
 
-Inbox items can't have a status; place them in the bucket first.
+Inbox items can't have a status; place them in the view first.
 
 ## Changing one item's status
 

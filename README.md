@@ -2,7 +2,7 @@
 
 A replacement file explorer for Obsidian that shows every meaningful unit in your vault (blocks, files, folders) as one flat list, and lets you arrange those units into as many hierarchies as you like, without ever moving anything on disk.
 
-<img src="docs/images/explorer.png" alt="The Atlas explorer: a bucket (arranged tree) above an inbox (everything not yet arranged)" width="340">
+<img src="docs/images/explorer.png" alt="The Atlas explorer: a view (arranged tree) above an inbox (everything not yet arranged)" width="340">
 
 ## Install
 
@@ -51,22 +51,22 @@ Every folder is a unit: a **module** whose **interface** is a note saying what t
 - Clicking a module's name opens its interface note, unless you give the module a [Click action](docs/using-the-explorer.md#click-actions). Clicking its icon, or pressing and holding the row for 500 ms, opens a **Module contents** view of its internals, where you can hide items, promote them to the inbox, or drag them out onto the inbox or view.
 - Atlas never rearranges a module's insides on disk, with one deliberate, confirmable exception: dragging a file or block directly onto a module's **icon** moves it in. A file that is already placed in a view stays placed where it is (in every view that holds it) after the move; a placed block that is no longer a unit after the move is removed from the views.
 
-### Views, bucket, inbox
+### Views and the inbox
 
 - A **view** is one arrangement of units into a hierarchy. There can be many; the same unit can sit in many at once; no view is "the real one".
-- Inside a view, the **bucket** is the arranged tree, and **Folders** are its branches: labels, not folders on disk (not to be confused with modules, which are real folders).
+- The explorer shows a view as its arranged tree, under the **View** header, and **Folders** are its branches: labels, not folders on disk (not to be confused with modules, which are real folders).
 - A view's **inbox** is every unit not placed in that view; the **global inbox** is every unit placed in no view at all. You can add any file or sub-folder to the inbox with **+**, and dismiss rows you don't want to see.
-- Any block, file or module can be the parent of any other bucket item, like a Folder can: drag one onto another's row to nest it.
+- Any block, file or module can be the parent of any other view item, like a Folder can: drag one onto another's row to nest it.
 
 ## What you can do
 
-- **Arrange without moving anything.** Drag to place, nest and reorder; multi-select with shift and cmd/ctrl-click; duplicate an item to organize its copy independently; scroll one panel with a sticky Bucket and Inbox. → [Using the explorer](docs/using-the-explorer.md)
-- **Create in place.** Right-click a bucket row for **Add under…** (a new block, file, module or Folder nested under it), **Replace with…** (swap a Folder for a new block, file or module), **Swap with…** and **Swap for Atlas folder** (point a spot at something else, or turn it into a Folder, keeping its children, status and data source), and **Create Module** (turn a root-level note into a module). → [Using the explorer](docs/using-the-explorer.md#creating-replacing-and-swapping)
-- **Open in a new tab.** Middle-click any bucket or inbox row, or use **Open in new tab** on its menu.
+- **Arrange without moving anything.** Drag to place, nest and reorder; multi-select with shift and cmd/ctrl-click; duplicate an item to organize its copy independently; scroll one panel with a sticky View and Inbox. → [Using the explorer](docs/using-the-explorer.md)
+- **Create in place.** Right-click a view row for **Add under…** (a new block, file, module or Folder nested under it), **Replace with…** (swap a Folder for a new block, file or module), **Swap with…** and **Swap for Atlas folder** (point a spot at something else, or turn it into a Folder, keeping its children, status and data source), and **Create Module** (turn a root-level note into a module). → [Using the explorer](docs/using-the-explorer.md#creating-replacing-and-swapping)
+- **Open in a new tab.** Middle-click any view or inbox row, or use **Open in new tab** on its menu.
 - **Run something on click.** Give a module, Folder or API item a click action: run a terminal command, run an Obsidian command (picked from the commands registered right now), or open an Obsidian URI. Right-click the row and choose **Click action…**. API sources can also run a JavaScript function per row. → [Click actions](docs/using-the-explorer.md#click-actions)
 - **Mark things with statuses.** Status sets with colors, inheritance down a tree, hide and truncate by status, click a dot to change one. → [Statuses](docs/statuses.md)
-- **Sort without losing your order.** Manual, A-Z, Modified, Time added or Status, with Reverse, on any item or the Bucket root. → [Sorting and reordering](docs/sorting.md)
-- **Fill a Folder from somewhere else.** Data sources read rows from a JSON API, a folder (inside or outside the vault, with YAML filters), a CSV file or a Markdown table, on any bucket item. → [Data sources](docs/data-sources.md)
+- **Sort without losing your order.** Manual, A-Z, Modified, Time added or Status, with Reverse, on any item or the View root. → [Sorting and reordering](docs/sorting.md)
+- **Fill a Folder from somewhere else.** Data sources read rows from a JSON API, a folder (inside or outside the vault, with YAML filters), a CSV file or a Markdown table, on any view item. → [Data sources](docs/data-sources.md)
 - **Link to anything.** Typing `[[` suggests files, modules and free blocks (found by content), and free-block links display as their text with a hover preview.
 - **Let an agent in.** An optional, localhost-only MCP server lets an agent on your machine read and arrange your views and statuses. Desktop only. → [MCP server](docs/mcp-server.md)
 

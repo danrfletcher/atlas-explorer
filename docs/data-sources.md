@@ -6,7 +6,7 @@ title: Data sources
 
 # Data sources
 
-A **data source** fills a Folder (or any other bucket item) with rows pulled from somewhere else. Right-click the item and choose **Data source…**, pick a **Source type**, and save. There are four types:
+A **data source** fills a Folder (or any other view item) with rows pulled from somewhere else. Right-click the item and choose **Data source…**, pick a **Source type**, and save. There are four types:
 
 | Type | Rows come from |
 |---|---|
@@ -15,7 +15,7 @@ A **data source** fills a Folder (or any other bucket item) with rows pulled fro
 | **Markdown table** | A table inside a note in your vault. |
 | **CSV** | A `.csv` file in your vault. |
 
-A data source can sit on a Folder **or on any bucket item** (a module, a file, a block), and an item that holds one can still have its own nested children. Rows from a source behave like any other child of that item: they can have a [status](statuses.md), a note, be [sorted](sorting.md), and be nested under each other.
+A data source can sit on a Folder **or on any view item** (a module, a file, a block), and an item that holds one can still have its own nested children. Rows from a source behave like any other child of that item: they can have a [status](statuses.md), a note, be [sorted](sorting.md), and be nested under each other.
 
 **A source only ever reads.** It never writes back to the API, the file or the folder. A source's output is always one flat list of rows.
 
