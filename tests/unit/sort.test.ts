@@ -137,8 +137,8 @@ describe("PR-4 sort.ts — sortedFolderNoticeText", () => {
 		expect(sortedFolderNoticeText("Projects", "status", true)).toBe("Projects is sorted Status, reversed. Set it to Manual to reorder.");
 	});
 
-	it("the Bucket root reads \"Bucket is sorted ...\"", () => {
-		expect(sortedFolderNoticeText("Bucket", "alphabetical", false)).toBe("Bucket is sorted A-Z. Set it to Manual to reorder.");
+	it("the view root reads \"View is sorted ...\"", () => {
+		expect(sortedFolderNoticeText("View", "alphabetical", false)).toBe("View is sorted A-Z. Set it to Manual to reorder.");
 	});
 
 	it("a folder name with punctuation is carried through verbatim, not escaped or altered", () => {

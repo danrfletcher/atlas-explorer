@@ -19,7 +19,7 @@ Guidance for coding agents working in this repo.
 ## Where things live
 
 - `src/main.ts`: entry point. `src/types.ts`: shared types.
-- `src/explorer-view.ts`, `src/views.ts`: explorer UI and view logic (bucket/inbox rendering, data-source setters).
+- `src/explorer-view.ts`, `src/views.ts`: explorer UI and view logic (view/inbox rendering, data-source setters).
 - `src/unit-index.ts`: scans and indexes vault units.
 - `src/statuses.ts`, `src/status-popup.ts`: status sets, governance, status-dot popup.
 - `src/settings.ts`: settings tab (Basic, Status). `src/modals.ts`: modals (Module Contents, Statuses).

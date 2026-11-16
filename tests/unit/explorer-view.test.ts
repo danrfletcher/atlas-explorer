@@ -1075,7 +1075,7 @@ describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the rea
 		expect(vm.getViews()[0].root[0].children[0].children.map((n) => n.id)).toEqual(["a", "b"]);
 	});
 
-	it("G4 at the Bucket root: a sorted Bucket root refuses an in-root edge reorder of its own top-level rows, Notice reads \"Bucket is sorted ...\"", async () => {
+	it("G4 at the view root: a sorted view root refuses an in-root edge reorder of its own top-level rows, Notice reads \"View is sorted ...\"", async () => {
 		const a = node("a", "A.md");
 		const b = node("b", "B.md");
 		const app = new MockApp() as unknown as App;
@@ -1093,7 +1093,7 @@ describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the rea
 		row.dispatchEvent(new Event("drop", { bubbles: true }));
 		await flushNoticeMicrotasks();
 
-		expect(Notice.instances.map((n) => n.message)).toEqual(["Bucket is sorted A-Z. Set it to Manual to reorder."]);
+		expect(Notice.instances.map((n) => n.message)).toEqual(["View is sorted A-Z. Set it to Manual to reorder."]);
 		expect(vm.getViews()[0].root.map((n) => n.id)).toEqual(["a", "b"]);
 	});
 

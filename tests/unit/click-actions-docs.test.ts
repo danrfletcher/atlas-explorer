@@ -143,7 +143,7 @@ describe("G18: every term the docs must carry", () => {
 
 	it("the three right-click lists and Keyboard mention the action", () => {
 		const text = read(USING);
-		expect(section(text, "Right-click a unit row (a block, file or module in the bucket)")).toContain("**Click action…** (modules only)");
+		expect(section(text, "Right-click a unit row (a block, file or module in the view)")).toContain("**Click action…** (modules only)");
 		expect(section(text, "Right-click a Folder row")).toContain("**Click action…**");
 		expect(section(text, "Right-click an API item row")).toContain("**Clear click action**");
 		expect(section(text, "Keyboard")).toContain("[Click action](#click-actions)");

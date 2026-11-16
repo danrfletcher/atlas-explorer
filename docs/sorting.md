@@ -8,7 +8,7 @@ title: Sorting and reordering
 
 ## Sort children…
 
-Right-click a Folder, a block, file or module, or the **Bucket header** and choose **Sort children…** to order what's directly underneath it:
+Right-click a Folder, a block, file or module, or the **View header** and choose **Sort children…** to order what's directly underneath it:
 
 | Mode | Order |
 |---|---|
@@ -22,7 +22,7 @@ Right-click a Folder, a block, file or module, or the **Bucket header** and choo
 
 - A-Z, Modified and Time added apply to an item's **direct children** only, never to its subfolders' own children. Status is the one mode that keeps applying as you go deeper, following the same governor rules as statuses.
 - Ties (same rank, same modified time) keep their existing manual order, in either direction. Folders, data-source rows and anything else with no file time of its own sort after everything that has one.
-- A row that's sorted by anything other than Manual shows a small icon next to its name (the Bucket header shows it too). Hover it for a tooltip naming the mode and direction.
+- A row that's sorted by anything other than Manual shows a small icon next to its name (the View header shows it too). Hover it for a tooltip naming the mode and direction.
 - **Sorting only changes how the list is drawn.** It never moves, renames or edits a file, and it never rewrites the stored manual order underneath. Switch back to Manual and your arrangement is exactly as you left it. Placing, removing and dropping into a sorted list edit the manual order underneath.
 
 **Modified** uses a snapshot of file times that refreshes only when the explorer has a reason to: the pane regains focus, you switch view, or the tree or a sort setting changes. It never refreshes in the middle of a drag, and when focus returns because you clicked a row, the refresh waits until the click finishes. Modified also works for files listed by an outside-the-vault Folder source (their real file times); an outside sub-folder, like any item with no file time, sorts after the rest.
