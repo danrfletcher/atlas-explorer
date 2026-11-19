@@ -33,7 +33,7 @@ export function registerF10Commands(plugin: AtlasPlugin): void {
 			if (checking) return true;
 			const ref: UnitRef = { kind: "file", path: file.path };
 			new ViewSuggestModal(plugin.app, plugin.viewsManager.getViews(), (view) => {
-				const targets = [{ id: null, label: "(bucket root)" }, ...flattenMetaFolders(view.root)];
+				const targets = [{ id: null, label: "(view root)" }, ...flattenMetaFolders(view.root)];
 				new MetaFolderSuggestModal(plugin.app, targets, (target) => {
 					plugin.viewsManager.placeUnit(view.id, ref, target.id);
 					new Notice(`Atlas: placed "${file.basename}" in "${view.name}".`);

@@ -3025,7 +3025,7 @@ export class AtlasExplorerView extends ItemView {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.bucketCollapsed ? "chevron-right" : "chevron-down");
-		const title = header.createSpan({ cls: "atlas-section-title", text: "Bucket" });
+		const title = header.createSpan({ cls: "atlas-section-title", text: "View" });
 		// PR-2 (G13): the Bucket header shows the icon when the view root itself is sorted.
 		this.renderSortIndicator(header, view, this.plugin.statusesManager?.findSortGovernor([view]) ?? null);
 
@@ -4772,11 +4772,11 @@ export class AtlasExplorerView extends ItemView {
 		return { decision, parentId: parentInfo.parentId, index: parentInfo.index, effectiveSort };
 	}
 
-	/** PR-4 (G4): the target list's own display text for the refusal Notice — "Bucket" for the
+	/** PR-4 (G4): the target list's own display text for the refusal Notice — "View" for the
 	 * view root, a Folder's label, or a unit's resolved display text (title/first-line/file name),
 	 * same text the row itself shows. */
 	private async sortedParentLabel(view: View, parentId: string | null): Promise<string> {
-		if (parentId === null) return "Bucket";
+		if (parentId === null) return "View";
 		const found = this.findNodeAnywhere(view.root, parentId);
 		if (!found) return "Folder";
 		const node = found.node;
@@ -5642,7 +5642,7 @@ export class AtlasExplorerView extends ItemView {
 	private placeInViewFlow(ref: UnitRef): void {
 		const views = this.plugin.viewsManager.getViews();
 		new ViewSuggestModal(this.plugin.app, views, (view) => {
-			const targets: MetaTarget[] = [{ id: null, label: "(bucket root)" }, ...flattenMetaFolders(view.root)];
+			const targets: MetaTarget[] = [{ id: null, label: "(view root)" }, ...flattenMetaFolders(view.root)];
 			new MetaFolderSuggestModal(this.plugin.app, targets, (target) => {
 				this.plugin.viewsManager.placeUnit(view.id, ref, target.id);
 			}).open();
@@ -5657,7 +5657,7 @@ export class AtlasExplorerView extends ItemView {
 	private promoteAndPlaceFlow(path: string, isFolder: boolean): void {
 		const views = this.plugin.viewsManager.getViews();
 		new ViewSuggestModal(this.plugin.app, views, (view) => {
-			const targets: MetaTarget[] = [{ id: null, label: "(bucket root)" }, ...flattenMetaFolders(view.root)];
+			const targets: MetaTarget[] = [{ id: null, label: "(view root)" }, ...flattenMetaFolders(view.root)];
 			new MetaFolderSuggestModal(this.plugin.app, targets, (target) => {
 				this.promoteAndPlace(path, isFolder, view, target.id);
 			}).open();

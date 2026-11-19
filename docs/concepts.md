@@ -39,13 +39,13 @@ Every folder is a unit: a **module** whose **interface** is a note saying what t
 - A module's properties are its interface note's properties.
 - Only folders directly in the vault root are modules at capture. A nested folder appears only if it is promoted, or added with the inbox's **+** (an added sub-folder is a module too).
 
-## Views, bucket, inbox
+## Views and the inbox
 
 - A **view** is one arrangement of units into a hierarchy. There can be many; the same unit can sit in many at once; no view is "the real one". View names are unique (ignoring case), and deleting the last view recreates *Default*.
-- Inside a view, the **bucket** is the arranged tree. Its branches are **Folders**: labels that exist only in Atlas, not folders on disk (not to be confused with **modules**, which are real folders).
+- The explorer shows a view as its arranged tree, under the **View** header. Its branches are **Folders**: labels that exist only in Atlas, not folders on disk (not to be confused with **modules**, which are real folders).
 - A view's **inbox** is every unit not placed in that view. Switch the inbox between **This view** and **Global**: the global inbox is every unit placed in no view at all.
-- Placing or removing a unit in the bucket never touches disk.
-- Any block, file or module can be the organizational parent of any other bucket item, the same way a Folder can: drag one onto another's row to nest it. A parent gets a chevron and folds like a Folder. Duplicates are allowed: the same unit can sit in a view more than once, and **Remove from view** removes only the one you chose.
+- Placing or removing a unit in the view never touches disk.
+- Any block, file or module can be the organizational parent of any other view item, the same way a Folder can: drag one onto another's row to nest it. A parent gets a chevron and folds like a Folder. Duplicates are allowed: the same unit can sit in a view more than once, and **Remove from view** removes only the one you chose.
 - Removing or deleting a unit or Folder lifts its children up one level.
 
 ## Missing and renamed things
@@ -59,7 +59,7 @@ Arranging never touches disk. These are the only actions that write to the vault
 | Action | What it writes |
 |---|---|
 | Add block, Add file, Add module (toolbar) | Creates a new free block, note or folder. |
-| Add under… (right-click a bucket row) | Creates a new block, file, module or Folder and nests it under that row. Never moves an existing file. |
+| Add under… (right-click a view row) | Creates a new block, file, module or Folder and nests it under that row. Never moves an existing file. |
 | Replace with… (right-click a Folder) | Creates a new block, file or module and swaps it in for the Folder, in the same spot. |
 | Create Module (right-click a root-level note) | Makes a folder with the note's name and moves the note in as its interface note. Rolls back if the move fails. |
 | Drop a file or block onto a module's **icon** | Moves it into that module. Always one item at a time, and confirms first (you can turn the confirmation off, which skips the prompt, not the move). |
