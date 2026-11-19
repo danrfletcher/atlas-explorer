@@ -195,3 +195,38 @@ describe("parseUnitList / sourceUnitsFromEntries (G1)", () => {
 		expect(isListableTopLevelName("")).toBe(false);
 	});
 });
+
+// PR-12 (G6): the longest root owns a unit, so a promoted folder's units move to the promoted source's section.
+describe("sections with promoted sources (PR-12)", () => {
+	const promoted = [
+		{ name: "tephrad", vaultPath: "Sources/tephra/crates/tephrad" },
+		{ name: "atlas", vaultPath: "Projects/Atlas" },
+	];
+	const sources = [src("tephra"), src("tephrad"), src("atlas")];
+
+	it("owningSourceName: the longest root, whole segments, a promoted source has no `Sources/<name>` of its own", () => {
+		const names = ["tephra", "tephrad", "atlas"];
+		expect(owningSourceName("Sources/tephra/crates/tephrad/src/a.rs", names, promoted)).toBe("tephrad");
+		expect(owningSourceName("Sources/tephra/crates/tephrad2/a.rs", names, promoted)).toBe("tephra");
+		expect(owningSourceName("Sources/tephra/Cargo.toml", names, promoted)).toBe("tephra");
+		expect(owningSourceName("Projects/Atlas/Plan.md", names, promoted)).toBe("atlas");
+		expect(owningSourceName("Projects/Atlas2/Plan.md", names, promoted)).toBeNull();
+		expect(owningSourceName("Sources/tephrad/a.rs", names, promoted)).toBeNull(); // no such link: `tephrad` lives inside `tephra`
+		expect(owningSourceName("Weekly.md", names, promoted)).toBeNull();
+	});
+
+	it("groupInboxSections puts a promoted folder's units in its own section, and the rest of the parent in the parent's", () => {
+		const sections = groupInboxSections({
+			enabled: true,
+			sources,
+			promoted,
+			units: [file("Weekly.md"), file("Projects/Atlas/Plan.md"), file("Sources/tephra/Cargo.toml"), file("Sources/tephra/crates/tephrad/src/a.rs"), mod("Sources/tephra/crates/tephractl")],
+		});
+		expect(summarise(sections)).toEqual([
+			{ key: VAULT_SECTION_KEY, kind: "vault", missing: false, paths: ["Weekly.md"] },
+			{ key: "source:atlas", kind: "source", missing: false, paths: ["Projects/Atlas/Plan.md"] },
+			{ key: "source:tephra", kind: "source", missing: false, paths: ["Sources/tephra/Cargo.toml", "Sources/tephra/crates/tephractl"] },
+			{ key: "source:tephrad", kind: "source", missing: false, paths: ["Sources/tephra/crates/tephrad/src/a.rs"] },
+		]);
+	});
+});

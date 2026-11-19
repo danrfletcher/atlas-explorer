@@ -13,7 +13,7 @@
  *
  * Nothing here writes, stores or crawls anything (F1, F3): each call is one request and its answer.
  */
-import { isUnderSourcesFolder, NOTES_SOURCE, ownSourceOf, parseSourceLink } from "./source-links";
+import { getPromotedRoots, isUnderSourcesFolder, locateInSource, NOTES_SOURCE, ownSourceOf, parseSourceLink } from "./source-links";
 import { SOURCES_FOLDER, sourceLinkPath } from "./sources-path";
 
 /** One Tephra edge, reduced to what Atlas reads. */
@@ -97,7 +97,8 @@ export function parseTephraId(id: string): TephraPath | null {
 	const written = escaped.slice(escaped.indexOf(":") + 1);
 	const rel = (parsed.path + written.slice(parsed.path.length)).replace(/%23/g, "#").replace(/%25/g, "%");
 	if (parsed.source === NOTES_SOURCE) return isUnderSourcesFolder(rel) ? null : { source: NOTES_SOURCE, path: rel };
-	return { source: parsed.source, path: `${sourceLinkPath(parsed.source)}/${rel}` };
+	const promoted = getPromotedRoots().find((root) => root.name === parsed.source); // a promoted source sits at its folder, not under `Sources/<name>`
+	return { source: parsed.source, path: `${promoted ? promoted.vaultPath : sourceLinkPath(parsed.source)}/${rel}` };
 }
 
 /**
@@ -117,9 +118,8 @@ export function isListedTephraSource(parsed: TephraPath, knownSources: ReadonlyS
 /** The reverse, by PR-1's `ownSourceOf`: `x` -> `@notes:x`, `Sources/<name>/x` -> `@<name>:x`. Null for the bare
  * `Sources/<name>` folder link itself or a path directly under `Sources/` (neither is a file of a source). */
 export function vaultPathToTephraId(path: string): string | null {
-	const source = ownSourceOf(path);
+	const { source, rel } = locateInSource(path);
 	if (source === NOTES_SOURCE) return path.startsWith(`${SOURCES_FOLDER}/`) ? null : `@${NOTES_SOURCE}:${path}`;
-	const rel = path.slice(SOURCES_FOLDER.length + 1 + source.length + 1);
 	return rel === "" ? null : `@${source}:${rel}`;
 }
 

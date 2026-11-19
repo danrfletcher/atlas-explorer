@@ -471,7 +471,7 @@ describe("large sources", () => {
 		const elapsed = performance.now() - started;
 		expect(items).toHaveLength(50);
 		expect(elapsed).toBeLessThan(200);
-	});
+	}, 30_000); // PR-12 (R4): building a 20k-path vault is slow under a loaded full run; the 200 ms bound on the query is unchanged
 });
 
 describe("fences (F1, F3)", () => {

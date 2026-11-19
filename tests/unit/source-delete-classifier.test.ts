@@ -117,4 +117,64 @@ describe("SourceDeleteClassifier", () => {
 			expect(classifier.classify("Sources/toString/a.md")).toBe("real");
 		});
 	});
+
+	describe("a promoted source's folder (R3-4, E5)", () => {
+		const TOP = "/data/tephra";
+		const roots = [
+			{ name: "tephrad", vaultPath: "Sources/tephra/crates/tephrad", absRoot: "/data/tephra/crates/tephrad" },
+			{ name: "core", vaultPath: "Sources/tephra/crates/tephrad/core", absRoot: "/data/tephra/crates/tephrad/core" },
+		];
+		function makePromoted(existing: string[] = [TOP, "/data/tephra/crates/tephrad", "/data/tephra/crates/tephrad/core"]) {
+			const present = new Set(existing);
+			const classifier = new SourceDeleteClassifier({
+				getLinkTargets: () => ({ tephra: TOP }),
+				targetExists: (target) => present.has(target),
+				getPromotedRoots: () => roots,
+			});
+			return { classifier, present };
+		}
+
+		it("a delete under a promoted folder that is gone on disk is missing, though the top-level link target is there", () => {
+			const { classifier, present } = makePromoted();
+			present.delete("/data/tephra/crates/tephrad");
+			expect(classifier.classify("Sources/tephra/crates/tephrad/src/registry.rs")).toBe("missing");
+			expect(classifier.classify("Sources/tephra/crates/tephrad")).toBe("missing");
+		});
+
+		it("Tephra reporting the promoted source missing is enough, with no disk probe answer", () => {
+			const { classifier } = makePromoted();
+			classifier.setMissingSources(["tephrad"]);
+			expect(classifier.classify("Sources/tephra/crates/tephrad/src/scan.rs")).toBe("missing");
+		});
+
+		it("a real delete under a promoted folder that is still there is real", () => {
+			const { classifier } = makePromoted();
+			expect(classifier.classify("Sources/tephra/crates/tephrad/src/registry.rs")).toBe("real");
+		});
+
+		it("a promoted folder inside a promoted folder: the outer one gone covers a delete in the inner one", () => {
+			const { classifier, present } = makePromoted();
+			present.delete("/data/tephra/crates/tephrad");
+			present.delete("/data/tephra/crates/tephrad/core");
+			expect(classifier.classify("Sources/tephra/crates/tephrad/core/a.rs")).toBe("missing");
+		});
+
+		it("whole segments only: crates/tephrad2 is not inside crates/tephrad", () => {
+			const { classifier, present } = makePromoted();
+			present.delete("/data/tephra/crates/tephrad");
+			expect(classifier.classify("Sources/tephra/crates/tephrad2/a.rs")).toBe("real");
+			expect(classifier.classify("Sources/tephra/crates/other/a.rs")).toBe("real");
+		});
+
+		it("a root with no known absolute path is judged by Tephra's status alone", () => {
+			const classifier = new SourceDeleteClassifier({
+				getLinkTargets: () => ({ tephra: TOP }),
+				targetExists: () => true,
+				getPromotedRoots: () => [{ name: "tephrad", vaultPath: "Sources/tephra/crates/tephrad" }],
+			});
+			expect(classifier.classify("Sources/tephra/crates/tephrad/a.rs")).toBe("real");
+			classifier.setMissingSources(["tephrad"]);
+			expect(classifier.classify("Sources/tephra/crates/tephrad/a.rs")).toBe("missing");
+		});
+	});
 });

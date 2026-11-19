@@ -194,7 +194,7 @@ export class LinkResolutionHook {
 		if (linkpath === "") return original(linkpath, sourcePath); // `[[#heading]]`: the linking file itself
 		if (ownSourceOf(sourcePath) === NOTES_SOURCE) {
 			const hit = original(linkpath, sourcePath);
-			if (!hit || !isUnderSourcesFolder(hit.path)) return hit;
+			if (!hit || (!isUnderSourcesFolder(hit.path) && ownSourceOf(hit.path) === NOTES_SOURCE)) return hit; // a hit in a source (or a promoted vault folder) crosses the boundary
 		}
 		return this.live(resolvePlainLinkInOwnSource(this.index, linkpath, sourcePath));
 	}

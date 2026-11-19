@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setPromotedRoots } from "../../src/source-links";
 import { App, Platform, TFile } from "obsidian";
 import type { CachedMetadata } from "obsidian";
 import { DEFAULT_SETTINGS } from "../../src/settings";
@@ -206,5 +207,99 @@ describe("UnitIndex: toggle off (G12)", () => {
 		const { index } = makeG12({ "Home.md": cacheOf("Deeper") }, { tephraEnabled: false });
 		index.setTephraEdges([{ from: "@demo:x.rs", to: "@notes:Notes/Idea.md", toRaw: "", subpath: "", line: 1, kind: "wikilink", offline: false }]);
 		expect(index.getUnits().filter((u) => u.type.startsWith("promoted")).map((u) => `${u.type}:${u.path}`)).toEqual(["promoted-file:Sources/tephra/docs/deep/Deeper.md"]);
+	});
+});
+
+// PR-12 (G6): a promoted source is its own source: a link from outside it into it promotes the deeper file, and the
+// pop-out rule is read inside it (its top-level folders are the ones under the promoted root).
+describe("UnitIndex with a promoted source (PR-12)", () => {
+	afterEach(() => setPromotedRoots([]));
+	const docs = [{ name: "docs", vaultPath: "Sources/tephra/docs" }];
+
+	it("a link from the parent source into the promoted one promotes the deeper file (a cross-source link)", () => {
+		setPromotedRoots(docs);
+		const { index } = make({ "Sources/tephra/crates/Core.md": cacheOf("Deeper") }, { Deeper: "Sources/tephra/docs/deep/Deeper.md" });
+		expect(sourceUnits(index)).toEqual(["promoted-file:Sources/tephra/docs/deep/Deeper.md"]);
+	});
+
+	it("the same link without the promotion is a link into the same source from another folder: it promotes too, but the answer changes when the roots do", () => {
+		const { index } = make({ "Sources/tephra/docs/Guide.md": cacheOf("Deeper") }, { Deeper: "Sources/tephra/docs/deep/Deeper.md" });
+		expect(sourceUnits(index)).toEqual([]); // same top-level folder `docs` of `tephra`
+		setPromotedRoots(docs);
+		expect(index.onSourceRootsChanged()).toBe(true); // in `docs`, Guide.md is at the top and Deeper.md is under `deep/`
+		expect(sourceUnits(index)).toEqual(["promoted-file:Sources/tephra/docs/deep/Deeper.md"]);
+		setPromotedRoots([]);
+		expect(index.onSourceRootsChanged()).toBe(true); // returned to its parent: back to the first answer
+		expect(sourceUnits(index)).toEqual([]);
+	});
+
+	it("a change of roots tells the listeners once (the explorer redraws), through the real recompute", () => {
+		const { index } = make({ "Sources/tephra/docs/Guide.md": cacheOf("Deeper") }, { Deeper: "Sources/tephra/docs/deep/Deeper.md" });
+		let notified = 0;
+		index.onChange(() => void (notified += 1));
+		setPromotedRoots(docs);
+		index.onSourceRootsChanged();
+		expect(notified).toBe(1);
+	});
+});
+
+// PR-12 (R2): a vault folder made its own source (`Projects/Atlas` -> `[atlas]`) is read by the per-source rule, not
+// the vault's: its modules are the folders under the promoted root, and a link from the vault into it counts.
+describe("UnitIndex with a promoted vault folder (PR-12, R2)", () => {
+	afterEach(() => setPromotedRoots([]));
+	const atlas = [{ name: "atlas", vaultPath: "Projects/Atlas" }];
+	const VAULT_FILES = ["Projects/Other.md", "Projects/Atlas/Top.md", "Projects/Atlas/a/n.md", "Projects/Atlas/a/m.md", "Projects/Atlas/b/x.md", "Projects/Atlas/sub/x.md", "Home.md"];
+	const VAULT_FOLDERS = ["Projects", "Projects/Atlas", "Projects/Atlas/a", "Projects/Atlas/b", "Projects/Atlas/sub"];
+	function makeVault(caches: Record<string, CachedMetadata>, resolve: Record<string, string>) {
+		const app = new App();
+		seedRoot(app, VAULT_FILES, VAULT_FOLDERS);
+		stubLinks(app, caches, resolve);
+		const index = new UnitIndex(app, { ...DEFAULT_SETTINGS, tephraEnabled: true }, []);
+		index.rebuild();
+		return index;
+	}
+	const popOuts = (index: UnitIndex) => index.getUnits().filter((u) => u.type.startsWith("promoted")).map((u) => `${u.type}:${u.path}${u.type === "promoted-file" ? `@${u.topLevelFolder}` : ""}`).sort();
+
+	it("without the promotion a link from Projects/Other.md into Projects/Atlas/sub is inside one vault module `Projects`: nothing pops out", () => {
+		expect(popOuts(makeVault({ "Projects/Other.md": cacheOf("X") }, { X: "Projects/Atlas/sub/x.md" }))).toEqual([]);
+	});
+
+	it("with the folder promoted, the same link pops the file out of `atlas`, in its module `sub`", () => {
+		setPromotedRoots(atlas);
+		const index = makeVault({ "Projects/Other.md": cacheOf("X") }, { X: "Projects/Atlas/sub/x.md" });
+		expect(popOuts(index)).toEqual(["promoted-file:Projects/Atlas/sub/x.md@Projects/Atlas/sub"]);
+	});
+
+	it("a link between two modules of the promoted folder pops out; one inside a module does not", () => {
+		setPromotedRoots(atlas);
+		expect(popOuts(makeVault({ "Projects/Atlas/a/n.md": cacheOf("X") }, { X: "Projects/Atlas/b/x.md" }))).toEqual(["promoted-file:Projects/Atlas/b/x.md@Projects/Atlas/b"]);
+		expect(popOuts(makeVault({ "Projects/Atlas/a/n.md": cacheOf("M") }, { M: "Projects/Atlas/a/m.md" }))).toEqual([]);
+	});
+
+	it("the vault's own rule is untouched outside the promoted folder: a root note linking into module `Projects` still promotes by the vault rule", () => {
+		setPromotedRoots(atlas);
+		const index = makeVault({ "Home.md": cacheOf("O") }, { O: "Projects/Other.md" });
+		expect(popOuts(index)).toEqual(["promoted-file:Projects/Other.md@Projects"]);
+	});
+
+	it("returning the folder to its parent gives the vault rule back (the answer follows the roots)", () => {
+		const index = makeVault({ "Projects/Atlas/a/n.md": cacheOf("X") }, { X: "Projects/Atlas/b/x.md" });
+		expect(popOuts(index)).toEqual([]); // both in module `Projects`
+		setPromotedRoots(atlas);
+		expect(index.onSourceRootsChanged()).toBe(true);
+		expect(popOuts(index)).toEqual(["promoted-file:Projects/Atlas/b/x.md@Projects/Atlas/b"]);
+		setPromotedRoots([]);
+		expect(index.onSourceRootsChanged()).toBe(true);
+		expect(popOuts(index)).toEqual([]);
+	});
+
+	it("with the Tephra toggle off, a promoted root left in memory changes nothing", () => {
+		setPromotedRoots(atlas);
+		const app = new App();
+		seedRoot(app, VAULT_FILES, VAULT_FOLDERS);
+		stubLinks(app, { "Projects/Atlas/a/n.md": cacheOf("X") }, { X: "Projects/Atlas/b/x.md" });
+		const index = new UnitIndex(app, { ...DEFAULT_SETTINGS, tephraEnabled: false }, []);
+		index.rebuild();
+		expect(popOuts(index)).toEqual([]);
 	});
 });

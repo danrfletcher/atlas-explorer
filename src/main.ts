@@ -10,6 +10,7 @@ import {
 	normalizeSavedLinkSetting,
 	normalizeTephraExcludes,
 	normalizeTephraLinks,
+	normalizeTephraPromotedRoots,
 	normalizeTephraSettings,
 	showsInSearch,
 	rewriteNoAutoPromoteFolders,
@@ -29,10 +30,13 @@ import { TephraStarter } from "./tephra-start";
 import { SourcesFolder } from "./sources-folder";
 import { SourceActions } from "./source-actions";
 import { SourceRenamer } from "./source-rename";
+import { SourcePromoter } from "./source-promote";
+import { bindPromotedRoots } from "./promoted-roots";
+import { getPromotedRoots, setPromotedRoots, type PromotedRootLike } from "./source-links";
 import { captureRenameTabs, type RenameTabLeaf } from "./source-rename-tabs";
 import { remapSourceStores, sourcePrefix } from "./source-rename-remap";
 import { pickFolder } from "./pick-folder";
-import { ConfirmModal } from "./modals";
+import { askConfirm, ConfirmModal } from "./modals";
 import { SourceDeleteClassifier } from "./source-delete-classifier";
 import { isInSourcesFolder, skipsSourcesFolder } from "./sources-path";
 import { nodeSourcesFs, existsOnDisk, realPath } from "./sources-fs";
@@ -161,6 +165,7 @@ export default class AtlasPlugin extends Plugin {
 	sourceActions: SourceActions;
 	/** PR-11 (G4): a source header's "Rename", and a rename Tephra announces. */
 	sourceRenamer: SourceRenamer;
+	sourcePromoter: SourcePromoter;
 	/** R3-4: tells deletes Atlas or a missing source caused from the user's own. */
 	sourceDeleteClassifier: SourceDeleteClassifier;
 	graduation: GraduationController;
@@ -184,6 +189,7 @@ export default class AtlasPlugin extends Plugin {
 	async onload() {
 		const data = (await this.loadData()) as AtlasData | null;
 		this.loadFromData(data);
+		this.seedPromotedRoots(); // R5: before the index, the resolver and the Inbox read them
 		this.renderLog = new RenderLog(this.app.vault.adapter, `${this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`}/${RENDER_LOG_FILE}`);
 		await this.renderLog.load();
 
@@ -266,6 +272,7 @@ export default class AtlasPlugin extends Plugin {
 		this.sourceDeleteClassifier = new SourceDeleteClassifier({
 			getLinkTargets: () => this.settings.tephraLinks,
 			targetExists: existsOnDisk,
+			getPromotedRoots: () => getPromotedRoots(),
 		});
 		this.sourcesFolder = new SourcesFolder({
 			fs: nodeSourcesFs,
@@ -313,6 +320,12 @@ export default class AtlasPlugin extends Plugin {
 					if (view instanceof AtlasExplorerView) view.renameSourceSection(oldName, newName);
 				}
 			},
+			notify: (message) => void new Notice(message, 10_000),
+		});
+		this.sourcePromoter = new SourcePromoter({
+			getConnection: () => this.tephraConnection,
+			getVaultPath: () => this.getVaultBasePath() || null,
+			confirm: (message, confirmLabel) => askConfirm(this.app, message, confirmLabel),
 			notify: (message) => void new Notice(message, 10_000),
 		});
 		// G16/R3-3: the toggle's off path unlinks what Atlas linked and removes the entries Atlas excluded. Never
@@ -405,6 +418,12 @@ export default class AtlasPlugin extends Plugin {
 				// creates nothing and the next online check tries again.
 				connection.onCheck((snapshot) => {
 					if (snapshot.state === "online") void this.sourcesFolder.sync(snapshot.sources);
+				});
+				// PR-12 (G6): the promoted roots come from every source list Atlas reads, before anything draws from them
+				// (registered ahead of the explorer refresh below), so a promote made by anyone, `tephractl` included, lands.
+				bindPromotedRoots(connection, {
+					getVaultPath: () => this.getVaultBasePath() || null,
+					onChanged: (roots) => this.onPromotedRootsChanged(roots),
 				});
 				// PR-11 (E6): a rename made with `tephractl` runs the same remap and swap as Atlas's own.
 				connection.onSourceRenamed((oldName, newName) => this.sourceRenamer.onRenamed(oldName, newName));
@@ -580,7 +599,7 @@ export default class AtlasPlugin extends Plugin {
 
 	/** The vault's absolute filesystem path (desktop only — mobile's adapter isn't a
 	 * `FileSystemAdapter`, and the MCP server never runs there anyway). */
-	private getVaultBasePath(): string {
+	getVaultBasePath(): string {
 		const adapter = this.app.vault.adapter;
 		return adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
 	}
@@ -738,7 +757,9 @@ export default class AtlasPlugin extends Plugin {
 	 * left when a teardown unlink failed) is a module until the toggle goes on, and a leftover user `Sources/`
 	 * becomes one again when it goes off. So both directions rebuild, then repaint the open explorers. */
 	onTephraToggled(enabled: boolean): void {
+		if (!enabled) setPromotedRoots([]); // the promotion stays registered in Tephra; Atlas just stops showing it (G16)
 		if (enabled) {
+			this.seedPromotedRoots(true); // Tephra may be down: the last known roots stand until it answers
 			this.sourcesFolder.start();
 			// PR-10 (G11): the old value is saved before Obsidian's setting is switched off. Renames made while the
 			// toggle was off are not queued, and so are not sent now; ones queued before it went off still are.
@@ -793,6 +814,7 @@ export default class AtlasPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
 		// Always a fresh, normalised array: `Object.assign` above would otherwise share DEFAULT_SETTINGS' array.
 		this.settings.tephraLinks = normalizeTephraLinks(data?.settings?.tephraLinks);
+		this.settings.tephraPromotedRoots = normalizeTephraPromotedRoots(data?.settings?.tephraPromotedRoots);
 		this.settings.tephraExcludes = normalizeTephraExcludes(data?.settings?.tephraExcludes);
 		this.settings.noAutoPromoteFolders = normalizeNoAutoPromoteFolders(data?.settings?.noAutoPromoteFolders, this.settings.poolFolder);
 		// PR-1.F2: a hand-edited non-boolean value must not throw and falls back to the default (on),
@@ -834,6 +856,34 @@ export default class AtlasPlugin extends Plugin {
 		const setting = (this.app as unknown as { setting?: { open?: () => void; openTabById?: (id: string) => unknown } }).setting;
 		setting?.open?.();
 		setting?.openTabById?.(this.manifest.id);
+	}
+
+	/** PR-12 (R5): keeps the promoted roots Tephra last listed in `settings.tephraPromotedRoots` (outside the views),
+	 * so a start with Tephra down still knows them. Saved at once: a quick reload must not lose them. */
+	private rememberPromotedRoots(roots: readonly PromotedRootLike[]): void {
+		const next: Record<string, { vaultPath: string; absRoot: string }> = {};
+		for (const root of roots) if (root.absRoot !== undefined) next[root.name] = { vaultPath: root.vaultPath, absRoot: root.absRoot };
+		this.settings.tephraPromotedRoots = next;
+		void this.flushSave();
+	}
+
+	/** PR-12 (G6): the promoted roots changed (a promote or return, by Atlas or `tephractl`). Everything that maps a
+	 * vault path to a Tephra id or back reads them, so the Backlinks section for the open file is asked again too:
+	 * its id for the same file just changed (`@tephra:crates/tephrad/src/x.rs` <-> `@tephrad:src/x.rs`), and Tephra
+	 * may send no `graph:changed` for it. */
+	private onPromotedRootsChanged(roots: readonly PromotedRootLike[]): void {
+		this.rememberPromotedRoots(roots);
+		this.sourceLinks?.invalidateIndex();
+		this.unitIndex?.onSourceRootsChanged();
+		this.tephraBacklinks?.refresh(true);
+	}
+
+	/** PR-12 (R5): the last known promoted roots, in memory, until Tephra answers with the real ones. Only while
+	 * the toggle is on (G16: off, no promoted section and no `@tephrad:` resolution). */
+	private seedPromotedRoots(active: boolean = this.tephraActive()): void {
+		if (!active) return;
+		const saved = this.settings?.tephraPromotedRoots ?? {};
+		setPromotedRoots(Object.entries(saved).map(([name, entry]) => ({ name, vaultPath: entry.vaultPath, absRoot: entry.absRoot })));
 	}
 
 	/** True while the Tephra toggle is on and this is desktop: mobile behaves as with the toggle off. */

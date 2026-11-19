@@ -7,6 +7,7 @@ import { TephraController } from "../../src/tephra-controller";
 import { DEFAULT_SETTINGS, normalizeTephraFlag } from "../../src/settings";
 import type { AtlasSettings } from "../../src/settings";
 import { obsidianFirstLinkpathDest, seedPaths, sourcesVaultPaths } from "../sources-vault";
+import { setPromotedRoots } from "../../src/source-links";
 
 type Resolver = (linkpath: string, sourcePath: string) => TFile | null;
 
@@ -495,5 +496,42 @@ describe("tephraEnabled setting and the plugin lifecycle", () => {
 		plugin.folderLiveRefresh = { cancelAll: vi.fn() } as never;
 		plugin.linkSuggest = undefined as never;
 		expect(() => plugin.onunload()).not.toThrow(); // sourceLinks undefined (load never finished)
+	});
+});
+
+// PR-12 (G6): with `tephrad` promoted out of `tephra`, a file in that folder is in `tephrad`, not in `tephra`.
+describe("the hooked resolver with a promoted source (PR-12)", () => {
+	const promotedRoots = [{ name: "tephrad", vaultPath: "Sources/tephra/crates/tephrad" }];
+
+	afterEach(() => setPromotedRoots([]));
+
+	it("@tephrad: resolves in the promoted folder, and the old @tephra: path into it no longer does", () => {
+		const app = buildApp();
+		new LinkResolutionHook(app, quietWarn()).install();
+		setPromotedRoots(promotedRoots);
+		expect(app.metadataCache.getFirstLinkpathDest("@tephrad:src/registry.rs", "Weekly Review.md")).toBe(app.vault.getAbstractFileByPath("Sources/tephra/crates/tephrad/src/registry.rs"));
+		expect(app.metadataCache.getFirstLinkpathDest("@tephra:crates/tephrad/src/registry.rs", "Weekly Review.md")).toBeNull();
+		expect(app.metadataCache.getFirstLinkpathDest("@tephra:Cargo.toml", "Weekly Review.md")).toBe(app.vault.getAbstractFileByPath("Sources/tephra/Cargo.toml"));
+	});
+
+	it("the index is read again after `invalidate()`, so a promote made while Obsidian runs takes hold", () => {
+		const app = buildApp();
+		const hook = new LinkResolutionHook(app, quietWarn());
+		hook.install();
+		expect(app.metadataCache.getFirstLinkpathDest("@tephra:crates/tephrad/src/registry.rs", "Weekly Review.md")).toBeTruthy(); // warms the index
+		setPromotedRoots(promotedRoots);
+		hook.invalidate();
+		expect(app.metadataCache.getFirstLinkpathDest("@tephra:crates/tephrad/src/registry.rs", "Weekly Review.md")).toBeNull();
+		expect(app.metadataCache.getFirstLinkpathDest("@tephrad:src/registry.rs", "Weekly Review.md")).toBeTruthy();
+		setPromotedRoots([]);
+		hook.invalidate(); // returned to its parent
+		expect(app.metadataCache.getFirstLinkpathDest("@tephra:crates/tephrad/src/registry.rs", "Weekly Review.md")).toBeTruthy();
+	});
+
+	it("a plain link in a promoted folder stays inside it (the promoted source is the file's own source)", () => {
+		const app = buildApp(["Sources/tephra/crates/tephrad/src/scan.rs", "Sources/tephra/crates/tephractl/registry.rs"]);
+		new LinkResolutionHook(app, quietWarn()).install();
+		setPromotedRoots(promotedRoots);
+		expect(app.metadataCache.getFirstLinkpathDest("registry.rs", "Sources/tephra/crates/tephrad/src/scan.rs")?.path).toBe("Sources/tephra/crates/tephrad/src/registry.rs");
 	});
 });

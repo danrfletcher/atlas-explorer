@@ -22,6 +22,7 @@ import {
 	SourceFileIndex,
 	isUnderSourcesFolder,
 	isValidSourceName,
+	locateInSource,
 	ownSourceOf,
 	plainNameClashes,
 	resolvePlainLinkInOwnSource,
@@ -32,6 +33,8 @@ import {
 /** The source a vault path is a file of, or null when it is in none (`Sources/x.md`, `Sources/notes/…`,
  * `Sources/<not a name>/…`). The name keeps the case it has in the path. */
 export function sourceOfVaultPath(path: string): string | null {
+	const located = locateInSource(path);
+	if (located.source !== NOTES_SOURCE) return located.source; // a promoted source's folder, or `Sources/<name>/…`
 	if (!isUnderSourcesFolder(path)) return NOTES_SOURCE;
 	// The bare `Sources` entry and a file directly under it are in no source.
 	const rest = path.startsWith(`${SOURCES_FOLDER}/`) ? path.slice(SOURCES_FOLDER.length + 1) : "";
@@ -45,6 +48,8 @@ export function sourceOfVaultPath(path: string): string | null {
 /** The path of a vault file relative to its source's root. */
 export function pathInSource(path: string, source: string): string {
 	if (source.toLowerCase() === NOTES_SOURCE) return path;
+	const located = locateInSource(path);
+	if (located.source.toLowerCase() === source.toLowerCase()) return located.rel;
 	return path.slice(SOURCES_FOLDER.length + 1 + source.length + 1);
 }
 

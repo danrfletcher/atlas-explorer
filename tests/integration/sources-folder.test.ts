@@ -585,7 +585,7 @@ describe("E2 / E6 / sync serialisation", () => {
 		h.pushGraphChanged();
 		await vi.waitFor(() => expect(isLink(h.linkPath("recipes"))).toBe(false));
 		expect(h.settings.tephraLinks.recipes).toBeUndefined();
-	});
+	}, 30_000); // PR-12 (R4): two waits on real fs and a socket-less push; the default 5 s is tight under a loaded full run
 
 	it("E6/C5: a graph:changed push alone brings a .gitignore edit into Excluded files", async () => {
 		const h = build();

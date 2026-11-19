@@ -558,8 +558,36 @@ export function renderResults(_el: HTMLElement, _text: string, _match: unknown):
 export class WorkspaceLeaf {}
 export class TextComponent {}
 export class ToggleComponent {}
+/** PR-12: just enough of Obsidian's `ButtonComponent` for a dialog's buttons to render and be clicked. */
+export class ButtonComponent {
+	buttonEl: HTMLButtonElement;
+	constructor(containerEl: HTMLElement) {
+		this.buttonEl = containerEl.createEl("button");
+	}
+	setButtonText(text: string): this {
+		this.buttonEl.setText(text);
+		return this;
+	}
+	setWarning(): this {
+		this.buttonEl.addClass("mod-warning");
+		return this;
+	}
+	setDisabled(disabled: boolean): this {
+		this.buttonEl.toggleAttribute("disabled", disabled);
+		return this;
+	}
+	onClick(callback: () => void): this {
+		this.buttonEl.addEventListener("click", () => callback());
+		return this;
+	}
+}
+
 export class Setting {
 	constructor(public containerEl: HTMLElement) {}
+	addButton(cb: (button: ButtonComponent) => void): this {
+		cb(new ButtonComponent(this.containerEl));
+		return this;
+	}
 }
 
 export const Platform = { isMobile: false, isDesktop: true };

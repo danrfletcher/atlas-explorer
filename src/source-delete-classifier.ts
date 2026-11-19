@@ -17,6 +17,10 @@ export type SourceDeleteKind = "expected" | "missing" | "real";
 export interface SourceDeleteClassifierDeps {
 	/** Source name -> the folder its `Sources/<name>` link points at (what `tephraLinks` records). */
 	getLinkTargets: () => Record<string, string>;
+	/** PR-12 (G6): the promoted sources' roots, with the absolute folder each one is. A promoted source has no
+	 * `Sources/<name>` link of its own, so a delete under it is read against its own folder, not the link of the
+	 * source it lies in. Optional: absent, there are none. */
+	getPromotedRoots?: () => readonly { name: string; vaultPath: string; absRoot?: string }[];
 	/** Whether that folder exists right now. A synchronous probe: delete events are handled synchronously
 	 * and the answer must not wait for Tephra's next status report. */
 	targetExists: (target: string) => boolean;
@@ -32,6 +36,8 @@ interface Expectation {
 /**
  * R3-4: tells a delete event under `Sources/` that Atlas or a missing source caused from a real delete.
  * The classifier matches exact path prefixes only: `Sources/whoopx/` is not `Sources/whoop/`.
+ *
+ * A delete under a PROMOTED source's folder is `missing` when that folder is gone (see `getPromotedRoots`).
  *
  * An expectation is registered BEFORE Atlas unlinks a folder, then matches the deletes that follow. Each
  * match renews it, so a long stream of deletes from a big source keeps matching, and it lapses `ttlMs` after
@@ -67,6 +73,15 @@ export class SourceDeleteClassifier {
 			if (!expectation.matches(path)) continue;
 			expectation.expiresAt = now + this.ttlMs;
 			return "expected";
+		}
+		// A delete inside a promoted folder (`Sources/tephra/crates/tephrad/...`) maps to `tephra` by its first
+		// segment, whose link target is still there. The promoted folder itself is what tells: Tephra reports it
+		// missing, or it is gone on disk (probed here, because the delete arrives before Tephra's next status).
+		// Every promoted root that holds the path counts, so a promoted folder inside a promoted folder is covered.
+		for (const root of this.deps.getPromotedRoots?.() ?? []) {
+			if (!isSameOrUnder(path, root.vaultPath)) continue;
+			if (this.missingByStatus.has(root.name)) return "missing";
+			if (root.absRoot !== undefined && !this.deps.targetExists(root.absRoot)) return "missing";
 		}
 		const name = this.linkNameFor(path);
 		if (name === null) return "real";

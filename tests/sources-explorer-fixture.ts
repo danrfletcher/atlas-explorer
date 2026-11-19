@@ -16,6 +16,10 @@ import { DEFAULT_SETTINGS, type AtlasSettings } from "../src/settings";
 import { TephraClient, type TephraRequestFn, type TephraSocketFn, type TephraSocketParams } from "../src/tephra-client";
 import { TephraConnection } from "../src/tephra-connection";
 import { UnitIndex } from "../src/unit-index";
+import { bindPromotedRoots } from "../src/promoted-roots";
+import { SourcePromoter } from "../src/source-promote";
+import { SourceLinkController } from "../src/source-link-controller";
+import { setPromotedRoots } from "../src/source-links";
 import { ViewsManager } from "../src/views";
 import { startFakeTephra } from "./fixtures/fake-tephra-server.mjs";
 import { makeSectionHarness, SectionHarness } from "./explorer-header-fixtures";
@@ -65,6 +69,11 @@ export interface SourcesRig {
 		gate: Promise<void> | null;
 	};
 	plugin: Record<string, unknown>;
+	/** PR-12: the promoter wired as `main.ts` wires it (null unless the rig was made with the `promote` option), and
+	 * what it said to the user (Notices) and asked (confirm texts, answered with `promote.answer`). */
+	promoter: SourcePromoter | null;
+	notices: string[];
+	confirms: string[];
 	/** A `graph:changed` frame on the push channel, then everything it sets going (the check, the queued render). */
 	push: () => Promise<void>;
 	/** One Tephra check (as a focus check does), then the render it queues. */
@@ -78,7 +87,17 @@ const TOKEN = "c".repeat(64);
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 export async function makeSourcesRig(
-	options: { sources?: FakeSourceRow[]; settings?: Partial<AtlasSettings>; vaultPaths?: readonly string[]; units?: Record<string, FakeListing>; down?: boolean } = {}
+	options: {
+		sources?: FakeSourceRow[];
+		settings?: Partial<AtlasSettings>;
+		vaultPaths?: readonly string[];
+		units?: Record<string, FakeListing>;
+		down?: boolean;
+		/** PR-12: the daemon's own RPC methods (`source.promote`, `source.unpromote`), as `startFakeTephra` takes them. */
+		methods?: Record<string, (params: unknown) => unknown>;
+		/** PR-12: wire the promoted-roots sync and the promoter as `main.ts` does. `answer` is what the confirm says. */
+		promote?: { vaultPath?: string; answer?: () => Promise<boolean> };
+	} = {}
 ): Promise<SourcesRig> {
 	const vaultPaths = options.vaultPaths ?? sourcesVaultPaths();
 	const app = new App();
@@ -102,7 +121,7 @@ export async function makeSourcesRig(
 		down: options.down ?? false,
 		gate: null,
 	};
-	const fake = await startFakeTephra({ port: 0, tokenFile, sources: (() => daemon.sources) as never, units: (() => daemon.units) as never });
+	const fake = await startFakeTephra({ port: 0, tokenFile, sources: (() => daemon.sources) as never, units: (() => daemon.units) as never, methods: options.methods ?? {} });
 	const request: TephraRequestFn = async ({ url, method, headers, body }) => {
 		daemon.requests.push(JSON.parse(body) as { method: string; params: unknown });
 		if (daemon.gate) await daemon.gate; // a test holds the answer (an unfinished first check)
@@ -117,6 +136,8 @@ export async function makeSourcesRig(
 	};
 	const client = new TephraClient({ request, tokenPath: () => tokenFile, openSocket });
 	const connection = new TephraConnection(client);
+	const notices: string[] = [];
+	const confirms: string[] = [];
 
 	const plugin: Record<string, unknown> = {
 		app,
@@ -135,7 +156,35 @@ export async function makeSourcesRig(
 		moduleHiddenBy: vi.fn(() => null),
 		setModuleItemHidden: vi.fn(),
 		tephraConnection: connection,
+		getVaultBasePath: () => options.promote?.vaultPath ?? "",
 	};
+	let promoter: SourcePromoter | null = null;
+	let unbindRoots: () => void = () => {};
+	let sourceLinks: SourceLinkController | null = null;
+	if (options.promote) {
+		promoter = new SourcePromoter({
+			getConnection: () => connection,
+			getVaultPath: () => options.promote?.vaultPath || null,
+			confirm: async (message) => {
+				confirms.push(message);
+				return (options.promote?.answer ?? (async () => true))();
+			},
+			notify: (message) => void notices.push(message),
+		});
+		plugin.sourcePromoter = promoter;
+		// The real link controller: the resolver and its path table, as `main.ts` builds them (G9).
+		sourceLinks = new SourceLinkController(app, () => ({ tephraEnabled: true, tephraLinkFallback: false }));
+		sourceLinks.sync();
+		plugin.sourceLinks = sourceLinks;
+		// The same subscription `main.ts` makes, ahead of the explorer's own refresh, and the same two reactions.
+		unbindRoots = bindPromotedRoots(connection, {
+			getVaultPath: () => options.promote?.vaultPath || null,
+			onChanged: () => {
+				sourceLinks?.invalidateIndex();
+				unitIndex.onSourceRootsChanged();
+			},
+		});
+	}
 	const h = makeSectionHarness({ real: plugin });
 	const explorer = h.explorer as unknown as {
 		leaf: unknown;
@@ -172,6 +221,9 @@ export async function makeSourcesRig(
 		connection,
 		daemon,
 		plugin,
+		promoter,
+		notices,
+		confirms,
 		settle,
 		check: async () => {
 			await connection.check();
@@ -185,6 +237,9 @@ export async function makeSourcesRig(
 		},
 		teardown: async () => {
 			unsubscribe();
+			unbindRoots();
+			sourceLinks?.dispose();
+			setPromotedRoots([]);
 			connection.stop();
 			await explorer.onClose().catch(() => {});
 			for (const remove of removers) remove();

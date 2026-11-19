@@ -340,6 +340,9 @@ describe("Inbox sections per Tephra source (G1)", () => {
 	// time: a timer assertion under a loaded full-suite run measured 49 ms for the same code that takes well under
 	// 1 ms alone, so it failed for reasons that had nothing to do with the code. A frame's cost here is the rows it
 	// builds (each `renderInboxRow` call is one row of DOM), and that is what is bounded.
+	// PR-12 (R4): these build 800 rows' worth of DOM several times, which takes ~1 s alone and over the default 5 s
+	// under the full suite on a loaded machine. An explicit timeout, not a looser assertion: the bounds stay as they were.
+	const SLOW_FRAME_TEST_MS = 30_000;
 	const WINDOW_ROWS = Math.ceil(300 / 28) + 1 + 2 * 8; // the harness's 300 px body, 28 px rows, 8 rows of overscan each side
 
 	/** Scrolls an N-item source end to end in 97 px frames; the rows each frame built, and the most rows ever drawn. */
@@ -376,7 +379,7 @@ describe("Inbox sections per Tephra source (G1)", () => {
 		expect(mostDrawn).toBeLessThanOrEqual(WINDOW_ROWS);
 		// the last rows are reached with no gap at the end
 		expect(rowsOf(source).join("|")).toContain("item-0799.md");
-	});
+	}, SLOW_FRAME_TEST_MS);
 
 	it("E12: a frame's work does not grow with the source - 800 items cost each frame what 80 do", async () => {
 		const small = await scrollSource(80);
@@ -384,7 +387,7 @@ describe("Inbox sections per Tephra source (G1)", () => {
 		const large = await scrollSource(800);
 		expect(Math.max(...large.perFrame)).toBeLessThanOrEqual(Math.max(...small.perFrame));
 		expect(large.mostDrawn).toBeLessThanOrEqual(small.mostDrawn);
-	});
+	}, SLOW_FRAME_TEST_MS);
 
 	it("E12: a scroll that stays inside the drawn window builds no rows", async () => {
 		const { perFrame, scrollTo } = await scrollSource(800);
@@ -395,7 +398,7 @@ describe("Inbox sections per Tephra source (G1)", () => {
 		scrollTo(2001); // one pixel: the same rows are wanted
 		expect(built.mock.calls.length).toBe(afterJump);
 		expect(perFrame.some((n) => n === 0)).toBe(true);
-	});
+	}, SLOW_FRAME_TEST_MS);
 });
 
 // PR-9 (G13/E1): Tephra isn't answering. The sections stay, headed "(Tephra offline)", with the last list the

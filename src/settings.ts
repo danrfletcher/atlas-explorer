@@ -66,6 +66,12 @@ export interface AtlasSettings {
 	 * here, and `Sources/` is Atlas's only while every entry in it is a link listed here. Read through
 	 * `normalizeTephraLinks`. */
 	tephraLinks: Record<string, string>;
+	/** PR-12 (G6/R5): the promoted sources (folders made their own source) Tephra last listed, by source name,
+	 * with the folder's vault path and absolute path. Kept so that, with Tephra down at startup, the resolver, the
+	 * `[[` popup and the Inbox still know them (`@tephrad:` links resolve; `[tephrad]` shows "(Tephra offline)"),
+	 * as `tephraLinks` does for top-level sources. Rewritten on every online source list. Not a view, a status or
+	 * a manual promotion: the views' data holds no source name. Read through `normalizeTephraPromotedRoots`. */
+	tephraPromotedRoots: Record<string, { vaultPath: string; absRoot: string }>;
 	/** G2/R3-2: the Obsidian Excluded files entries Atlas added, by source name. Toggle-off removes exactly
 	 * these and no entry the user wrote. Read through `normalizeTephraExcludes`. */
 	tephraExcludes: Record<string, string[]>;
@@ -120,6 +126,7 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	tephraSourceSettings: {},
 	tephraLinkFallback: false,
 	tephraLinks: {},
+	tephraPromotedRoots: {},
 	tephraExcludes: {},
 };
 
@@ -166,6 +173,21 @@ export function normalizeTephraLinks(raw: unknown): Record<string, string> {
 	for (const [name, target] of Object.entries(raw)) {
 		if (!isUsableSourceName(name) || typeof target !== "string" || !target.startsWith("/")) continue;
 		result[name] = target;
+	}
+	return result;
+}
+
+/** R5: `tephraPromotedRoots` from a hand-edited `data.json`. An entry survives only with a usable source name, a
+ * relative vault path with no `..`/empty segment, and an absolute path. Always a fresh object. */
+export function normalizeTephraPromotedRoots(raw: unknown): Record<string, { vaultPath: string; absRoot: string }> {
+	const result: Record<string, { vaultPath: string; absRoot: string }> = {};
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return result;
+	for (const [name, entry] of Object.entries(raw)) {
+		if (!isUsableSourceName(name) || typeof entry !== "object" || entry === null) continue;
+		const { vaultPath, absRoot } = entry as { vaultPath?: unknown; absRoot?: unknown };
+		if (typeof vaultPath !== "string" || typeof absRoot !== "string" || !absRoot.startsWith("/")) continue;
+		if (vaultPath === "" || vaultPath.startsWith("/") || vaultPath.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) continue;
+		result[name] = { vaultPath, absRoot };
 	}
 	return result;
 }

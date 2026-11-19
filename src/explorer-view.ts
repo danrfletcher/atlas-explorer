@@ -16,7 +16,10 @@ import { outsideChildMtime, resolveOutsidePath } from "./folder-source-outside";
 import { DropDecision, DropZone, resolveDropDecision, resolveDropZone } from "./drop-zones";
 import { resolveUnit } from "./unit-display";
 import { InboxSection, groupInboxSections, parseUnitList, sourceSectionKey, sourceUnitsFromEntries } from "./inbox-sections";
-import { isInSourcesFolder, skipsSourcesFolder, sourceLinkPath } from "./sources-path";
+import { isInSourcesFolder, skipsSourcesFolder } from "./sources-path";
+import { getPromotedRoots, vaultRootOfSource } from "./source-links";
+import { canReturnToParent, gapTakesDrag, type PromoteMenuState, type PromoteSurface } from "./promote-offer";
+import { addMakeOwnSourceItem, isPromoteExcluded, promoteOffer, sourceRootsOf, tephraOnlineOf } from "./promote-ui";
 import { excludeEntryMatcher } from "./source-excludes";
 import { openSourceBlock, openSourceFile } from "./source-open";
 import { TEPHRA_VAULT_SOURCE_NAME } from "./settings";
@@ -404,6 +407,12 @@ export interface ModuleContentsModalCallbacks {
 	/** PR-2 (G2): the drag is over (dropped or cancelled). Returns true when a drop zone took the item,
 	 * in which case the modal closes; false leaves it open and nothing has changed. */
 	onItemDragEnd: () => boolean;
+	/** PR-12 (G6): whether this folder is the root of a promoted source: it is shown in its own section, so the
+	 * modal leaves it out. */
+	isPromotedRoot?: (path: string) => boolean;
+	/** PR-12 (G6): the state of "Make its own source" for a folder row (null: not offered). */
+	makeOwnSourceState?: (path: string) => PromoteMenuState | null;
+	onMakeOwnSource?: (path: string) => void;
 }
 
 /** PR-2 (G2): modal-frame opacity while an item is dragged outside it (the backdrop gets the same). */
@@ -506,6 +515,7 @@ export class ModuleContentsModal extends Modal {
 	 * write, so no delayed-persist trick is needed. */
 	private renderTree(folder: TFolder, container: HTMLElement, depth: number): void {
 		for (const child of folder.children) {
+			if (child instanceof TFolder && this.callbacks.isPromotedRoot?.(child.path)) continue;
 			const row = container.createDiv({ cls: "atlas-row atlas-row-internal" });
 			const isFolder = child instanceof TFolder;
 			row.style.paddingLeft = `${depth * 16 + 16}px`;
@@ -578,6 +588,20 @@ export class ModuleContentsModal extends Modal {
 							this.close();
 						})
 				);
+				const own = isFolder ? (this.callbacks.makeOwnSourceState?.(child.path) ?? null) : null;
+				if (own !== null) {
+					menu.addItem((item) => {
+						item
+							.setTitle("Make its own source")
+							.setIcon("folder-symlink")
+							.setDisabled(own.disabled)
+							.onClick(() => {
+								this.callbacks.onMakeOwnSource?.(child.path);
+								this.close();
+							});
+						if (own.disabled) attachMenuItemTooltip(menu, item, TEPHRA_OFFLINE_TOOLTIP);
+					});
+				}
 				menu.showAtMouseEvent(evt);
 			});
 
@@ -2544,7 +2568,7 @@ export class AtlasExplorerView extends ItemView {
 			}
 			this.sourceSelectOrders.clear();
 			const inboxEls: HTMLElement[] = [];
-			for (const entry of sectionPlans) {
+			for (const [sectionIndex, entry] of sectionPlans.entries()) {
 				const isSource = entry.section.kind === "source";
 				const el = scrollBody.createDiv({ cls: isSource ? "atlas-section atlas-inbox atlas-inbox-source" : "atlas-section atlas-inbox" });
 				if (isSource && entry.section.name !== null) el.dataset.source = entry.section.name;
@@ -2554,6 +2578,8 @@ export class AtlasExplorerView extends ItemView {
 				});
 				if (!isCurrent()) return;
 				inboxEls.push(el);
+				// PR-12 (G6): the strip between two sections (none with a single section: the Inbox is then unchanged).
+				if (plan !== null && sectionIndex < sectionPlans.length - 1) this.renderSourceGap(scrollBody, view);
 			}
 			// Each section set the scroll top when it drew, and the later ones were not in the body yet: once every
 			// section is in, put it back and draw every window for the position it really has.
@@ -4149,11 +4175,12 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-9: the source sections to draw while Tephra isn't answering: the list its last good check returned, else
 	 * the names of the `Sources/<name>` links Atlas made earlier (`settings.tephraLinks`, already on disk in
-	 * `data.json`). Either way they only name sections; their status is never read. */
+	 * `data.json`) plus the promoted sources last known (`settings.tephraPromotedRoots`, seeded into memory at load). Either way they only name sections; their status is never read. */
 	private offlineSourceList(connection: TephraConnection | null): TephraSource[] {
 		const last = connection?.getLastSources?.();
 		if (last) return last;
-		const names = Object.keys((this.plugin.settings as Partial<AtlasSettings>).tephraLinks ?? {});
+		// A promoted source has no `Sources/<name>` link: its name comes from the last known promoted roots (R5).
+		const names = [...new Set([...Object.keys((this.plugin.settings as Partial<AtlasSettings>).tephraLinks ?? {}), ...getPromotedRoots().map((root) => root.name)])];
 		return names.map((name): TephraSource => ({ name, path: "", status: "offline" }));
 	}
 
@@ -4182,7 +4209,7 @@ export class AtlasExplorerView extends ItemView {
 		// source's "+" offers only what lives under its own `Sources/<name>/` (not what Tephra already lists as
 		// a top-level row, and not an ignored path).
 		const skipsSources = skipsSourcesFolder(settings, Platform.isMobile);
-		const sourceRoot = sourceName === null ? null : sourceLinkPath(sourceName);
+		const sourceRoot = sourceName === null ? null : vaultRootOfSource(sourceName);
 		const excludeMatchers = sourceName === null ? [] : (settings.tephraExcludes?.[sourceName] ?? []).map(excludeEntryMatcher).filter((m): m is (path: string) => boolean => m !== null);
 		const inScope = (path: string): boolean => {
 			if (sourceRoot !== null) {
@@ -5450,6 +5477,24 @@ export class AtlasExplorerView extends ItemView {
 		if (sourceName !== null && this.tephraSectionsOn()) {
 			menu.addSeparator();
 			const offline = this.plugin.tephraConnection?.getSnapshot().state !== "online";
+			// PR-12 (G6, E10): only a promoted source's header; the vault's and a top-level source's never have it.
+			const roots = sourceRootsOf(this.plugin);
+			if (canReturnToParent(sourceName, roots)) {
+				menu.addItem((item) => {
+					item
+						.setTitle("Return to parent")
+						.setIcon("undo-2")
+						.setDisabled(offline)
+						.onClick(() => void this.plugin.sourcePromoter.returnToParent(sourceName));
+					if (offline) attachMenuItemTooltip(menu, item, TEPHRA_OFFLINE_TOOLTIP);
+				});
+			}
+			// A promoted source has no `Sources/<name>` link, so Rename (which swaps that link) and Remove (which
+			// unlinks it) are not offered on it: it goes back to its parent instead.
+			if (roots.some((root) => root.name === sourceName && root.parent !== null)) {
+				menu.showAtMouseEvent(evt);
+				return;
+			}
 			menu.addItem((item) => {
 				item
 					.setTitle("Rename")
@@ -5466,6 +5511,45 @@ export class AtlasExplorerView extends ItemView {
 			);
 		}
 		menu.showAtMouseEvent(evt);
+	}
+
+	// --- PR-12 (G6): Make its own source / Return to parent ------------------------------------------
+
+	/** The one folder a drag could make a source: a single Inbox row or Module Contents item that is a folder
+	 * offered by `canMakeOwnSource`, with Tephra answering. A multi-item drag, a file, a header or a View row: null. */
+	private promotableDrag(): string | null {
+		const payload = this.dragPayload;
+		if (payload === null || (payload.kind !== "inbox" && payload.kind !== "module-item")) return null;
+		const refs = payload.kind === "inbox" ? payload.refs : [payload.ref];
+		const surface: PromoteSurface = payload.kind === "inbox" ? "inbox" : "module-contents";
+		const rows = refs.map((ref) => ({ kind: ref.kind === "folder" ? ("folder" as const) : ("file" as const), path: ref.path, surface }));
+		const row = gapTakesDrag({ rows }, { roots: sourceRootsOf(this.plugin), isExcluded: (p) => isPromoteExcluded(this.plugin, p) }, tephraOnlineOf(this.plugin));
+		if (row === null || promoteOffer(this.plugin, row.path, surface) === null) return null;
+		return row.path;
+	}
+
+	/** The strip between Inbox sections that takes a folder drag. It only reacts to a drag `promotableDrag` accepts:
+	 * any other drag, a header, a multi-item drag, never highlights it and does nothing on a drop. */
+	private renderSourceGap(parent: HTMLElement, view: View): void {
+		const gap = parent.createDiv({ cls: "atlas-inbox-gap" });
+		gap.dataset.viewId = view.id;
+		gap.addEventListener("dragover", (evt) => {
+			if (this.promotableDrag() === null) return; // no preventDefault: the drop is refused
+			evt.preventDefault();
+			gap.addClass("atlas-drop-target");
+		});
+		gap.addEventListener("dragleave", () => gap.removeClass("atlas-drop-target"));
+		gap.addEventListener("drop", (evt) => {
+			gap.removeClass("atlas-drop-target");
+			const path = this.promotableDrag();
+			if (path === null) return;
+			evt.preventDefault();
+			evt.stopPropagation();
+			const dragged = this.dragPayload;
+			this.dragPayload = null;
+			if (dragged?.kind === "module-item") this.moduleDragCommitted = true; // the modal closes; the confirm is the next step
+			void this.plugin.sourcePromoter.makeOwnSource(path);
+		});
 	}
 
 	/** PR-5 (G3): the vault Inbox's "+" with the Tephra toggle on. "Add file…" is today's modal, unchanged. */
@@ -5498,6 +5582,7 @@ export class AtlasExplorerView extends ItemView {
 			}
 		}
 		menu.addItem((item) => item.setTitle("Copy link").setIcon("link").onClick(() => void this.copyLink(ref)));
+		if (ref.kind === "folder") addMakeOwnSourceItem(menu, this.plugin, ref.path, "inbox");
 		menu.addSeparator();
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
 		// PR-4 (G4-G6): the only removal mechanism for any inbox row, auto-promoted or manually-added
@@ -5833,6 +5918,9 @@ export class AtlasExplorerView extends ItemView {
 			onPromoteToInbox: (path, isFolder) => this.promoteToInbox(path, isFolder),
 			onItemDragStart: (path, isFolder) => this.startModuleItemDrag(path, isFolder),
 			onItemDragEnd: () => this.endModuleItemDrag(),
+			isPromotedRoot: (path) => getPromotedRoots().some((root) => root.vaultPath === path),
+			makeOwnSourceState: (path) => promoteOffer(this.plugin, path, "module-contents"),
+			onMakeOwnSource: (path) => void this.plugin.sourcePromoter.makeOwnSource(path),
 		};
 	}
 

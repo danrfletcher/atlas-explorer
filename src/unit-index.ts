@@ -4,7 +4,7 @@ import { isInSourcesFolder, skipsSourcesFolder, SOURCES_FOLDER } from "./sources
 import { excludeEntryMatcher } from "./source-excludes";
 import { computeSourcePromotions, ResolvedLink, sourceModuleOf } from "./source-promotion";
 import { isIndexedNote, isListedTephraSource, parseTephraId, TephraEdge, TephraPath } from "./tephra-backlinks";
-import { NOTES_SOURCE } from "./source-links";
+import { getPromotedRoots, NOTES_SOURCE } from "./source-links";
 import { owningSourceName } from "./inbox-sections";
 import { AddedItem, DismissScope, Unit, UnitRef, rewritePathString, rewriteRefPath, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 
@@ -510,6 +510,23 @@ export class UnitIndex {
 		return isInSourcesFolder(path) && this.skipsSources();
 	}
 
+	/** PR-12 (G6, R2): `path` is inside a promoted source's folder that lies in the vault proper (`Projects/Atlas`
+	 * made `[atlas]`), not under `Sources/`. Such a folder is its own source: the pop-out rule reads it by the
+	 * per-source rule, as it does a `Sources/<name>/…` path. A promoted folder under `Sources/` is already covered
+	 * by `isExcludedBySources`. Always false with the Tephra toggle off (no promoted roots are shown then). */
+	private isInPromotedVaultFolder(path: string): boolean {
+		if (!this.skipsSources()) return false;
+		for (const root of getPromotedRoots()) {
+			if (!isInSourcesFolder(root.vaultPath) && (path === root.vaultPath || path.startsWith(`${root.vaultPath}/`))) return true;
+		}
+		return false;
+	}
+
+	/** A path the per-source pop-out rule owns: under `Sources/`, or inside a promoted vault folder (R2). */
+	private isSourcePath(path: string): boolean {
+		return this.isExcludedBySources(path) || this.isInPromotedVaultFolder(path);
+	}
+
 	/** A path (folder or file) is excluded unless it's inside the pool folder — the pool folder
 	 * itself is excluded from being a folder-unit, but its contents are never excluded as files.
 	 * `Sources/` is excluded as a whole while the Tephra toggle is on (R3-1). */
@@ -531,7 +548,7 @@ export class UnitIndex {
 	 * `Sources/<name>/<top>` for the longest listed source root, and a file at a source's root (or under no
 	 * listed source) has none. */
 	private topLevelFolderFor(path: string): string | null {
-		if (this.isExcludedBySources(path)) return path === SOURCES_FOLDER ? null : sourceModuleOf(path, this.sourceNamesInVault());
+		if (this.isSourcePath(path)) return path === SOURCES_FOLDER ? null : sourceModuleOf(path, this.sourceNamesInVault());
 		const slash = path.indexOf("/");
 		if (slash === -1) return null;
 		const top = path.slice(0, slash);
@@ -600,8 +617,8 @@ export class UnitIndex {
 		// `#Heading`) promotes only the block, never its containing file — a link to one paragraph
 		// isn't a link to the whole note. Only a subpath-less reference can promote the file/folder.
 		for (const file of this.app.vault.getMarkdownFiles()) {
-			if (this.isExcludedBySources(file.path)) {
-				// R3-1: nothing under `Sources/` promotes into or out of the vault's own units. Its links are
+			if (this.isSourcePath(file.path)) {
+				// R3-1: nothing under `Sources/` (or inside a promoted vault folder, R2) promotes into or out of the vault's own units. Its links are
 				// read for the per-source pop-out rule instead (`computeSourcePromotions` below).
 				this.collectSourceLinks(file, sourceLinks);
 				continue;
@@ -618,7 +635,7 @@ export class UnitIndex {
 				const subpath = hashIndex === -1 ? "" : ref.link.slice(hashIndex + 1);
 				const destPath = linkpath ? this.app.metadataCache.getFirstLinkpathDest(linkpath, file.path)?.path : file.path;
 				if (!destPath || destPath === file.path) continue; // unresolved, or "from another file" fails
-				if (this.isExcludedBySources(destPath)) {
+				if (this.isSourcePath(destPath)) {
 					// PR-8 (G12): a vault note's link into a source is a link from outside it; the vault section
 					// itself never changes (R3-1). This file already passed the vault-side exclusions above.
 					sourceLinks.push({ from: file.path, to: destPath, subpath });
@@ -691,11 +708,14 @@ export class UnitIndex {
 		}
 	}
 
-	/** The Tephra sources as the vault shows them: one folder link per source, directly under `Sources/`. */
+	/** The Tephra sources as the vault shows them: one folder link per top-level source, directly under `Sources/`,
+	 * and each promoted source (a folder inside another source's, or the vault's). */
 	private sourceNamesInVault(): string[] {
+		// PR-12 (G6): a promoted source has no folder of its own under `Sources/`; its root is a folder inside its parent's.
+		const promoted = getPromotedRoots().map((root) => root.name);
 		const folder = this.app.vault.getAbstractFileByPath(SOURCES_FOLDER);
-		if (!(folder instanceof TFolder)) return [];
-		return folder.children.filter((child) => child instanceof TFolder).map((child) => child.name);
+		if (!(folder instanceof TFolder)) return promoted;
+		return [...folder.children.filter((child) => child instanceof TFolder).map((child) => child.name), ...promoted.filter((name) => !folder.children.some((child) => child.name === name))];
 	}
 
 	/** PR-8 (G12): replaces Tephra's last answer for non-note links (see `tephraLinks`) and recomputes the
@@ -728,6 +748,12 @@ export class UnitIndex {
 		const before = [...this.sourcePromoted.keys()].sort().join("\0");
 		this.computePromotions();
 		return before !== [...this.sourcePromoted.keys()].sort().join("\0");
+	}
+
+	/** PR-12 (G6): the promoted roots changed (a promote, a return, Tephra's list). The sources a linked file lies in
+	 * are read from them, so the promotions are computed again. True when the promoted set changed. */
+	onSourceRootsChanged(): boolean {
+		return this.recomputeSourcePromotions(); // `computePromotions` tells the listeners itself
 	}
 
 	/** Forgets Tephra's answer (the toggle went off). A no-op when there is none. True when the promoted set changed. */

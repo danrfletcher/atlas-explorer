@@ -1265,3 +1265,18 @@ input.atlas-name-input.atlas-name-invalid[type="text"]:not(:disabled) {
 	color: var(--text-faint);
 	font-size: var(--font-ui-small);
 }
+
+/* PR-12 (G6): the strip between Inbox sections that takes a folder drag ("Make its own source"). Thin and
+ * invisible until a promotable folder is dragged over it; scoped to its own class, never `.atlas-row-text`. */
+.atlas-inbox-gap {
+	height: 10px;
+	margin: 0 8px;
+	border-radius: 4px;
+	border: 1px dashed transparent;
+}
+
+.atlas-inbox-gap.atlas-drop-target {
+	height: 22px;
+	border-color: var(--interactive-accent);
+	background-color: var(--background-modifier-hover);
+}

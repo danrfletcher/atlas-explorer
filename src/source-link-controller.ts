@@ -43,6 +43,11 @@ export class SourceLinkController {
 		return this.mode === "fallback";
 	}
 
+	/** PR-12 (G6): the promoted roots changed, so what the resolver indexed under each source is stale. */
+	invalidateIndex(): void {
+		this.hook.invalidate();
+	}
+
 	/** Reads the settings and installs or removes the hook / vault listeners to match. Idempotent. */
 	sync(): void {
 		const previous = this.mode;

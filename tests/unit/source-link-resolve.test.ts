@@ -21,6 +21,7 @@ describe("the fixture vault is what the spec lists", () => {
 			"Sources/tephra/Cargo.toml",
 			"Sources/tephra/README.md",
 			"Sources/tephra/crates/tephrad/src/registry.rs",
+			"Sources/tephra/crates/tephrad/src/scan.rs",
 			"Sources/tephra/docs/guide.md",
 			"Sources/tephra/scripts/build.sh",
 			"Sources/whoop/Leg Day.md",

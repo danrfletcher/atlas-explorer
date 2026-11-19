@@ -71,9 +71,57 @@ export function parseSourceLink(linktext: unknown): ParsedSourceLink | null {
  * `Sources.md`, the bare `Sources/` folder, a file directly under `Sources/` and a differently-cased
  * `sources/…` are all `notes`. The name keeps the case it has in the path.
  */
-export function ownSourceOf(path: string): string {
+export function ownSourceOf(path: string, promoted: readonly PromotedRootLike[] = getPromotedRoots()): string {
+	return locateInSource(path, promoted).source;
+}
+
+let currentPromotedRoots: readonly PromotedRootLike[] = [];
+
+/**
+ * PR-12 (G6): the promoted sources' roots, as Tephra's source list last gave them (the plugin sets them on every
+ * check). Every function here that decides "which source is this path in" reads them, so a path inside
+ * `Sources/tephra/crates/tephrad` is in `tephrad` for the resolver, the `[[` popup, the link text and Backlinks
+ * alike. Empty by default and after `setPromotedRoots([])`: then all of this is the plain `Sources/<name>` rule.
+ * Held in memory; the plugin seeds them at load from `settings.tephraPromotedRoots` (the last list Tephra gave) so they stand while Tephra is down (R5).
+ */
+export function setPromotedRoots(roots: readonly PromotedRootLike[]): void {
+	currentPromotedRoots = roots;
+}
+
+export function getPromotedRoots(): readonly PromotedRootLike[] {
+	return currentPromotedRoots;
+}
+
+/** The vault path of `name`'s root: a promoted source's folder, else the `Sources/<name>` link. */
+export function vaultRootOfSource(name: string, promoted: readonly PromotedRootLike[] = getPromotedRoots()): string {
+	return promoted.find((root) => root.name === name)?.vaultPath ?? `${SOURCES_FOLDER}/${name}`;
+}
+
+/** A promoted source's root, as the resolver needs it (`PromotedRoot` in `source-roots.ts` has the same shape). */
+export interface PromotedRootLike {
+	name: string;
+	/** The folder's vault path, e.g. `Sources/tephra/crates/tephrad` or `Projects/Atlas`. */
+	vaultPath: string;
+	/** The folder's absolute path on disk, when known (the delete classifier probes it). */
+	absRoot?: string;
+}
+
+/**
+ * PR-12 (G6): the source `path` is in and its path relative to that source's root. Own source = the longest
+ * matching root: a promoted source's folder beats the `Sources/<name>` it lies in (or the vault), whole path
+ * segments only (`crates/tephrad2` is not inside `crates/tephrad`). With no promoted roots this is exactly the
+ * `Sources/<name>/…` / `notes` rule above. `rel` is `""` for the root folder itself.
+ */
+export function locateInSource(path: string, promoted: readonly PromotedRootLike[] = getPromotedRoots()): { source: string; rel: string } {
+	let best: PromotedRootLike | null = null;
+	for (const root of promoted) {
+		if (typeof path !== "string" || (path !== root.vaultPath && !path.startsWith(`${root.vaultPath}/`))) continue;
+		if (best === null || root.vaultPath.length > best.vaultPath.length) best = root;
+	}
+	if (best !== null) return { source: best.name, rel: path === best.vaultPath ? "" : path.slice(best.vaultPath.length + 1) };
 	const name = sourceFolderName(path);
-	return name === null ? NOTES_SOURCE : name;
+	if (name === null || name.toLowerCase() === NOTES_SOURCE) return { source: NOTES_SOURCE, rel: path };
+	return { source: name, rel: path.slice(SOURCES_FOLDER.length + 1 + name.length + 1) };
 }
 
 /** `<name>` for a path inside `Sources/<name>/`, else null. */
@@ -112,7 +160,12 @@ export interface PathFile {
 export class SourceFileIndex<T extends PathFile> {
 	private bySource: Map<string, Map<string, IndexedFile<T>[]>> | null = null;
 
-	constructor(private listFiles: () => readonly T[]) {}
+	constructor(private listFiles: () => readonly T[], private getPromoted: () => readonly PromotedRootLike[] = getPromotedRoots) {}
+
+	/** The source `path` is in and its path inside it, by the same roots this index was built with. */
+	locate(path: string): { source: string; rel: string } {
+		return locateInSource(path, this.getPromoted());
+	}
 
 	invalidate(): void {
 		this.bySource = null;
@@ -130,14 +183,16 @@ export class SourceFileIndex<T extends PathFile> {
 
 	private build(): Map<string, Map<string, IndexedFile<T>[]>> {
 		const result = new Map<string, Map<string, IndexedFile<T>[]>>();
+		const promoted = this.getPromoted();
 		for (const file of this.listFiles()) {
 			const path = file.path;
-			const folder = sourceFolderName(path);
+			const located = locateInSource(path, promoted);
 			let key: string;
 			let rel: string;
-			if (folder !== null && folder.toLowerCase() !== NOTES_SOURCE) {
-				key = folder.toLowerCase();
-				rel = path.slice(SOURCES_FOLDER.length + 1 + folder.length + 1);
+			if (located.source !== NOTES_SOURCE) {
+				key = located.source.toLowerCase();
+				rel = located.rel;
+				if (rel === "") continue; // a promoted root folder itself is no file
 			} else if (isUnderSourcesFolder(path)) {
 				continue; // Sources/notes/…, Sources/<bad name>/…, Sources/x.md: in no source
 			} else {
@@ -255,9 +310,7 @@ export function resolveSourceLink<T extends PathFile>(index: SourceFileIndex<T>,
  * null. `sourcePath` is the linking file's vault path.
  */
 export function resolvePlainLinkInOwnSource<T extends PathFile>(index: SourceFileIndex<T>, linkpath: string, sourcePath: string): T | null {
-	const source = ownSourceOf(sourcePath);
-	const folder = sourceFolderName(sourcePath);
-	const rel = folder !== null && folder.toLowerCase() !== NOTES_SOURCE ? sourcePath.slice(SOURCES_FOLDER.length + 1 + folder.length + 1) : sourcePath;
+	const { source, rel } = index.locate(sourcePath);
 	return matchPlainLink(index, source, linkpath, dirName(rel))[0] ?? null;
 }
 

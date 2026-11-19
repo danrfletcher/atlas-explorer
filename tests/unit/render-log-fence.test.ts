@@ -57,6 +57,7 @@ describe("F7: no setting, no UI beyond the command, no off switch", () => {
 				"tephraSourceSettings", // atlas-22 PR-2: per-source "Show in Obsidian search & graph"
 				"tephraLinkFallback", // atlas-22 PR-1: internal, forces the Q13 fallback for the live spike
 				"tephraLinks", // atlas-22 PR-3: the Sources/<name> links Atlas made (ownership record)
+				"tephraPromotedRoots", // atlas-22 PR-12 (R5): the promoted sources Tephra last listed, for a start with Tephra down
 				"tephraExcludes", // atlas-22 PR-3: the Excluded files entries Atlas added
 			].sort()
 		);

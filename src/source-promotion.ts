@@ -1,5 +1,6 @@
 import { owningSourceName } from "./inbox-sections";
-import { isInSourcesFolder, sourceLinkPath } from "./sources-path";
+import { vaultRootOfSource } from "./source-links";
+import { isInSourcesFolder } from "./sources-path";
 import { Unit } from "./types";
 
 /** One resolved link, embed or frontmatter link, as the unit index reads it from Obsidian's metadata cache, or
@@ -40,7 +41,7 @@ export function sourceModuleOf(path: string, sourceNames: readonly string[]): st
 
 /** `sourceModuleOf` once the owning source `name` is known. */
 function moduleWithin(path: string, name: string): string | null {
-	const root = sourceLinkPath(name);
+	const root = vaultRootOfSource(name);
 	if (path.length <= root.length) return null;
 	const rest = path.slice(root.length + 1);
 	const slash = rest.indexOf("/");
