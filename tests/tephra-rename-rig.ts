@@ -2,7 +2,7 @@
  * to a real `TephraRenameForwarder` over a real on-disk queue file, a real `TephraClient` and `TephraConnection` (the PR-9
  * online/offline state machine) talking HTTP to a stub JSON-RPC server on 127.0.0.1 behind a bearer token. Stand-ins: Obsidian
  * (the shared mock vault) and the daemon (`tests/fixtures/fake-tephra-server.mjs` with a `link.rename_event` method of this
- * rig's own: Tephra part 2 is not on Tephra's `dev` branch yet). Not a `*.test.ts` file, so vitest's glob skips it. */
+ * rig's own; the real `tephrad` is exercised in the Obsidian container). Not a `*.test.ts` file, so vitest's glob skips it. */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,8 @@ import { ViewsManager } from "../src/views";
 import { startFakeTephra } from "./fixtures/fake-tephra-server.mjs";
 
 const TOKEN = "d".repeat(64);
+/** The vault's folder on disk as the rig's plugin reports it: Tephra is sent absolute paths under it. */
+export const RIG_VAULT_ROOT = "/Users/dan/Vault";
 
 export interface RenameRig {
 	app: App;
@@ -118,7 +120,10 @@ export async function makeRenameRig(options: RenameRigOptions = {}): Promise<Ren
 		const response = await fetch(url.replace(":4812", `:${fake.port}`), { method, headers, body });
 		const text = await response.text();
 		if (parsed.method === TEPHRA_RENAME_METHOD && parsed.params) {
-			daemon.renames.push({ old_path: parsed.params.old_path, new_path: parsed.params.new_path, authorization });
+			// Tephra gets absolute paths: check that, then record the vault path they carry (the exact vault path).
+			const { old_path, new_path } = parsed.params;
+			if (!old_path.startsWith(`${RIG_VAULT_ROOT}/`) || !new_path.startsWith(`${RIG_VAULT_ROOT}/`)) throw new Error(`rename event sent a non-absolute path: ${old_path} -> ${new_path}`);
+			daemon.renames.push({ old_path: old_path.slice(RIG_VAULT_ROOT.length + 1), new_path: new_path.slice(RIG_VAULT_ROOT.length + 1), authorization });
 			if (daemon.downAfterRenames !== null && daemon.renames.length >= daemon.downAfterRenames) daemon.down = true;
 		}
 		return { status: response.status, text } as Awaited<ReturnType<TephraRequestFn>>;
@@ -136,6 +141,7 @@ export async function makeRenameRig(options: RenameRigOptions = {}): Promise<Ren
 			now: () => Date.now(),
 			isActive: () => plugin.tephraActive(),
 			getConnection: () => connection,
+			getVaultRoot: () => RIG_VAULT_ROOT,
 			notify: (message) => void notices.push(message),
 			log: () => {},
 		});

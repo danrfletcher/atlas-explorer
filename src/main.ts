@@ -334,6 +334,7 @@ export default class AtlasPlugin extends Plugin {
 			now: () => Date.now(),
 			isActive: tephraOn,
 			getConnection: () => this.tephraConnection,
+			getVaultRoot: () => this.getVaultBasePath() || null,
 			notify: (message) => void new Notice(message, 10_000),
 			log: (message, detail) => console.warn(message, detail ?? ""),
 		});

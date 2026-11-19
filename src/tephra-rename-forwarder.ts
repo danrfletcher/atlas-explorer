@@ -2,16 +2,23 @@ import type { TephraCallResult } from "./tephra-client";
 import type { QueuedRename, TephraRenameQueue } from "./tephra-rename-queue";
 
 /**
- * Tephra part 2's rename-event intake. Part 2 is not on Tephra's `dev` branch yet, so this is the contract Atlas
- * sends and part 2 has to meet; both names are in this one place so a different wire shape is a one-line change:
- * a JSON-RPC call `link.rename_event` with `{ old_path, new_path }`, the exact vault-relative paths Obsidian
- * reported (a path under `Sources/<name>/…` is a vault path; Tephra maps it to its source). A JSON-RPC result
- * is the acknowledgement; the error "file changed, try again" is Tephra's stale-file refusal (E7).
+ * Tephra part 2's rename-event intake (`link.rename_event`, on Tephra's `dev`): `{ old_path, new_path }`, two
+ * ABSOLUTE paths on disk. Tephra refuses a relative one (`invalid_params`), so Atlas queues the exact vault paths
+ * Obsidian reported and prefixes the vault's folder on the way out (`toAbsolutePath`); Tephra resolves the symlink in
+ * `Sources/<name>/…` and maps the path to its source by the longest root. A JSON-RPC result is the acknowledgement:
+ * `applied`, `partial` (some files left for a retry or a person: Tephra keeps them in its pending fixes, so Atlas drops
+ * the entry and tells the user), `already_applied` or `nothing_to_fix`. An error reply means Tephra refused. The error
+ * "file changed, try again" is the stale-file refusal (E7), kept for a Tephra that answers it that way.
  */
 export const TEPHRA_RENAME_METHOD = "link.rename_event";
 
 /** Tephra's own wording for a file that changed between reading it and rewriting it (E7). Matched case-insensitively. */
 export const TEPHRA_STALE_MESSAGE = "file changed, try again";
+
+/** The path Tephra is sent: the vault's own folder (absolute, no trailing slash) plus the vault path, byte for byte. */
+export function toAbsolutePath(vaultRoot: string, vaultPath: string): string {
+	return `${vaultRoot.replace(/[\\/]+$/, "")}/${vaultPath}`;
+}
 
 /** JSON-RPC "method not found": a Tephra without part 2. The queue then waits, whole, for a Tephra that has it. */
 const METHOD_NOT_FOUND = -32601;
@@ -44,6 +51,8 @@ export interface RenameForwarderDeps {
 	isActive(): boolean;
 	/** The live Tephra connection, or null (toggle off). */
 	getConnection(): RenameCaller | null;
+	/** The vault's absolute folder on disk, or null when the vault isn't on a filesystem (nothing can be sent then). */
+	getVaultRoot(): string | null;
 	/** A Notice. */
 	notify(message: string): void;
 	log(message: string, detail?: unknown): void;
@@ -226,13 +235,18 @@ export class TephraRenameForwarder {
 	}
 
 	private async send(connection: RenameCaller, entry: QueuedRename): Promise<SendOutcome> {
+		const root = this.deps.getVaultRoot();
+		if (!root) return "unreachable"; // no folder to anchor the paths: the entry stays queued
 		let result: TephraCallResult;
 		try {
-			result = await connection.call(TEPHRA_RENAME_METHOD, { old_path: entry.oldPath, new_path: entry.newPath });
+			result = await connection.call(TEPHRA_RENAME_METHOD, { old_path: toAbsolutePath(root, entry.oldPath), new_path: toAbsolutePath(root, entry.newPath) });
 		} catch {
 			return "unreachable";
 		}
-		if (result.ok) return "ack";
+		if (result.ok) {
+			this.noticePartial(entry, result.result);
+			return "ack";
+		}
 		const { error } = result;
 		if (error.kind !== "rpc") return "unreachable"; // no token, timeout, network, HTTP, bad body: Tephra gave no answer
 		if (error.message.toLowerCase().includes(TEPHRA_STALE_MESSAGE)) return "stale";
@@ -254,6 +268,18 @@ export class TephraRenameForwarder {
 			this.noticed.add(entry.seq);
 			this.deps.notify(`Atlas: "${entry.newPath}" changed while Tephra was updating the links to it. Trying again.`);
 		}
+	}
+
+	/** A `partial` answer: Tephra rewrote some linking files and kept the rest in its pending fixes. Atlas rewrites nothing. */
+	private noticePartial(entry: QueuedRename, reply: unknown): void {
+		if (typeof reply !== "object" || reply === null || (reply as { status?: unknown }).status !== "partial") return;
+		const deferred = (reply as { deferred?: unknown }).deferred;
+		const files = Array.isArray(deferred)
+			? deferred.map((d) => (typeof d === "object" && d !== null ? (d as { file?: unknown }).file : undefined)).filter((f): f is string => typeof f === "string")
+			: [];
+		this.deps.log(`[Atlas] Tephra followed ${entry.oldPath} -> ${entry.newPath} only in part`, deferred);
+		const named = files.length > 0 ? `: ${files.slice(0, 3).join(", ")}${files.length > 3 ? ` and ${files.length - 3} more` : ""}` : "";
+		this.deps.notify(`Atlas: Tephra couldn't update every link to "${entry.newPath}" yet${named}. It keeps those links to retry; they were left as they are.`);
 	}
 
 	private noticeUnsupported(): void {

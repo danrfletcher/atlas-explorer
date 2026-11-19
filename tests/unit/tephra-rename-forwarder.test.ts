@@ -65,20 +65,25 @@ const OK: TephraCallResult = { ok: true, result: null };
 const rpcError = (message: string, code = -32000): TephraCallResult => ({ ok: false, error: { kind: "rpc", message, code } });
 const NETWORK: TephraCallResult = { ok: false, error: { kind: "network", message: "Tephra is unreachable" } };
 const STALE = rpcError("file changed, try again");
+const ROOT = "/Users/dan/Vault";
 
 function rig(options: { online?: boolean; active?: boolean; storage?: MemoryStorage } = {}) {
 	const clock = new FakeClock();
 	const storage = options.storage ?? new MemoryStorage();
-	const state = { online: options.online ?? true, active: options.active ?? true, connected: true };
-	/** What Tephra receives, in order, whatever it answers. */
+	const state = { online: options.online ?? true, active: options.active ?? true, connected: true, root: ROOT as string | null };
+	/** What Tephra receives, in order, whatever it answers, with the vault's folder taken off (the exact vault paths). */
 	const sent: Array<{ old_path: string; new_path: string }> = [];
+	/** The same calls as they went over the wire. */
+	const wire: Array<{ old_path: string; new_path: string }> = [];
 	const replies: Reply[] = [];
 	let hang: (() => void) | null = null;
 	const caller: RenameCaller = {
 		isOnline: () => state.online,
 		async call(method, params) {
 			expect(method).toBe(TEPHRA_RENAME_METHOD);
-			sent.push(params as { old_path: string; new_path: string });
+			const p = params as { old_path: string; new_path: string };
+			wire.push(p);
+			sent.push({ old_path: p.old_path.replace(`${ROOT}/`, ""), new_path: p.new_path.replace(`${ROOT}/`, "") });
 			const reply = replies.shift() ?? OK;
 			if (reply === "throw") throw new Error("boom");
 			if (reply === "hang") await new Promise<void>((resolve) => (hang = resolve));
@@ -94,6 +99,7 @@ function rig(options: { online?: boolean; active?: boolean; storage?: MemoryStor
 			now: () => clock.now,
 			isActive: () => state.active,
 			getConnection: () => (state.connected ? caller : null),
+			getVaultRoot: () => state.root,
 			notify: (m) => void notices.push(m),
 			log: (m) => void logs.push(m),
 		});
@@ -105,6 +111,7 @@ function rig(options: { online?: boolean; active?: boolean; storage?: MemoryStor
 		storage,
 		state,
 		sent,
+		wire,
 		replies,
 		notices,
 		logs,
@@ -127,6 +134,61 @@ describe("sending", () => {
 		expect(r.sent).toEqual([{ old_path: "Sources/whoop/Workout Plan.md", new_path: "Sources/whoop/Training Plan.md" }]);
 		expect(r.queued()).toEqual([]);
 		expect(r.storage.files.get("/q.json")).toContain('"entries":[]');
+	});
+
+	it("Tephra is sent absolute paths (the vault's folder plus the exact vault path), while the queue keeps the vault paths", async () => {
+		const r = rig();
+		await r.rename("Sources/whoop/Workout Plan.md", "Sources/whoop/Training Plan.md");
+		expect(r.wire).toEqual([{ old_path: `${ROOT}/Sources/whoop/Workout Plan.md`, new_path: `${ROOT}/Sources/whoop/Training Plan.md` }]);
+		const held = rig({ online: false });
+		await held.rename("Sources/whoop/a #1 [x] ^y é.md", "b.md");
+		expect(held.queued()).toEqual([["Sources/whoop/a #1 [x] ^y é.md", "b.md"]]); // never rewritten to absolute on disk
+	});
+
+	it("a vault folder with a trailing slash still gives one slash", async () => {
+		const r = rig();
+		r.state.root = `${ROOT}/`;
+		await r.rename("a.md", "b.md");
+		expect(r.wire).toEqual([{ old_path: `${ROOT}/a.md`, new_path: `${ROOT}/b.md` }]);
+	});
+
+	it("with no vault folder to anchor the paths nothing is sent and the entry stays queued, with no Notice", async () => {
+		const r = rig();
+		r.state.root = null;
+		await r.rename("a.md", "b.md");
+		expect(r.wire).toEqual([]);
+		expect(r.queued()).toEqual([["a.md", "b.md"]]);
+		expect(r.notices).toEqual([]);
+		r.state.root = ROOT;
+		r.forwarder.kick();
+		await r.clock.advance(RENAME_COALESCE_MS);
+		expect(r.wire).toHaveLength(1);
+		expect(r.queued()).toEqual([]);
+	});
+
+	it.each([
+		["applied", { status: "applied", files_changed: 3 }],
+		["already_applied", { status: "already_applied" }],
+		["nothing_to_fix", { status: "nothing_to_fix" }],
+	])("Tephra's `%s` answer is an acknowledgement with no Notice", async (_name, result) => {
+		const r = rig();
+		r.replies.push({ ok: true, result });
+		await r.rename("a.md", "b.md");
+		expect(r.queued()).toEqual([]);
+		expect(r.notices).toEqual([]);
+	});
+
+	it("a `partial` answer acknowledges the entry and tells the user which files Tephra kept for a retry", async () => {
+		const r = rig();
+		r.replies.push({ ok: true, result: { status: "partial", files_changed: 1, deferred: [{ file: "Weekly Review.md", reason: "pending" }] } });
+		r.replies.push(OK);
+		await r.rename("a.md", "b.md");
+		await r.rename("c.md", "d.md");
+		expect(r.queued()).toEqual([]); // Tephra holds the leftovers in its pending fixes
+		expect(r.sent.map((s) => s.old_path)).toEqual(["a.md", "c.md"]);
+		expect(r.notices).toHaveLength(1);
+		expect(r.notices[0]).toContain("Weekly Review.md");
+		expect(r.notices[0]).toContain('"b.md"');
 	});
 
 	it("record() writes the queue before it returns, ahead of any send", () => {
