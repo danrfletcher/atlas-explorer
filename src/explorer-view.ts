@@ -22,6 +22,7 @@ import { openSourceBlock, openSourceFile } from "./source-open";
 import { TEPHRA_VAULT_SOURCE_NAME } from "./settings";
 import { isUsableSourceName, type TephraSource } from "./tephra-client";
 import type { TephraConnection } from "./tephra-connection";
+import { TEPHRA_OFFLINE_TOOLTIP, attachMenuItemTooltip } from "./menu-item-tooltip";
 import { attachLongPress } from "./long-press";
 import { pointOutsideRect } from "./module-contents-drag";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
@@ -1598,6 +1599,13 @@ export class AtlasExplorerView extends ItemView {
 	 * Inbox sections may have. Queued like any other change: no full reload, and the scroll position is kept. */
 	refreshForTephra(): void {
 		withRenderCause("other", () => this.queueRender());
+	}
+
+	/** PR-11 (G4): a source was renamed. Its section's collapsed state follows the name (it is per pane and never
+	 * persisted, so nothing else moves here), then the Inbox is re-rendered: the section reads `[<new>]` in its A-Z place. */
+	renameSourceSection(oldName: string, newName: string): void {
+		if (this.collapsedSources.delete(oldName)) this.collapsedSources.add(newName);
+		this.refreshForTephra();
 	}
 
 	/** PR-7 (G21): called from `main.ts`'s vault `"modify"` listener on every file save — refreshes
@@ -5436,10 +5444,20 @@ export class AtlasExplorerView extends ItemView {
 					void this.render();
 				})
 		);
-		// PR-5 (G5): a Tephra source's header adds Remove (Rename is PR-11). The vault's header never does, and
-		// with the Tephra toggle off there are no source headers, so nothing here is reachable.
+		// PR-5 (G5), PR-11 (G4): a Tephra source's header adds Rename and Remove. The vault's header never does, and
+		// with the Tephra toggle off there are no source headers, so nothing here is reachable. Rename is disabled
+		// while Tephra is offline (G13/E1) and says why on hover; it is never queued.
 		if (sourceName !== null && this.tephraSectionsOn()) {
 			menu.addSeparator();
+			const offline = this.plugin.tephraConnection?.getSnapshot().state !== "online";
+			menu.addItem((item) => {
+				item
+					.setTitle("Rename")
+					.setIcon("pencil")
+					.setDisabled(offline)
+					.onClick(() => void this.plugin.sourceRenamer.rename(sourceName));
+				if (offline) attachMenuItemTooltip(menu, item, TEPHRA_OFFLINE_TOOLTIP);
+			});
 			menu.addItem((item) =>
 				item
 					.setTitle("Remove")

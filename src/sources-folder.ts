@@ -16,12 +16,28 @@ import {
 import { desiredEntriesForSource, getOwn, mapGitignore, reconcileExcludes, type SkippedGitignoreLine, type ExcludeConfigAccess } from "./source-excludes";
 import { ensureGitignoreLine } from "./vault-gitignore";
 import type { SourceDeleteClassifier } from "./source-delete-classifier";
+import { remapExcludeList, remapSourceStores } from "./source-rename-remap";
 
 /** Read at most this much of a source's `.gitignore`. */
 const MAX_GITIGNORE_CHARS = 256_000;
 
 /** What `SourcesFolder.removeSource` found at `Sources/<name>` and did about it. */
 export type RemoveSourceLinkOutcome = "unlinked" | "absent" | "real-folder" | "kept" | "skipped" | "failed";
+
+/** PR-11: what `SourcesFolder.swapSource` found and did.
+ * - `swapped`: `Sources/<new>` links the source's folder and Atlas's own `Sources/<old>` link is gone.
+ * - `created`: there was no Atlas link to move; `Sources/<new>` now exists (a `Sources/<old>` that isn't Atlas's is untouched).
+ * - `already`: `Sources/<new>` already was the right link (a sync got there first); only `Sources/<old>` was tidied.
+ * - `skipped`: the toggle is off, this is mobile, or a name can't be a `Sources/` entry; nothing ran.
+ * - `failed`: the filesystem refused (`code`, e.g. EEXIST or EPERM) or there was no folder to link to. The old link
+ *   is still there when it failed before it was removed; the next sync makes the new one and removes the old one. */
+export type SwapSourceOutcome = "swapped" | "created" | "already" | "skipped" | "failed";
+
+export interface SwapSourceResult {
+	outcome: SwapSourceOutcome;
+	/** The filesystem error code, when `failed` for that reason. */
+	code?: string;
+}
 
 /** Where Atlas keeps what it did outside its own settings, so it can undo exactly that (`data.json`). */
 export interface SourcesRecords {
@@ -178,6 +194,132 @@ export class SourcesFolder {
 			else outcome = after !== null && after.isSymbolicLink() ? "kept" : "unlinked";
 		});
 		return outcome;
+	}
+
+	/**
+	 * PR-11 (G4): a Tephra source was renamed (and Tephra has acknowledged it). In one job on the same chain as every
+	 * sync, so none of them can interleave:
+	 *
+	 * 1. Atlas's Excluded-files entries for `<old>` (the record and Obsidian's own list) move to `<new>` first, so
+	 *    Obsidian never scans a path it was told to skip, exactly as a new link is excluded before it exists.
+	 * 2. The link moves: `Sources/<new>` is made, then Atlas's `Sources/<old>` link is `unlink`ed (the link alone, never the
+	 *    folder it points at; the delete expectation is registered first so the deletes that follow are Atlas's own,
+	 *    R3-4). A case-only change (`whoop` -> `Whoop`) goes through a temporary dot-name link, because on a
+	 *    case-insensitive disk both names are the same entry and a direct create would fail with EEXIST.
+	 * 3. The link record moves with the link, only once the filesystem has really changed.
+	 *
+	 * A failure never throws: it is returned, and the old link stays when it failed before the unlink. The Tephra source
+	 * list wins: the next sync creates `Sources/<new>` and removes `Sources/<old>` if this did not finish.
+	 * `sourceRoot` is the folder to link when the record and the old link don't say (Tephra's own path for the source).
+	 */
+	async swapSource(oldName: string, newName: string, sourceRoot: string | null): Promise<SwapSourceResult> {
+		const vaultPath = this.deps.getVaultPath();
+		if (!this.active || this.deps.isMobile() || vaultPath === null || oldName === newName || !isUsableSourceName(oldName) || !isUsableSourceName(newName)) {
+			return { outcome: "skipped" };
+		}
+		let result: SwapSourceResult = { outcome: "failed" };
+		await this.enqueue(async () => {
+			result = await this.runSwap(vaultPath, oldName, newName, sourceRoot);
+		});
+		return result;
+	}
+
+	private async runSwap(vaultPath: string, oldName: string, newName: string, sourceRoot: string | null): Promise<SwapSourceResult> {
+		const { fs, classifier, records } = this.deps;
+		const dir = `${vaultPath}/${SOURCES_FOLDER}`;
+		const oldPath = `${dir}/${oldName}`;
+		const newPath = `${dir}/${newName}`;
+		await this.moveExcludes(oldName, newName);
+		try {
+			const oldStat = await lstatOrNull(fs, oldPath);
+			const oldIsLink = oldStat !== null && oldStat.isSymbolicLink();
+			const recordedTarget = getOwn(records.getLinks(), oldName);
+			// Atlas owns the old entry only when it recorded making it: a link it didn't make is left alone.
+			const owned = oldIsLink && recordedTarget !== undefined;
+			const target = recordedTarget ?? (oldIsLink ? await fs.readlink(oldPath) : null) ?? sourceRoot;
+			if (target === null) return { outcome: "failed" };
+			const caseOnly = oldName.toLowerCase() === newName.toLowerCase();
+			const links = { ...records.getLinks() };
+			let outcome: SwapSourceOutcome;
+
+			if (caseOnly && oldIsLink) {
+				if (!owned) return { outcome: "failed" };
+				outcome = await this.swapCaseOnly(dir, oldName, newName, target);
+			} else {
+				const newStat = await lstatOrNull(fs, newPath);
+				if (newStat !== null) {
+					// Something is at the new name. The right link (a sync made it already) is fine; anything else is not ours to replace.
+					const sameLink = newStat.isSymbolicLink() && (await fs.readlink(newPath).catch(() => null)) === target;
+					if (!sameLink) return { outcome: "failed", code: "EEXIST" };
+					outcome = "already";
+				} else {
+					await fs.symlink(target, newPath);
+					outcome = owned ? "swapped" : "created";
+				}
+				if (owned) {
+					classifier.expectPrefix(sourceLinkPath(oldName)); // before the unlink, so its deletes are Atlas's
+					await fs.unlink(oldPath);
+				}
+			}
+			links[newName] = target;
+			if (owned || recordedTarget !== undefined) delete links[oldName];
+			records.setLinks(links);
+			await records.save();
+			return { outcome };
+		} catch (error) {
+			console.error(`[Atlas] couldn't move the ${SOURCES_FOLDER}/${oldName} link to ${SOURCES_FOLDER}/${newName}`, error);
+			return { outcome: "failed", code: errorCode(error) };
+		}
+	}
+
+	/** `whoop` -> `Whoop` on a disk that sees them as one entry: a link under a temporary dot-name always exists, so
+	 * the source is never without one. Dot-names are not in Obsidian's index, so the temporary link raises no event. */
+	private async swapCaseOnly(dir: string, oldName: string, newName: string, target: string): Promise<SwapSourceOutcome> {
+		const { fs, classifier } = this.deps;
+		const tmpPath = `${dir}/.atlas-swap-${newName}`;
+		const oldPath = `${dir}/${oldName}`;
+		const newPath = `${dir}/${newName}`;
+		const leftover = await lstatOrNull(fs, tmpPath);
+		if (leftover !== null && leftover.isSymbolicLink()) await fs.unlink(tmpPath); // an earlier run that stopped half way
+		await fs.symlink(target, tmpPath);
+		try {
+			classifier.expectPrefix(sourceLinkPath(oldName));
+			await fs.unlink(oldPath);
+			try {
+				await fs.symlink(target, newPath);
+			} catch (error) {
+				await fs.symlink(target, oldPath).catch(() => undefined); // put the old name back; the next sync finishes the job
+				throw error;
+			}
+		} finally {
+			await fs.unlink(tmpPath).catch(() => undefined);
+		}
+		return "swapped";
+	}
+
+	/** Step 1 of `swapSource`: the Excluded-files list and Atlas's record of it. Everything under `Sources/<old>/` moves. */
+	private async moveExcludes(oldName: string, newName: string): Promise<void> {
+		const { records } = this.deps;
+		let changed = false;
+		const config = this.deps.excludeConfig();
+		if (config) {
+			const raw = config.get();
+			const current = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
+			const next = remapExcludeList(current, oldName, newName);
+			if (next) {
+				config.set(next);
+				changed = true;
+			}
+		}
+		const moved = remapSourceStores({ noAutoPromoteFolders: [], expandedModuleFolders: [], sourceSettings: {}, excludes: records.getExcludes() }, oldName, newName);
+		if (moved.excludes) {
+			records.setExcludes(moved.excludes);
+			changed = true;
+		}
+		if (changed) {
+			await records.save();
+			this.deps.onExcludesChanged?.();
+		}
 	}
 
 	/**

@@ -459,6 +459,8 @@ export class FuzzySuggestModal<T> extends SuggestModal<T> {
 }
 export class ItemView {}
 export class MenuItem {
+	/** Obsidian's real `MenuItem.dom`: the item's element, so a test can hover it. */
+	dom: HTMLElement = document.createElement("div");
 	title = "";
 	icon = "";
 	checked = false;
@@ -489,6 +491,14 @@ export class MenuItem {
 /** Recording `Menu`: `titles()` lists the item titles in order (separators excluded). */
 export class Menu {
 	items: MenuItem[] = [];
+	private hideCallbacks: Array<() => void> = [];
+	onHide(callback: () => void): void {
+		this.hideCallbacks.push(callback);
+	}
+	/** What Obsidian does when a menu closes: runs the `onHide` callbacks. */
+	hide(): void {
+		for (const callback of this.hideCallbacks) callback();
+	}
 	separators = 0;
 	addItem(cb: (item: MenuItem) => void): this {
 		const item = new MenuItem();

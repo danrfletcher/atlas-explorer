@@ -28,6 +28,9 @@ import { TephraStatusBar } from "./tephra-status-bar";
 import { TephraStarter } from "./tephra-start";
 import { SourcesFolder } from "./sources-folder";
 import { SourceActions } from "./source-actions";
+import { SourceRenamer } from "./source-rename";
+import { captureRenameTabs, type RenameTabLeaf } from "./source-rename-tabs";
+import { remapSourceStores, sourcePrefix } from "./source-rename-remap";
 import { pickFolder } from "./pick-folder";
 import { ConfirmModal } from "./modals";
 import { SourceDeleteClassifier } from "./source-delete-classifier";
@@ -156,6 +159,8 @@ export default class AtlasPlugin extends Plugin {
 	sourcesFolder: SourcesFolder;
 	/** PR-5 (G3, G5): the Inbox's "Add source…" and a source header's "Remove". */
 	sourceActions: SourceActions;
+	/** PR-11 (G4): a source header's "Rename", and a rename Tephra announces. */
+	sourceRenamer: SourceRenamer;
 	/** R3-4: tells deletes Atlas or a missing source caused from the user's own. */
 	sourceDeleteClassifier: SourceDeleteClassifier;
 	graduation: GraduationController;
@@ -294,6 +299,22 @@ export default class AtlasPlugin extends Plugin {
 			confirm: (message, confirmLabel, onConfirm) => new ConfirmModal(this.app, message, confirmLabel, onConfirm).open(),
 			notify: (message) => void new Notice(message, 10_000),
 		});
+		this.sourceRenamer = new SourceRenamer({
+			app: this.app,
+			getConnection: () => this.tephraConnection,
+			getVaultPath: () => this.getVaultBasePath() || null,
+			fs: nodeSourcesFs,
+			swapSource: (oldName, newName, sourceRoot) => this.sourcesFolder.swapSource(oldName, newName, sourceRoot),
+			remap: (oldName, newName) => this.remapSourcePaths(oldName, newName),
+			prepareTabs: (oldName, newName) => captureRenameTabs(this.renameTabsDeps(), oldName, newName),
+			afterRename: (oldName, newName) => {
+				for (const leaf of this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE)) {
+					const view = leaf.view;
+					if (view instanceof AtlasExplorerView) view.renameSourceSection(oldName, newName);
+				}
+			},
+			notify: (message) => void new Notice(message, 10_000),
+		});
 		// G16/R3-3: the toggle's off path unlinks what Atlas linked and removes the entries Atlas excluded. Never
 		// run on unload (E8): only `TephraController.setEnabled(false)` reaches the registry.
 		this.register(registerTephraTeardown({ name: "Sources folder links", run: () => this.sourcesFolder.teardown() }));
@@ -385,6 +406,8 @@ export default class AtlasPlugin extends Plugin {
 				connection.onCheck((snapshot) => {
 					if (snapshot.state === "online") void this.sourcesFolder.sync(snapshot.sources);
 				});
+				// PR-11 (E6): a rename made with `tephractl` runs the same remap and swap as Atlas's own.
+				connection.onSourceRenamed((oldName, newName) => this.sourceRenamer.onRenamed(oldName, newName));
 				// PR-4 (G1/E5): sections appear, go, turn "(missing)" or come back with the source list.
 				refreshExplorersOnTephraChange(connection, () => this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE).map((leaf) => leaf.view));
 				this.tephraGraphSync.bind(connection); // PR-8: edges on first online and per `graph:changed` burst
@@ -696,6 +719,7 @@ export default class AtlasPlugin extends Plugin {
 		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);
 		this.sourcesFolder?.dispose(); // E8: stops new syncs only; no link, `.gitignore` line or Excluded entry changes
+		this.sourceRenamer?.dispose(); // PR-11 (E8): a rename in the middle is not rolled back or finished; the next load reconciles to Tephra's list
 		this.tephraStatusBar?.hide(); // PR-9: the item goes with the plugin; nothing else changes
 		this.tephraStarter?.cancel();
 		this.tephraRenames?.dispose(); // PR-10 (E8): stops timers; the queue file and Obsidian's link setting stay as they are
@@ -920,6 +944,65 @@ export default class AtlasPlugin extends Plugin {
 		const dismissedChanged = this.unitIndex.rewriteDismissedAndAddedPaths(oldPath, newPath);
 		if (manualChanged || dismissedChanged) this.persistDebounced();
 		this.viewsManager.onVaultRename(oldPath, newPath);
+	}
+
+	/**
+	 * PR-11 (G4, R3-4): Tephra has renamed a source, so everything Atlas keys by a vault path under `Sources/<old>`
+	 * moves to `Sources/<new>`. Same order as `handleHiddenMove`: `noAutoPromoteFolders` saved first, then manual
+	 * promotions and dismissed/added paths, then the views (every view saved once). Per-source settings and fold
+	 * state follow in the same save. Reads no file and builds no index of the source (F1).
+	 *
+	 * The result is flushed to `data.json` before it returns (AGENTS.md: structural conversions don't wait on the 500 ms
+	 * debounce). Tephra has already renamed the source and won't announce it again, so a quit between here and the
+	 * debounce would leave `Sources/<old>/…` refs orphaned for good, whatever the link swap does afterwards.
+	 */
+	async remapSourcePaths(oldName: string, newName: string): Promise<void> {
+		const oldPath = sourcePrefix(oldName);
+		const newPath = sourcePrefix(newName);
+		const remap = remapSourceStores(
+			{
+				noAutoPromoteFolders: this.settings.noAutoPromoteFolders,
+				expandedModuleFolders: Array.from(this.expandedModuleFolders),
+				sourceSettings: this.settings.tephraSourceSettings,
+				excludes: {},
+			},
+			oldName,
+			newName
+		);
+		if (remap.noAutoPromoteFolders) this.settings.noAutoPromoteFolders = remap.noAutoPromoteFolders;
+		if (remap.sourceSettings) this.settings.tephraSourceSettings = remap.sourceSettings;
+		if (remap.expandedModuleFolders) this.expandedModuleFolders = new Set(remap.expandedModuleFolders);
+		const manualChanged = this.unitIndex.rewriteManualPromotions(oldPath, newPath);
+		const dismissedChanged = this.unitIndex.rewriteDismissedAndAddedPaths(oldPath, newPath);
+		if (manualChanged || dismissedChanged) this.persistDebounced();
+		this.viewsManager.remapPathPrefix(oldPath, newPath);
+		// One write, after every store above has moved (settings, promotions, dismissed/added, views, fold state).
+		await this.flushSave();
+	}
+
+	/** What `captureRenameTabs` needs from the live workspace and vault. */
+	private renameTabsDeps(): Parameters<typeof captureRenameTabs>[0] {
+		const { workspace, vault } = this.app;
+		return {
+			iterateLeaves: (visit) => workspace.iterateAllLeaves((leaf) => visit(leaf as unknown as RenameTabLeaf)),
+			isIndexed: (path) => vault.getAbstractFileByPath(path) !== null,
+			whenIndexed: (paths, timeoutMs) =>
+				new Promise<void>((resolve) => {
+					const waiting = new Set(paths.filter((path) => vault.getAbstractFileByPath(path) === null));
+					if (waiting.size === 0) return resolve();
+					const done = (): void => {
+						window.clearTimeout(timer);
+						vault.offref(ref);
+						resolve();
+					};
+					const ref = vault.on("create", (file) => {
+						waiting.delete(file.path);
+						if (waiting.size === 0) done();
+					});
+					const timer = window.setTimeout(done, timeoutMs);
+				}),
+			openLeaf: () => workspace.getLeaf("tab") as unknown as RenameTabLeaf,
+		};
 	}
 
 	/** Keeps `noAutoPromoteFolders` pointing at a renamed or moved folder (E4). Assigns and saves right

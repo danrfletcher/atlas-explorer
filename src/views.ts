@@ -2010,6 +2010,22 @@ export class ViewsManager {
 		if (changed) this.save();
 	}
 
+	/**
+	 * PR-11 (G4, R3-4): a Tephra source was renamed, so everything under `oldPath` (`Sources/<old>`) now lives under
+	 * `newPath` (`Sources/<new>`). Rewrites every view's unit refs, API item `noteRef`s and folder/CSV/Markdown-table
+	 * source paths with the same `rewriteTree` helpers `onVaultRename` uses, then saves once for all views. Unlike
+	 * `onVaultRename` it never detaches a Folder source's managed child: the files didn't move out of anything, the
+	 * source's link just has a new name, so no placeholder is made and no row is demoted. Returns whether anything changed.
+	 */
+	remapPathPrefix(oldPath: string, newPath: string): boolean {
+		let changed = false;
+		for (const view of this.views) {
+			if (this.rewriteTree(view.root, oldPath, newPath, view.root)) changed = true;
+		}
+		if (changed) this.save();
+		return changed;
+	}
+
 	private rewriteTree(nodes: ViewNode[], oldPath: string, newPath: string, root: ViewNode[]): boolean {
 		let changed = false;
 		for (const node of nodes) {

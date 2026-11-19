@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TephraConnection, isGraphChangedMessage, type TephraConnectionClient } from "../../src/tephra-connection";
+import { TephraConnection, isGraphChangedMessage, parseSourceRenames, type TephraConnectionClient } from "../../src/tephra-connection";
 import type { TephraPushHandlers, TephraPushResult, TephraSourcesResult } from "../../src/tephra-client";
 
 const GRAPH_CHANGED = JSON.stringify({ jsonrpc: "2.0", method: "graph:changed", params: { source: "notes" } });
@@ -297,5 +297,103 @@ describe("TephraConnection push channel", () => {
 		await vi.advanceTimersByTimeAsync(100);
 		expect(attempts).toBe(2);
 		c2.stop();
+	});
+});
+
+// PR-11 (E6): a rename Tephra announces. The frame shape is Tephra dev's: `forward.rs` puts the registry's
+// `SourceChange` list under `params.sources_changed`, and a rename is `{ kind: "renamed", name: <new>, old_name: <old> }`.
+const frame = (changes: unknown, extra: Record<string, unknown> = {}) => JSON.stringify({ jsonrpc: "2.0", method: "graph:changed", params: { source: "journal", paths: [], sources_changed: changes }, ...extra });
+const RENAMED = { kind: "renamed", name: "journal", old_name: "notes" };
+
+describe("parseSourceRenames", () => {
+	it("reads a rename (old name from old_name, new name from name), in order, among other changes", () => {
+		expect(parseSourceRenames(frame([RENAMED]))).toEqual([{ oldName: "notes", newName: "journal" }]);
+		expect(
+			parseSourceRenames(frame([{ kind: "added", name: "x" }, RENAMED, { kind: "renamed", name: "b", old_name: "a" }, { kind: "removed", name: "y" }]))
+		).toEqual([
+			{ oldName: "notes", newName: "journal" },
+			{ oldName: "a", newName: "b" },
+		]);
+	});
+
+	it.each([
+		["an add", [{ kind: "added", name: "x" }]],
+		["a remove", [{ kind: "removed", name: "x" }]],
+		["a promote", [{ kind: "promoted", name: "x" }]],
+		["an unpromote", [{ kind: "unpromoted", name: "x" }]],
+		["a rename with no old_name", [{ kind: "renamed", name: "x" }]],
+		["a rename with an empty old_name", [{ kind: "renamed", name: "x", old_name: "" }]],
+		["a rename with an empty name", [{ kind: "renamed", name: "", old_name: "x" }]],
+		["a rename with a non-string name", [{ kind: "renamed", name: 4, old_name: "x" }]],
+		["a null entry", [null]],
+		["a string entry", ["renamed"]],
+		["no list", undefined],
+		["a list that isn't one", { kind: "renamed", name: "x", old_name: "y" }],
+	])("%s gives nothing", (_label, changes) => {
+		expect(parseSourceRenames(frame(changes))).toEqual([]);
+	});
+
+	it.each([
+		["a response with an id", frame([RENAMED], { id: 1 })],
+		["another method", JSON.stringify({ jsonrpc: "2.0", method: "other", params: { sources_changed: [RENAMED] } })],
+		["no params", JSON.stringify({ jsonrpc: "2.0", method: "graph:changed" })],
+		["null params", JSON.stringify({ jsonrpc: "2.0", method: "graph:changed", params: null })],
+		["an array", "[1]"],
+		["not json", "{"],
+		["", ""],
+	])("%s gives nothing", (_label, text) => {
+		expect(parseSourceRenames(text)).toEqual([]);
+	});
+});
+
+describe("onSourceRenamed: only a frame on the live push channel", () => {
+	it("calls the listener once per rename frame with (old, new), and also asks for the check a graph:changed does", async () => {
+		const f = fakeClient();
+		const connection = new TephraConnection(f.client);
+		const renamed = vi.fn();
+		const changed = vi.fn();
+		connection.onSourceRenamed(renamed);
+		connection.onGraphChanged(changed);
+		connection.start();
+		await settle();
+		f.accept();
+		await settle();
+		f.push(frame([RENAMED]));
+		await settle();
+		expect(renamed).toHaveBeenCalledExactlyOnceWith("notes", "journal");
+		expect(changed).toHaveBeenCalledTimes(1);
+		f.push(frame([{ kind: "added", name: "x" }]));
+		await settle();
+		expect(renamed).toHaveBeenCalledTimes(1);
+		connection.stop?.();
+	});
+
+	it("unsubscribing stops the calls, and a listener that throws doesn't stop the others or the check", async () => {
+		const f = fakeClient();
+		const connection = new TephraConnection(f.client);
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		const first = vi.fn(() => {
+			throw new Error("boom");
+		});
+		const second = vi.fn();
+		const off = connection.onSourceRenamed(second);
+		connection.onSourceRenamed(first);
+		const changed = vi.fn();
+		connection.onGraphChanged(changed);
+		connection.start();
+		await settle();
+		f.accept();
+		await settle();
+		f.push(frame([RENAMED]));
+		await settle();
+		expect(second).toHaveBeenCalledTimes(1);
+		expect(changed).toHaveBeenCalledTimes(1);
+		expect(error).toHaveBeenCalled();
+		off();
+		f.push(frame([RENAMED]));
+		await settle();
+		expect(second).toHaveBeenCalledTimes(1);
+		error.mockRestore();
+		connection.stop?.();
 	});
 });

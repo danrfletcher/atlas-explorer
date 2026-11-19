@@ -18,6 +18,7 @@ afterEach(async () => {
 function spyActions(r: SourcesRig) {
 	const actions = { addSource: vi.fn(async () => {}), removeSource: vi.fn() };
 	r.plugin.sourceActions = actions;
+	r.plugin.sourceRenamer = { rename: vi.fn(async () => {}) };
 	return actions;
 }
 
@@ -88,14 +89,59 @@ describe("G3: the vault Inbox's +", () => {
 });
 
 describe("G5: a source section header's right-click menu", () => {
-	it("[whoop] offers Show Dismissed and Remove; Remove asks the actions to remove whoop", async () => {
+	it("[whoop] offers Show Dismissed, Rename and Remove; Remove asks the actions to remove whoop", async () => {
 		rig = await makeSourcesRig();
 		const actions = spyActions(rig);
 		const menu = menuFrom(() => rightClick(header(rig!, "whoop")));
-		expect(titles(menu)).toEqual(["Show Dismissed", "Remove"]);
+		expect(titles(menu)).toEqual(["Show Dismissed", "Rename", "Remove"]);
 		expect(menu!.separators).toBe(1);
 		menu!.items.find((item) => item.title === "Remove")!.clickHandler!();
 		expect(actions.removeSource).toHaveBeenCalledExactlyOnceWith("whoop");
+	});
+
+	it("Rename on [whoop] asks the renamer to rename whoop; on [tephra] it names tephra", async () => {
+		rig = await makeSourcesRig();
+		spyActions(rig);
+		const renamer = rig.plugin.sourceRenamer as { rename: ReturnType<typeof vi.fn> };
+		for (const name of ["whoop", "tephra"]) {
+			const menu = menuFrom(() => rightClick(header(rig!, name)));
+			const item = menu!.items.find((entry) => entry.title === "Rename")!;
+			expect(item.disabled).toBe(false);
+			item.clickHandler!();
+		}
+		expect(renamer.rename.mock.calls).toEqual([["whoop"], ["tephra"]]);
+	});
+
+	it("the vault's own Inbox header has no Rename", async () => {
+		rig = await makeSourcesRig();
+		spyActions(rig);
+		const menu = menuFrom(() => rightClick(header(rig!, null)));
+		expect(titles(menu)).not.toContain("Rename");
+	});
+
+	it("with Tephra offline Rename is disabled and says why on hover and focus, in an Atlas-owned element that goes on leave and when the menu hides", async () => {
+		rig = await makeSourcesRig();
+		spyActions(rig);
+		await rig.connection.check(); // online: the menu above had it enabled
+		rig.daemon.down = true;
+		await rig.connection.check();
+		const menu = menuFrom(() => rightClick(header(rig!, "whoop")));
+		const item = menu!.items.find((entry) => entry.title === "Rename")!;
+		expect(item.disabled).toBe(true);
+		expect(document.querySelector(".atlas-tephra-tooltip")).toBeNull();
+		document.body.appendChild(item.dom); // Obsidian's menu is in the document while it is open
+		item.dom.dispatchEvent(new MouseEvent("mouseenter"));
+		const tip = document.querySelector<HTMLElement>(".atlas-tephra-tooltip")!;
+		expect(tip.textContent).toBe("Tephra offline");
+		expect(tip.parentElement).toBe(document.body); // not aria-label, not Obsidian's tooltip
+		expect(item.dom.getAttribute("aria-label")).toBeNull();
+		item.dom.dispatchEvent(new MouseEvent("mouseleave"));
+		expect(document.querySelector(".atlas-tephra-tooltip")).toBeNull();
+		item.dom.dispatchEvent(new FocusEvent("focus"));
+		expect(document.querySelector(".atlas-tephra-tooltip")!.textContent).toBe("Tephra offline");
+		menu!.hide();
+		expect(document.querySelector(".atlas-tephra-tooltip")).toBeNull();
+		item.dom.remove();
 	});
 
 	it("[tephra]'s Remove names tephra, not whoop", async () => {
@@ -119,6 +165,6 @@ describe("G5: a source section header's right-click menu", () => {
 		const menu = menuFrom(() => rightClick(header(rig!, "whoop")));
 		menu!.items[0].clickHandler!();
 		await rig.settle();
-		expect(titles(menuFrom(() => rightClick(header(rig!, "whoop"))))).toEqual(["Hide Dismissed", "Remove"]);
+		expect(titles(menuFrom(() => rightClick(header(rig!, "whoop"))))).toEqual(["Hide Dismissed", "Rename", "Remove"]);
 	});
 });

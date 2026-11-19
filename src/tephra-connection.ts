@@ -62,6 +62,34 @@ export function isGraphChangedMessage(text: string): boolean {
 	return message.method === "graph:changed" && !("id" in message);
 }
 
+/** PR-11 (E6): the renames a `graph:changed` frame announces. Tephra's `sources_changed` list (a source-list change)
+ * holds `{ kind: "renamed", name: <new>, old_name: <old> }` for a rename (read from Tephra dev's `registry.rs`).
+ * Anything that isn't exactly that shape (an add, a remove, a promote, a missing `old_name`) gives nothing. */
+export function parseSourceRenames(text: string): Array<{ oldName: string; newName: string }> {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return [];
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
+	const message = parsed as Record<string, unknown>;
+	if (message.method !== "graph:changed" || "id" in message) return [];
+	const params = message.params;
+	if (typeof params !== "object" || params === null) return [];
+	const changes = (params as Record<string, unknown>).sources_changed;
+	if (!Array.isArray(changes)) return [];
+	const renames: Array<{ oldName: string; newName: string }> = [];
+	for (const change of changes) {
+		if (typeof change !== "object" || change === null) continue;
+		const entry = change as Record<string, unknown>;
+		if (entry.kind === "renamed" && typeof entry.name === "string" && typeof entry.old_name === "string" && entry.name !== "" && entry.old_name !== "") {
+			renames.push({ oldName: entry.old_name, newName: entry.name });
+		}
+	}
+	return renames;
+}
+
 /** Calls `onFocus` whenever the Obsidian window regains focus; returns a function that stops listening.
  * Injectable so tests drive focus without a window. */
 export type ListenFocus = (onFocus: () => void) => () => void;
@@ -126,6 +154,7 @@ export class TephraConnection {
 	private listeners = new Set<(snapshot: TephraSnapshot) => void>();
 	private checkListeners = new Set<(snapshot: TephraSnapshot) => void>();
 	private graphListeners = new Set<() => void>();
+	private renameListeners = new Set<(oldName: string, newName: string) => void>();
 	private onlineListeners = new Set<(online: boolean) => void>();
 	private stopTimer: (() => void) | null = null;
 	private stopFocus: (() => void) | null = null;
@@ -224,6 +253,14 @@ export class TephraConnection {
 		return () => this.graphListeners.delete(listener);
 	}
 
+	/** PR-11 (E6): subscribes to a source rename Tephra announces on `graph:changed` (`sources_changed` with kind
+	 * `renamed`), whoever made it (`tephractl`, or Atlas's own request, which the listener tells apart). Only a real
+	 * frame on the live push channel calls it. Returns the unsubscribe function. */
+	onSourceRenamed(listener: (oldName: string, newName: string) => void): () => void {
+		this.renameListeners.add(listener);
+		return () => this.renameListeners.delete(listener);
+	}
+
 	/** A `graph:changed` notification, or Obsidian regaining focus: asks for a check now. */
 	requestCheck(): void {
 		this.noteFailedCall();
@@ -296,6 +333,15 @@ export class TephraConnection {
 	/** One `graph:changed` push: asks for a check, but a burst of them is held to one check per cooldown. */
 	private onPushText(generation: number, text: string): void {
 		if (generation !== this.generation || !isGraphChangedMessage(text)) return;
+		for (const { oldName, newName } of parseSourceRenames(text)) {
+			for (const listener of [...this.renameListeners]) {
+				try {
+					listener(oldName, newName);
+				} catch (error) {
+					console.error("[Atlas] a Tephra source-rename listener threw", error);
+				}
+			}
+		}
 		for (const listener of [...this.graphListeners]) {
 			try {
 				listener();
