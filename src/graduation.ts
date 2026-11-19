@@ -1,5 +1,6 @@
 import { TAbstractFile, TFile, Vault } from "obsidian";
 import { collectRootEntries, validateName } from "./name-rules";
+import { isInSourcesFolder } from "./sources-path";
 
 /** `<14 digits>-<4 base36>`, the shape of a free block's filename (case-insensitive). */
 const ID_LIKE = /^\d{14}-[0-9a-z]{4}$/i;
@@ -66,9 +67,21 @@ export interface GraduationDeps {
 	scheduler: Scheduler;
 	getPoolFolder(): string;
 	getExcludedFolders(): string[];
+	/** R3-1: true while the Tephra toggle is on. Then a file under `Sources/` is never a graduation candidate,
+	 * and nothing is recorded or forgotten for it. Optional: absent means the toggle is off. */
+	skipsSources?(): boolean;
 	notify(message: string, durationMs: number): void;
-	/** Called after a move Atlas made; shows the "links weren't updated" notice when the Obsidian setting is off. */
+	/** Called after a move Atlas made; shows the "links weren't updated" notice when the Obsidian setting is off
+	 * (never while the Tephra toggle is on: R3-6). */
 	afterMove(): void;
+	/** R3-6: Tephra's rename acknowledgement. While `isActive()` (the Tephra toggle is on) Obsidian doesn't rewrite
+	 * links, so the `resolved`/`modify` settle means nothing: a pool rename waits for `whenAcknowledged` instead,
+	 * and still graduates on `FALLBACK_MS` if Tephra is offline or never answers. Optional: absent means the toggle
+	 * is off and graduation behaves exactly as it always has. */
+	tephraAcks?: {
+		isActive(): boolean;
+		whenAcknowledged(oldPath: string, newPath: string, cb: () => void): () => void;
+	};
 	/** The shared name dialog. Resolves the typed name, or null when dismissed any way but Create. */
 	openDialog(options: { title: string; initialValue: string; poolFolder: string; excludedFolders: string[] }): Promise<string | null>;
 	/** Called after Atlas moved a hidden file (see `PendingGraduation.hidden`), which Obsidian reports no
@@ -91,6 +104,8 @@ export interface PendingGraduation {
 	hidden: boolean;
 	fallbackTimer?: unknown;
 	settleTimer?: unknown;
+	/** Stops waiting for Tephra's acknowledgement of the triggering rename (R3-6). */
+	stopAckWait?: () => void;
 }
 
 export type RenameOutcome = "swallowed" | "scheduled" | "ignored";
@@ -130,6 +145,7 @@ export class GraduationController {
 		if (this.disposed) return "ignored";
 		if (this.ownReverts.delete(file.path)) return "swallowed";
 
+		if (this.inSkippedSources(file.path) || this.inSkippedSources(oldPath)) return "ignored";
 		const poolFolder = this.deps.getPoolFolder();
 		if (!(file instanceof TFile)) return "ignored";
 		if (classifyRename(oldPath, file.path, true, poolFolder).action !== "graduate") return "ignored";
@@ -143,13 +159,25 @@ export class GraduationController {
 		record.hidden = hidden;
 		// A dialog is already open for this file: it keeps the original path and acts on the file
 		// object, so a further rename needs no new schedule.
-		if (record.state === "waiting") this.arm(record, hidden ? 0 : FALLBACK_MS);
+		if (record.state === "waiting") {
+			this.arm(record, hidden ? 0 : FALLBACK_MS);
+			// R3-6: with the Tephra toggle on, the move waits for Tephra's acknowledgement of THIS rename (a chain
+			// of renames waits on the latest; Tephra acknowledges them in order). `arm` above already cleared any
+			// earlier wait, and the fallback timer stays as the bound.
+			const acks = this.deps.tephraAcks;
+			if (!hidden && acks?.isActive()) record.stopAckWait = acks.whenAcknowledged(oldPath, file.path, () => this.run(record));
+		}
 		return "scheduled";
 	}
 
 	handleDelete(file: TAbstractFile): void {
+		if (this.inSkippedSources(file.path)) return;
 		// A hidden file is dropped from the index on purpose; its record ends with the dialog.
 		if (file instanceof TFile && !this.pending.get(file)?.hidden) this.forget(file);
+	}
+
+	private inSkippedSources(path: string): boolean {
+		return isInSourcesFolder(path) && this.deps.skipsSources?.() === true;
 	}
 
 	/** `metadataCache` `resolved`: the link graph has caught up with whatever the rename touched. */
@@ -182,11 +210,15 @@ export class GraduationController {
 		if (record.settleTimer !== undefined) scheduler.clearTimeout(record.settleTimer);
 		record.fallbackTimer = undefined;
 		record.settleTimer = undefined;
+		record.stopAckWait?.();
+		record.stopAckWait = undefined;
 	}
 
 	/** `resolved` starts the settle timer; a later `resolved`/`modify` restarts it (only once started). */
 	private bumpSettle(start: boolean): void {
-		if (this.disposed) return;
+		// R3-6: with the toggle on Obsidian rewrites no links, so there is nothing to settle on; the
+		// acknowledgement (or the fallback timer) decides.
+		if (this.disposed || this.deps.tephraAcks?.isActive()) return;
 		for (const record of this.pending.values()) {
 			if (record.state !== "waiting" || record.hidden) continue;
 			if (record.settleTimer === undefined && !start) continue;

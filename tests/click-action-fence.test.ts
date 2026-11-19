@@ -93,9 +93,9 @@ describe("F6: no confirm prompt, no new command, no hotkey, no MCP tool for acti
 		for (const c of cmds) expect(c.hotkeys).toBeUndefined();
 	});
 
-	it("every command registration in src/ is one of those (plus the render log's one command)", () => {
+	it("every command registration in src/ is one of those (plus the render log's one command and PR-8's Open Links pane)", () => {
 		const ids = SRC.flatMap((f) => [...read(f).matchAll(/addCommand\(\{\s*id:\s*"([^"]+)"/g)].map((m) => m[1])).sort();
-		expect(ids).toEqual(["add-block", "copy-render-log", "new-view", "open-explorer", "place-active-file-in-view", "rebuild-index", "reveal-active-file", "switch-view"].sort());
+		expect(ids).toEqual(["add-block", "copy-render-log", "new-view", "open-explorer", "open-links-pane", "place-active-file-in-view", "rebuild-index", "reveal-active-file", "switch-view"].sort());
 	});
 
 	it("the MCP tool list is exactly the existing eleven; none is about click actions", () => {

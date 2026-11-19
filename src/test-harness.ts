@@ -41,14 +41,14 @@ export function registerTestHarness(plugin: AtlasPlugin): () => void {
 		},
 		convertFileNodesToModule: (filePath, folderPath) => plugin.viewsManager.convertFileNodesToModule(filePath, folderPath, plugin.unitIndex),
 		replaceMetaNodeWithUnit: (viewId, nodeId, ref) => plugin.viewsManager.replaceMetaNodeWithUnit(viewId, nodeId, ref),
-		noticeIfLinksNotUpdated: () => noticeIfLinksNotUpdated(app),
+		noticeIfLinksNotUpdated: () => noticeIfLinksNotUpdated(app, undefined, () => plugin.tephraActive()),
 		async scenarioMoveIntoModule(filePath, folder) {
 			const file = app.vault.getAbstractFileByPath(filePath);
 			if (!(file instanceof TFile)) throw new Error(`No file at ${filePath}`);
 			await app.vault.createFolder(folder);
 			await app.fileManager.renameFile(file, `${folder}/${folder}.md`);
 			const counts = plugin.viewsManager.convertFileNodesToModule(filePath, folder, plugin.unitIndex);
-			noticeIfLinksNotUpdated(app);
+			noticeIfLinksNotUpdated(app, undefined, () => plugin.tephraActive());
 			return counts;
 		},
 		graduationState: () => ({ pending: plugin.graduation.pendingCount(), ownReverts: [...plugin.graduation.getOwnReverts()] }),

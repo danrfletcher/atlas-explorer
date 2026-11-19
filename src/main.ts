@@ -7,6 +7,12 @@ import {
 	normalizeAutoPromotion,
 	normalizeHighlightOpenNote,
 	normalizeNoAutoPromoteFolders,
+	normalizeSavedLinkSetting,
+	normalizeTephraExcludes,
+	normalizeTephraLinks,
+	normalizeTephraPromotedRoots,
+	normalizeTephraSettings,
+	showsInSearch,
 	rewriteNoAutoPromoteFolders,
 } from "./settings";
 import { UnitIndex, sanitizeHiddenModuleItems } from "./unit-index";
@@ -15,15 +21,45 @@ import { registerAddBlockCommand } from "./commands";
 import { AtlasLinkSuggest } from "./link-suggest";
 import { applySuggesterPrecedence, removeSuggesterPrecedence } from "./suggester-precedence";
 import { FreeBlockTextCache, freeBlockLivePreviewPlugin, registerBlockLinkDisplayPostProcessor } from "./block-link-display";
+import { SourceLinkController } from "./source-link-controller";
+import { TephraClient, TEPHRA_RPC_URL, resolveTephraRpcUrl } from "./tephra-client";
+import { TephraConnection } from "./tephra-connection";
+import { TephraController } from "./tephra-controller";
+import { TephraStatusBar } from "./tephra-status-bar";
+import { TephraStarter } from "./tephra-start";
+import { SourcesFolder } from "./sources-folder";
+import { SourceActions } from "./source-actions";
+import { SourceRenamer } from "./source-rename";
+import { SourcePromoter } from "./source-promote";
+import { bindPromotedRoots } from "./promoted-roots";
+import { getPromotedRoots, setPromotedRoots, type PromotedRootLike } from "./source-links";
+import { captureRenameTabs, type RenameTabLeaf } from "./source-rename-tabs";
+import { remapSourceStores, sourcePrefix } from "./source-rename-remap";
+import { pickFolder } from "./pick-folder";
+import { askConfirm, ConfirmModal } from "./modals";
+import { SourceDeleteClassifier } from "./source-delete-classifier";
+import { isInSourcesFolder, skipsSourcesFolder } from "./sources-path";
+import { nodeSourcesFs, existsOnDisk, realPath } from "./sources-fs";
+import { vaultExcludeConfig } from "./source-excludes";
+import { refreshExcludedFilesPane } from "./tephra-exclude";
+import { registerTephraTeardown } from "./tephra-teardown";
+import { obsidianTephraRequest } from "./tephra-request-obsidian";
+import { openNodeWebSocket } from "./tephra-socket-node";
+import { registerBrokenSourceLinkHover } from "./source-link-hover";
+import { registerSourceLinkFallbackPostProcessor, sourceLinkLivePreviewPlugin } from "./source-link-fallback";
 import { ViewsManager } from "./views";
 import { FolderLiveRefresh } from "./folder-live-refresh";
 import { parentFolderPath } from "./folder-source";
-import { ATLAS_VIEW_TYPE, AtlasExplorerView } from "./explorer-view";
+import { ATLAS_VIEW_TYPE, AtlasExplorerView, refreshExplorersOnTephraChange } from "./explorer-view";
 import { registerSortIcons } from "./sort";
 import { registerF10Commands } from "./f10-commands";
 import { closeNameDialog, openNameDialog } from "./name-dialog";
 import { GraduationController } from "./graduation";
 import { noticeIfLinksNotUpdated } from "./links-notice";
+import { TephraLinkSetting, readStoredVaultConfig } from "./tephra-link-setting";
+import { TephraRenameQueue, reportQueueWriteErrorOnce, resolveTephraRenameQueuePath } from "./tephra-rename-queue";
+import { nodeQueueStorage } from "./tephra-rename-queue-fs";
+import { TephraRenameForwarder } from "./tephra-rename-forwarder";
 import { registerTestHarness } from "./test-harness";
 import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
 import { ApiHeadersStore } from "./api-headers-store";
@@ -41,6 +77,9 @@ import { McpTool } from "./mcp-protocol";
 import { createGetNodeStatusTool, createListNodesTool, createListStatusSetsTool, createListViewsTool, createSetNodeStatusTool } from "./mcp-status-tools";
 import { createAddNodeTool, createCreateFolderTool, createMoveNodeTool, createRemoveNodeTool, createRenameFolderTool } from "./mcp-arrange-tools";
 import { RENDER_LOG_FILE, RenderLog, withRenderCause } from "./render-log";
+import { ATLAS_LINKS_VIEW_TYPE, openBacklinkRow, TephraBacklinksSection } from "./backlinks-section";
+import { AtlasLinksView } from "./atlas-links-view";
+import { TephraGraphSync } from "./tephra-graph-sync";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -100,6 +139,35 @@ export default class AtlasPlugin extends Plugin {
 	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
 	freeBlockTextCache: FreeBlockTextCache;
 	private linkSuggest: AtlasLinkSuggest;
+	/** G9: installs the `[[@source:path]]` link-resolution hook (or the Q13 fallback renderer) while
+	 * `settings.tephraEnabled` is on. Public: the fallback renderers read its mode. */
+	sourceLinks: SourceLinkController;
+	/** G16: owns the Tephra connection. Nothing is built or started unless the toggle is on and this is
+	 * desktop; `onunload` only stops its timer. */
+	tephraController: TephraController;
+	/** PR-10 (G11): keeps Obsidian's "Automatically update internal links" off while the toggle is on, and puts it back on the off path. */
+	tephraLinkSetting: TephraLinkSetting;
+	/** PR-10 (G11): sends every vault rename to Tephra through the on-disk queue. Inert while the toggle is off. */
+	tephraRenames: TephraRenameForwarder;
+	/** PR-9 (G13): the status-bar item. It exists only while the Tephra toggle is on (it follows the live connection). */
+	tephraStatusBar: TephraStatusBar;
+	/** PR-9 (F7): runs `tephractl daemon start`, and only when Dan clicks Start in the status bar. */
+	tephraStarter: TephraStarter;
+	/** The Atlas settings tab; kept so the status bar can open it on its Tephra tab. */
+	private settingTab: AtlasSettingTab;
+	/** PR-8 (G10): "Also linked from (Tephra)" in the Backlinks panel, or in the Atlas Links pane. */
+	tephraBacklinks: TephraBacklinksSection;
+	/** PR-8 (G12): Tephra's non-note edges for the unit index; in memory only. */
+	tephraGraphSync: TephraGraphSync;
+	/** G2: the `Sources/<name>` links, the vault `.gitignore` line and Atlas's Excluded files entries. */
+	sourcesFolder: SourcesFolder;
+	/** PR-5 (G3, G5): the Inbox's "Add source…" and a source header's "Remove". */
+	sourceActions: SourceActions;
+	/** PR-11 (G4): a source header's "Rename", and a rename Tephra announces. */
+	sourceRenamer: SourceRenamer;
+	sourcePromoter: SourcePromoter;
+	/** R3-4: tells deletes Atlas or a missing source caused from the user's own. */
+	sourceDeleteClassifier: SourceDeleteClassifier;
 	graduation: GraduationController;
 	private persistDebounced: Debouncer<[], void>;
 	/** PR-1 (G5): debounced live refresh for Inside-Vault Folder sources. Plugin-wide, not per leaf, so
@@ -121,6 +189,7 @@ export default class AtlasPlugin extends Plugin {
 	async onload() {
 		const data = (await this.loadData()) as AtlasData | null;
 		this.loadFromData(data);
+		this.seedPromotedRoots(); // R5: before the index, the resolver and the Inbox read them
 		this.renderLog = new RenderLog(this.app.vault.adapter, `${this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`}/${RENDER_LOG_FILE}`);
 		await this.renderLog.load();
 
@@ -160,8 +229,14 @@ export default class AtlasPlugin extends Plugin {
 			scheduler: { setTimeout: (cb, ms) => window.setTimeout(cb, ms), clearTimeout: (handle) => window.clearTimeout(handle as number) },
 			getPoolFolder: () => this.settings.poolFolder,
 			getExcludedFolders: () => this.settings.excludedFolders,
+			skipsSources: () => skipsSourcesFolder(this.settings, Platform.isMobile),
 			notify: (message, durationMs) => void new Notice(message, durationMs),
-			afterMove: () => void noticeIfLinksNotUpdated(this.app),
+			afterMove: () => void noticeIfLinksNotUpdated(this.app, undefined, () => this.tephraActive()),
+			// R3-6: with the toggle on, a pool rename waits for Tephra's acknowledgement, not Obsidian's link rewrite.
+			tephraAcks: {
+				isActive: () => this.tephraActive(),
+				whenAcknowledged: (oldPath, newPath, cb) => this.tephraRenames.whenAcknowledged(oldPath, newPath, cb),
+			},
 			onHiddenMove: (oldPath, newPath) => this.handleHiddenMove(oldPath, newPath),
 			openDialog: (options) => openNameDialog(this.app, options),
 		});
@@ -177,7 +252,8 @@ export default class AtlasPlugin extends Plugin {
 		this.apiSourceController = new ApiSourceController();
 		this.csvSourceController = new CsvSourceController();
 		this.markdownTableSourceController = new MarkdownTableSourceController();
-		this.addSettingTab(new AtlasSettingTab(this.app, this));
+		this.settingTab = new AtlasSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		this.linkSuggest = new AtlasLinkSuggest(this);
 		this.registerEditorSuggest(this.linkSuggest);
@@ -186,6 +262,214 @@ export default class AtlasPlugin extends Plugin {
 		this.freeBlockTextCache.register();
 		registerBlockLinkDisplayPostProcessor(this);
 		this.registerEditorExtension([freeBlockLivePreviewPlugin(this, this.freeBlockTextCache)]);
+		// G9: with `tephraEnabled` off both of these return at once; they render only in fallback mode.
+		this.sourceLinks = new SourceLinkController(
+			this.app,
+			// Mobile behaves as with the toggle off, whatever a synced data.json says.
+			() => ({ tephraEnabled: this.settings.tephraEnabled && !Platform.isMobile, tephraLinkFallback: this.settings.tephraLinkFallback }),
+			() => this.app.workspace.updateOptions() // re-runs editor extensions so live preview picks up the new mode
+		);
+		this.sourceDeleteClassifier = new SourceDeleteClassifier({
+			getLinkTargets: () => this.settings.tephraLinks,
+			targetExists: existsOnDisk,
+			getPromotedRoots: () => getPromotedRoots(),
+		});
+		this.sourcesFolder = new SourcesFolder({
+			fs: nodeSourcesFs,
+			getVaultPath: () => this.getVaultBasePath() || null,
+			isMobile: () => Platform.isMobile,
+			records: {
+				getLinks: () => this.settings.tephraLinks,
+				setLinks: (next) => {
+					this.settings.tephraLinks = next;
+				},
+				getExcludes: () => this.settings.tephraExcludes,
+				setExcludes: (next) => {
+					this.settings.tephraExcludes = next;
+				},
+				save: () => this.flushSave(),
+			},
+			excludeConfig: () => vaultExcludeConfig(this.app.vault as unknown as Parameters<typeof vaultExcludeConfig>[0]),
+			showsInSearch: (name) => showsInSearch(this.settings, name),
+			classifier: this.sourceDeleteClassifier,
+			notify: (message) => void new Notice(message, 10_000),
+			onExcludesChanged: () => refreshExcludedFilesPane(this.app),
+		});
+		this.sourceActions = new SourceActions({
+			app: this.app,
+			getConnection: () => this.tephraConnection,
+			pickFolder,
+			getVaultPath: () => this.getVaultBasePath() || null,
+			fs: nodeSourcesFs,
+			realpath: realPath,
+			sourcesFolder: this.sourcesFolder,
+			confirm: (message, confirmLabel, onConfirm) => new ConfirmModal(this.app, message, confirmLabel, onConfirm).open(),
+			notify: (message) => void new Notice(message, 10_000),
+		});
+		this.sourceRenamer = new SourceRenamer({
+			app: this.app,
+			getConnection: () => this.tephraConnection,
+			getVaultPath: () => this.getVaultBasePath() || null,
+			fs: nodeSourcesFs,
+			swapSource: (oldName, newName, sourceRoot) => this.sourcesFolder.swapSource(oldName, newName, sourceRoot),
+			remap: (oldName, newName) => this.remapSourcePaths(oldName, newName),
+			prepareTabs: (oldName, newName) => captureRenameTabs(this.renameTabsDeps(), oldName, newName),
+			afterRename: (oldName, newName) => {
+				for (const leaf of this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE)) {
+					const view = leaf.view;
+					if (view instanceof AtlasExplorerView) view.renameSourceSection(oldName, newName);
+				}
+			},
+			notify: (message) => void new Notice(message, 10_000),
+		});
+		this.sourcePromoter = new SourcePromoter({
+			getConnection: () => this.tephraConnection,
+			getVaultPath: () => this.getVaultBasePath() || null,
+			confirm: (message, confirmLabel) => askConfirm(this.app, message, confirmLabel),
+			notify: (message) => void new Notice(message, 10_000),
+		});
+		// G16/R3-3: the toggle's off path unlinks what Atlas linked and removes the entries Atlas excluded. Never
+		// run on unload (E8): only `TephraController.setEnabled(false)` reaches the registry.
+		this.register(registerTephraTeardown({ name: "Sources folder links", run: () => this.sourcesFolder.teardown() }));
+		const tephraOn = () => this.tephraActive();
+		this.tephraLinkSetting = new TephraLinkSetting({
+			getConfig: (key) => (this.app.vault as unknown as { getConfig(key: string): unknown }).getConfig(key),
+			getStoredConfig: (key) => readStoredVaultConfig(this.app.vault, key),
+			setConfig: (key, value) => (this.app.vault as unknown as { setConfig(key: string, value: unknown): void }).setConfig(key, value),
+			getSaved: () => normalizeSavedLinkSetting(this.settings.tephraSavedLinkSetting),
+			setSaved: (saved) => {
+				this.settings.tephraSavedLinkSetting = saved;
+			},
+			save: () => this.flushSave(),
+			isActive: tephraOn,
+			isMobile: () => Platform.isMobile,
+			onError: (message, error) => {
+				console.error("[Atlas]", message, error);
+				new Notice(message, 10_000);
+			},
+		});
+		// Restored on the toggle's off path only; never on unload (E8).
+		this.register(registerTephraTeardown({ name: "Obsidian link-update setting", run: () => this.tephraLinkSetting.restore() }));
+		this.tephraRenames = new TephraRenameForwarder({
+			queue: new TephraRenameQueue({
+				storage: nodeQueueStorage,
+				path: this.tephraRenameQueuePath(),
+				now: () => Date.now(),
+				onCorrupt: ({ asidePath, reason }) => {
+					console.error(`[Atlas] The Tephra rename queue was ${reason}; ${asidePath ? `kept aside as ${asidePath}` : "it could not be moved aside"}.`);
+					new Notice(`Atlas: the saved list of renames waiting for Tephra was damaged (${reason}). It was ${asidePath ? "kept aside" : "left in place"} and a new one started. Links for renames made while Tephra was off may need a fix.`, 15_000);
+				},
+				onWriteError: reportQueueWriteErrorOnce({
+					log: (error) => console.error("[Atlas] couldn't write the Tephra rename queue", error),
+					notify: (message) => void new Notice(message, 15_000),
+				}),
+			}),
+			scheduler: { setTimeout: (cb, ms) => window.setTimeout(cb, ms), clearTimeout: (handle) => window.clearTimeout(handle as number) },
+			now: () => Date.now(),
+			isActive: tephraOn,
+			getConnection: () => this.tephraConnection,
+			getVaultRoot: () => this.getVaultBasePath() || null,
+			notify: (message) => void new Notice(message, 10_000),
+			log: (message, detail) => console.warn(message, detail ?? ""),
+		});
+		this.tephraBacklinks = new TephraBacklinksSection({
+			app: this.app,
+			isEnabled: tephraOn,
+			getConnection: () => this.tephraConnection,
+			includeCrossSourceNotes: () => this.sourceLinks.getMode() === "fallback",
+			open: (path, line, newTab) => void openBacklinkRow(this.app, path, line, newTab),
+		});
+		this.tephraGraphSync = new TephraGraphSync({
+			setEdges: (edges) => this.unitIndex.setTephraEdges(edges),
+			clearEdges: () => this.unitIndex.clearTephraEdges(),
+			afterRefresh: (promotionsChanged) => {
+				this.tephraBacklinks.refresh(true);
+				if (promotionsChanged) this.refreshExplorerViews();
+			},
+		});
+		this.tephraStarter = new TephraStarter({ check: () => this.tephraConnection?.check() ?? Promise.resolve() });
+		this.tephraStatusBar = new TephraStatusBar({
+			addItem: () => this.addStatusBarItem(),
+			openSettings: () => this.openTephraSettings(),
+			start: () => void this.tephraStarter.start(), // F7: a click on Start is the only caller
+		});
+		this.tephraController = new TephraController({
+			getEnabled: () => this.settings.tephraEnabled,
+			setEnabled: (enabled) => {
+				this.settings.tephraEnabled = enabled;
+			},
+			save: () => this.flushSave(),
+			isMobile: () => Platform.isMobile,
+			// E13: refuse before anything is saved, connected or changed, and say which path is in the way.
+			beforeEnable: async () => {
+				const verdict = await this.sourcesFolder.checkCanEnable();
+				if (!verdict.ok) {
+					new Notice(`Atlas: Tephra is not turned on. "${verdict.path}" in your vault is in the way: ${verdict.reason}. Move or rename it, then try again.`, 12_000);
+				}
+				return verdict.ok;
+			},
+			createConnection: () => {
+				const url = resolveTephraRpcUrl(this.settings.tephraUrl);
+				if (typeof this.settings.tephraUrl === "string" && this.settings.tephraUrl.trim() !== "" && url === TEPHRA_RPC_URL) {
+					console.warn("[Atlas] Using Tephra's default address: `tephraUrl` in data.json is not a loopback http address (http://127.0.0.1:<port>, localhost or [::1]).");
+				}
+				const connection = new TephraConnection(new TephraClient({ request: obsidianTephraRequest, openSocket: openNodeWebSocket, url }));
+				// Every finished check, changed or not (a `.gitignore` edit changes nothing in `source.list`): offline
+				// creates nothing and the next online check tries again.
+				connection.onCheck((snapshot) => {
+					if (snapshot.state === "online") void this.sourcesFolder.sync(snapshot.sources);
+				});
+				// PR-12 (G6): the promoted roots come from every source list Atlas reads, before anything draws from them
+				// (registered ahead of the explorer refresh below), so a promote made by anyone, `tephractl` included, lands.
+				bindPromotedRoots(connection, {
+					getVaultPath: () => this.getVaultBasePath() || null,
+					onChanged: (roots) => this.onPromotedRootsChanged(roots),
+				});
+				// PR-11 (E6): a rename made with `tephractl` runs the same remap and swap as Atlas's own.
+				connection.onSourceRenamed((oldName, newName) => this.sourceRenamer.onRenamed(oldName, newName));
+				// PR-4 (G1/E5): sections appear, go, turn "(missing)" or come back with the source list.
+				refreshExplorersOnTephraChange(connection, () => this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE).map((leaf) => leaf.view));
+				this.tephraGraphSync.bind(connection); // PR-8: edges on first online and per `graph:changed` burst
+				// PR-9 (G13): the status bar follows this connection; Tephra answering by itself ends "starting", and a
+				// drop empties the Backlinks section (it re-fills when graph sync sees Tephra online again).
+				this.tephraStatusBar.attach(connection, this.tephraStarter);
+				connection.onOnlineChange((online) => {
+					if (online) this.tephraStarter.cancel();
+					else this.tephraBacklinks.refresh(true);
+				});
+				// PR-10 (G11): every finished check that finds Tephra online sends what is queued, oldest first. Not only a
+				// change to online: a send that failed while Tephra stayed up (a timeout) is tried again at the next check.
+				connection.onCheck((snapshot) => {
+					if (snapshot.state === "online") this.tephraRenames.kick();
+				});
+				return connection;
+			},
+			reportTeardownFailures: (failures) => {
+				for (const failure of failures) console.error(`[Atlas] Tephra clean-up step "${failure.name}" failed`, failure.error);
+				new Notice(`Atlas: ${failures.length} Tephra clean-up step(s) failed (${failures.map((f) => f.name).join(", ")}). See the developer console.`);
+			},
+			afterChange: (enabled) => this.onTephraToggled(enabled),
+		});
+		registerSourceLinkFallbackPostProcessor(this);
+		registerBrokenSourceLinkHover(this); // E3: hover text for a broken or ambiguous `@source:` link
+		// Installed now, not only at layout-ready, so the startup link-resolution pass already sees the
+		// hook; `sync()` runs again at layout-ready to add the leaf-level guard once a leaf exists.
+		this.sourceLinks.sync();
+		this.registerEditorExtension([sourceLinkLivePreviewPlugin(this)]);
+		// G16: builds the connection only when the saved toggle is on and this isn't mobile.
+		if (skipsSourcesFolder(this.settings, Platform.isMobile)) this.sourcesFolder.start();
+		this.tephraController.startIfEnabled();
+		// PR-10 (G11): a toggle that is on at load reads the queue, and puts Obsidian's link updating back off if Dan turned it on.
+		if (this.tephraActive()) {
+			this.tephraRenames.load();
+			void this.tephraLinkSetting.ensureOff();
+		}
+		// G2/E6/G13: Obsidian regaining focus asks Tephra for a fresh source list (and so a `Sources/` sync and the
+		// status bar's answer). That listener belongs to the connection (`TephraConnection.start()` adds it, `stop()`
+		// removes it), so with the toggle off there is no focus handler at all. The connection's own `graph:changed` push channel (`openNodeWebSocket`) lands on the same check. E6 is met in
+		// two bounds: a push is followed within 5 s (about a second in practice); Tephra (dev b04c1cf) sends no
+		// push for `source.register` / `source.unregister`, so those are seen at the next 10 s check (within 12 s)
+		// or on focus (within 2 s). The 5 s bound for those two needs a Tephra change, tracked on the Tephra side.
 
 		// PR-2 (T12): must run before registerView() below registers the view factory, so the
 		// G13 indicator and the "Sort children…" menu item resolve a real icon the very first
@@ -193,6 +477,20 @@ export default class AtlasPlugin extends Plugin {
 		registerSortIcons();
 
 		this.registerView(ATLAS_VIEW_TYPE, (leaf) => new AtlasExplorerView(leaf, this));
+		// PR-8 (G10): the fallback pane for "Also linked from (Tephra)"; empty while the toggle is off.
+		this.registerView(ATLAS_LINKS_VIEW_TYPE, (leaf) => new AtlasLinksView(leaf, () => this.tephraBacklinks.refresh(true)));
+		this.addCommand({
+			id: "open-links-pane",
+			name: "Open Links pane",
+			checkCallback: (checking) => {
+				if (!this.settings.tephraEnabled || Platform.isMobile) return false;
+				if (!checking) void this.activateLinksPane();
+				return true;
+			},
+		});
+		this.registerEvent(this.app.workspace.on("file-open", () => this.tephraBacklinks.refresh()));
+		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.tephraBacklinks.refresh()));
+		this.registerEvent(this.app.workspace.on("layout-change", () => this.tephraBacklinks.refresh())); // a Backlinks panel opened
 
 		this.app.workspace.onLayoutReady(() => {
 			this.unitIndex.rebuild();
@@ -200,6 +498,7 @@ export default class AtlasPlugin extends Plugin {
 			// Deferred until layout is ready so the native `[[` suggester is already registered —
 			// see docs/decisions.md for why this reorder is needed and how it degrades safely.
 			applySuggesterPrecedence(this.app, this.linkSuggest);
+			this.sourceLinks.sync(); // G9: after layout, so the workspace and a leaf exist to patch
 			if (this.settings.replaceNativeExplorerOnStartup) {
 				void this.activateExplorerView();
 			}
@@ -300,7 +599,7 @@ export default class AtlasPlugin extends Plugin {
 
 	/** The vault's absolute filesystem path (desktop only — mobile's adapter isn't a
 	 * `FileSystemAdapter`, and the MCP server never runs there anyway). */
-	private getVaultBasePath(): string {
+	getVaultBasePath(): string {
 		const adapter = this.app.vault.adapter;
 		return adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
 	}
@@ -345,6 +644,8 @@ export default class AtlasPlugin extends Plugin {
 	onVaultCreateEvent(file: TAbstractFile): void {
 		this.unitIndex.onVaultCreate(file);
 		this.scheduleInsideFolderRefresh([file.path]);
+		// R3-4: a file Obsidian finds under a linked source is never one half of an external move.
+		if (isInSourcesFolder(file.path) && skipsSourcesFolder(this.settings, Platform.isMobile)) return;
 		const oldPath = this.externalMoveDetector.matchCreate(file);
 		if (oldPath !== null) this.onVaultRenameEvent(file, oldPath);
 	}
@@ -352,6 +653,17 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-1 (G5): a vault `delete` event. The live refresh is queued after the view's own delete handling,
 	 * so the placeholder/mode reconciliation has already run by the time the folder re-reads. */
 	onVaultDeleteEvent(file: TAbstractFile): void {
+		// R3-4: a delete Atlas caused (it unlinked a folder or excluded a path), or one that a missing source
+		// caused (its folder is gone or its drive is out), is not the user deleting a note. Nothing that tracks
+		// the file may react: no promotion loss, no graduation, no placeholder `noteRef` clearing, no external
+		// move pairing. View nodes keep their refs and show the greyed missing row; they resolve again when the
+		// files return. An Inside-Vault Folder source still refreshes. A real delete under a linked source
+		// (`classify` answers "real") goes on below like any other. Not gated on the toggle: Obsidian reports the
+		// deletes of a toggle-off unlink after the setting has already gone off, and they must still be expected.
+		if (isInSourcesFolder(file.path) && this.sourceDeleteClassifier.classify(file.path) !== "real") {
+			this.scheduleInsideFolderRefresh([file.path]);
+			return;
+		}
 		this.unitIndex.onVaultDelete(file.path);
 		if (this.unitIndex.pruneHiddenModuleItems(file.path)) this.persistDebounced(); // PR-2: no orphaned hidden entries
 		this.graduation.handleDelete(file);
@@ -370,6 +682,8 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-1 (G5): a vault `rename` event. The live refresh is queued only after `viewsManager.onVaultRename`
 	 * has run (rewrites refs, detaches a move-out) — it's a debounced timer, so it can never fire inline. */
 	onVaultRenameEvent(file: TAbstractFile, oldPath: string): void {
+		// PR-10 (G11): first, so the rename is on disk in the queue before anything below can throw. Inert with the toggle off.
+		this.tephraRenames?.record(oldPath, file.path, file instanceof TFolder);
 		this.rewriteNoAutoPromoteOnRename(oldPath, file.path); // before onVaultRename: its folder branch rebuilds the index
 		const promotionsChanged = this.unitIndex.onVaultRename(file, oldPath);
 		this.viewsManager.onVaultRename(oldPath, file.path); // saves itself if anything changed
@@ -423,9 +737,57 @@ export default class AtlasPlugin extends Plugin {
 		this.graduation?.dispose(); // before closing the dialog, so a dismissed one doesn't revert or move anything
 		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);
+		this.sourcesFolder?.dispose(); // E8: stops new syncs only; no link, `.gitignore` line or Excluded entry changes
+		this.sourceRenamer?.dispose(); // PR-11 (E8): a rename in the middle is not rolled back or finished; the next load reconciles to Tephra's list
+		this.tephraStatusBar?.hide(); // PR-9: the item goes with the plugin; nothing else changes
+		this.tephraStarter?.cancel();
+		this.tephraRenames?.dispose(); // PR-10 (E8): stops timers; the queue file and Obsidian's link setting stay as they are
+		this.tephraController?.dispose(); // E8: stops the timer only; the teardown steps run on the toggle's off path alone
+		this.tephraGraphSync?.unbind(false); // PR-8: stops following Tephra; nothing is written
+		this.tephraBacklinks?.detach(); // removes the section from the Backlinks panel
+		this.sourceLinks?.dispose(); // E8: removes the in-memory patch only — no files or settings change
 		this.persistDebounced?.run(); // flush any pending save rather than losing up to 500ms of drags
 		void this.renderLog?.dispose(); // render log: write what's pending; a rejected write is swallowed inside
 		console.debug("[Atlas] unloading");
+	}
+
+	/** The Tephra toggle finished flipping (on after the save, off after the teardown). Public so a test can drive
+	 * the exact code the controller runs. The unit index reads the toggle live, but only a rebuild reclassifies
+	 * the vault-root folders: a `Sources/` that exists while the toggle is off (the empty one E13 accepts, or one
+	 * left when a teardown unlink failed) is a module until the toggle goes on, and a leftover user `Sources/`
+	 * becomes one again when it goes off. So both directions rebuild, then repaint the open explorers. */
+	onTephraToggled(enabled: boolean): void {
+		if (!enabled) setPromotedRoots([]); // the promotion stays registered in Tephra; Atlas just stops showing it (G16)
+		if (enabled) {
+			this.seedPromotedRoots(true); // Tephra may be down: the last known roots stand until it answers
+			this.sourcesFolder.start();
+			// PR-10 (G11): the old value is saved before Obsidian's setting is switched off. Renames made while the
+			// toggle was off are not queued, and so are not sent now; ones queued before it went off still are.
+			this.tephraRenames?.load();
+			void this.tephraLinkSetting?.enable();
+			this.tephraRenames?.kick();
+		}
+		else this.tephraGraphSync.unbind(); // PR-8: forgets the in-memory edges and recomputes
+		this.tephraBacklinks.refresh(true); // PR-8: adds the section on, removes it (and any request in flight) off
+		const before = this.sourceLinks.getMode();
+		this.sourceLinks.sync();
+		// A runtime switch into the Q13 fallback doesn't re-render open editors (docs/decisions.md, PR-1).
+		if (this.sourceLinks.getMode() === "fallback" && before !== "fallback") {
+			new Notice("Atlas: reload Obsidian for [[@source:…]] links to render.");
+		}
+		this.unitIndex.rebuild();
+		this.refreshExplorerViews();
+	}
+
+	/** PR-8 (G10): opens the Atlas Links pane in the right sidebar, reusing one that's open. */
+	async activateLinksPane(): Promise<void> {
+		const { workspace } = this.app;
+		let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(ATLAS_LINKS_VIEW_TYPE)[0] ?? null;
+		if (!leaf) {
+			leaf = workspace.getRightLeaf(false);
+			await leaf?.setViewState({ type: ATLAS_LINKS_VIEW_TYPE, active: true });
+		}
+		if (leaf) await workspace.revealLeaf(leaf);
 	}
 
 	/** PR 15 fix: re-renders every open Atlas explorer leaf — used by the settings tab right after a
@@ -451,12 +813,18 @@ export default class AtlasPlugin extends Plugin {
 	private loadFromData(data: AtlasData | null): void {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
 		// Always a fresh, normalised array: `Object.assign` above would otherwise share DEFAULT_SETTINGS' array.
+		this.settings.tephraLinks = normalizeTephraLinks(data?.settings?.tephraLinks);
+		this.settings.tephraPromotedRoots = normalizeTephraPromotedRoots(data?.settings?.tephraPromotedRoots);
+		this.settings.tephraExcludes = normalizeTephraExcludes(data?.settings?.tephraExcludes);
 		this.settings.noAutoPromoteFolders = normalizeNoAutoPromoteFolders(data?.settings?.noAutoPromoteFolders, this.settings.poolFolder);
 		// PR-1.F2: a hand-edited non-boolean value must not throw and falls back to the default (on),
 		// rather than being carried through by the plain `Object.assign` above.
 		this.settings.highlightOpenNote = normalizeHighlightOpenNote(this.settings.highlightOpenNote);
 		// PR-1 (G1): a missing or non-boolean value (an upgrade from a data.json without the key) is off.
 		this.settings.autoPromotion = normalizeAutoPromotion(this.settings.autoPromotion);
+		// G15/G16: an old or hand-edited data.json: only a real `true` turns Tephra on; a non-object
+		// `tephraSourceSettings` is `{}`.
+		Object.assign(this.settings, normalizeTephraSettings(this.settings));
 		this.manualPromotions = data?.manualPromotions ?? [];
 		this.dismissedByView = data?.dismissedByView ?? {};
 		this.dismissedGlobal = data?.dismissedGlobal ?? [];
@@ -466,6 +834,76 @@ export default class AtlasPlugin extends Plugin {
 		if (!data) {
 			this.settings.excludedFolders = computeDefaultExcludedFolders(this.app, this.settings.poolFolder);
 		}
+	}
+
+	/** G16: the Tephra toggle. Turning it off runs the registered teardown steps first; see `TephraController`. */
+	setTephraEnabled(enabled: boolean): Promise<void> {
+		const settled = this.tephraController.setEnabled(enabled);
+		// PR-9 (G13): off removes the status-bar item in this same tick, not after the teardown; on with a connection
+		// already live (an off flip collapsed into this on) puts it back. A fresh connection attaches in `createConnection`.
+		if (!enabled) this.tephraStatusBar?.hide();
+		else {
+			const connection = this.tephraConnection;
+			if (connection && this.tephraStatusBar) this.tephraStatusBar.attach(connection, this.tephraStarter);
+		}
+		return settled;
+	}
+
+	/** PR-9 (G13): opens Atlas's settings on the Tephra tab (the status bar's online item). Uses Obsidian's own
+	 * settings modal (`app.setting`, not in the public typings), and does nothing if this build doesn't have it. */
+	openTephraSettings(): void {
+		this.settingTab.showTab("tephra");
+		const setting = (this.app as unknown as { setting?: { open?: () => void; openTabById?: (id: string) => unknown } }).setting;
+		setting?.open?.();
+		setting?.openTabById?.(this.manifest.id);
+	}
+
+	/** PR-12 (R5): keeps the promoted roots Tephra last listed in `settings.tephraPromotedRoots` (outside the views),
+	 * so a start with Tephra down still knows them. Saved at once: a quick reload must not lose them. */
+	private rememberPromotedRoots(roots: readonly PromotedRootLike[]): void {
+		const next: Record<string, { vaultPath: string; absRoot: string }> = {};
+		for (const root of roots) if (root.absRoot !== undefined) next[root.name] = { vaultPath: root.vaultPath, absRoot: root.absRoot };
+		this.settings.tephraPromotedRoots = next;
+		void this.flushSave();
+	}
+
+	/** PR-12 (G6): the promoted roots changed (a promote or return, by Atlas or `tephractl`). Everything that maps a
+	 * vault path to a Tephra id or back reads them, so the Backlinks section for the open file is asked again too:
+	 * its id for the same file just changed (`@tephra:crates/tephrad/src/x.rs` <-> `@tephrad:src/x.rs`), and Tephra
+	 * may send no `graph:changed` for it. */
+	private onPromotedRootsChanged(roots: readonly PromotedRootLike[]): void {
+		this.rememberPromotedRoots(roots);
+		this.sourceLinks?.invalidateIndex();
+		this.unitIndex?.onSourceRootsChanged();
+		this.tephraBacklinks?.refresh(true);
+	}
+
+	/** PR-12 (R5): the last known promoted roots, in memory, until Tephra answers with the real ones. Only while
+	 * the toggle is on (G16: off, no promoted section and no `@tephrad:` resolution). */
+	private seedPromotedRoots(active: boolean = this.tephraActive()): void {
+		if (!active) return;
+		const saved = this.settings?.tephraPromotedRoots ?? {};
+		setPromotedRoots(Object.entries(saved).map(([name, entry]) => ({ name, vaultPath: entry.vaultPath, absRoot: entry.absRoot })));
+	}
+
+	/** True while the Tephra toggle is on and this is desktop: mobile behaves as with the toggle off. */
+	tephraActive(): boolean {
+		return this.settings.tephraEnabled && !Platform.isMobile;
+	}
+
+	/** PR-10: where the Tephra rename queue lives: the plugin's own folder (`manifest.dir`, which may not be named after the id). */
+	private tephraRenameQueuePath(): string {
+		return resolveTephraRenameQueuePath({
+			basePath: this.getVaultBasePath(),
+			configDir: this.app.vault.configDir,
+			manifestDir: this.manifest.dir,
+			manifestId: this.manifest.id,
+		});
+	}
+
+	/** The live Tephra connection, or null while the toggle is off (or on mobile). */
+	get tephraConnection(): TephraConnection | null {
+		return this.tephraController?.getConnection() ?? null;
 	}
 
 	/** Saves right away and drops any pending debounced save: for changes that must survive an immediate reload. */
@@ -556,6 +994,65 @@ export default class AtlasPlugin extends Plugin {
 		const dismissedChanged = this.unitIndex.rewriteDismissedAndAddedPaths(oldPath, newPath);
 		if (manualChanged || dismissedChanged) this.persistDebounced();
 		this.viewsManager.onVaultRename(oldPath, newPath);
+	}
+
+	/**
+	 * PR-11 (G4, R3-4): Tephra has renamed a source, so everything Atlas keys by a vault path under `Sources/<old>`
+	 * moves to `Sources/<new>`. Same order as `handleHiddenMove`: `noAutoPromoteFolders` saved first, then manual
+	 * promotions and dismissed/added paths, then the views (every view saved once). Per-source settings and fold
+	 * state follow in the same save. Reads no file and builds no index of the source (F1).
+	 *
+	 * The result is flushed to `data.json` before it returns (AGENTS.md: structural conversions don't wait on the 500 ms
+	 * debounce). Tephra has already renamed the source and won't announce it again, so a quit between here and the
+	 * debounce would leave `Sources/<old>/…` refs orphaned for good, whatever the link swap does afterwards.
+	 */
+	async remapSourcePaths(oldName: string, newName: string): Promise<void> {
+		const oldPath = sourcePrefix(oldName);
+		const newPath = sourcePrefix(newName);
+		const remap = remapSourceStores(
+			{
+				noAutoPromoteFolders: this.settings.noAutoPromoteFolders,
+				expandedModuleFolders: Array.from(this.expandedModuleFolders),
+				sourceSettings: this.settings.tephraSourceSettings,
+				excludes: {},
+			},
+			oldName,
+			newName
+		);
+		if (remap.noAutoPromoteFolders) this.settings.noAutoPromoteFolders = remap.noAutoPromoteFolders;
+		if (remap.sourceSettings) this.settings.tephraSourceSettings = remap.sourceSettings;
+		if (remap.expandedModuleFolders) this.expandedModuleFolders = new Set(remap.expandedModuleFolders);
+		const manualChanged = this.unitIndex.rewriteManualPromotions(oldPath, newPath);
+		const dismissedChanged = this.unitIndex.rewriteDismissedAndAddedPaths(oldPath, newPath);
+		if (manualChanged || dismissedChanged) this.persistDebounced();
+		this.viewsManager.remapPathPrefix(oldPath, newPath);
+		// One write, after every store above has moved (settings, promotions, dismissed/added, views, fold state).
+		await this.flushSave();
+	}
+
+	/** What `captureRenameTabs` needs from the live workspace and vault. */
+	private renameTabsDeps(): Parameters<typeof captureRenameTabs>[0] {
+		const { workspace, vault } = this.app;
+		return {
+			iterateLeaves: (visit) => workspace.iterateAllLeaves((leaf) => visit(leaf as unknown as RenameTabLeaf)),
+			isIndexed: (path) => vault.getAbstractFileByPath(path) !== null,
+			whenIndexed: (paths, timeoutMs) =>
+				new Promise<void>((resolve) => {
+					const waiting = new Set(paths.filter((path) => vault.getAbstractFileByPath(path) === null));
+					if (waiting.size === 0) return resolve();
+					const done = (): void => {
+						window.clearTimeout(timer);
+						vault.offref(ref);
+						resolve();
+					};
+					const ref = vault.on("create", (file) => {
+						waiting.delete(file.path);
+						if (waiting.size === 0) done();
+					});
+					const timer = window.setTimeout(done, timeoutMs);
+				}),
+			openLeaf: () => workspace.getLeaf("tab") as unknown as RenameTabLeaf,
+		};
 	}
 
 	/** Keeps `noAutoPromoteFolders` pointing at a renamed or moved folder (E4). Assigns and saves right

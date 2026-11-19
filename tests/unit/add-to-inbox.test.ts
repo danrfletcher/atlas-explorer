@@ -402,6 +402,8 @@ type FakeSectionThis = {
 	inboxCollapsed: boolean;
 	plugin: { viewsManager: { setInboxMode: ReturnType<typeof vi.fn> }; app: { vault: App["vault"] } };
 	openAddFileModal: ReturnType<typeof vi.fn>;
+	/** Atlas-22 PR-5: the "+" asks whether the Tephra toggle is on; these header tests are the toggle-off Inbox. */
+	tephraSectionsOn: ReturnType<typeof vi.fn>;
 	matchesFilter: ReturnType<typeof vi.fn>;
 	sortMode: string;
 	inboxSelectOrder: string[];
@@ -418,6 +420,7 @@ function fakeSectionThis(app: App): FakeSectionThis {
 		inboxCollapsed: false,
 		plugin: { viewsManager: { setInboxMode: vi.fn() }, app: { vault: app.vault } },
 		openAddFileModal: vi.fn(),
+		tephraSectionsOn: vi.fn(() => false),
 		matchesFilter: vi.fn(() => true),
 		sortMode: "alphabetical",
 		inboxSelectOrder: [],

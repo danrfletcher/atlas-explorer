@@ -4,6 +4,7 @@ import { AtlasExplorerView } from "../../src/explorer-view";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
 import { unitRefKey } from "../../src/types";
+import { ViewsManager } from "../../src/views";
 import type { AddedItem, UnitRef } from "../../src/types";
 import { view } from "./explorer-view-sort-truncate-helpers";
 
@@ -293,5 +294,52 @@ describe("PR-1.F2 R1 — a missing added row's ref is never carried into a drag 
 
 		expect(payload.refs).toEqual([live]);
 		expect(fake.selectedInboxRefKeys).toEqual(new Set([unitRefKey(live)]));
+	});
+});
+
+describe("PR-4 E5: a missing Tephra source — placed refs", () => {
+	const placed = file("Sources/gone/notes.md");
+
+	function build(present: boolean) {
+		const app = new App();
+		app.vault.seedFolder("Sources");
+		app.vault.seedFolder("Sources/other");
+		app.vault.seedFile("Sources/other/kept.md");
+		if (present) {
+			app.vault.seedFolder("Sources/gone");
+			app.vault.seedFile(placed.path);
+		}
+		const viewsManager = new ViewsManager(app, [], "", () => {});
+		const viewId = viewsManager.getViews()[0].id;
+		viewsManager.placeUnit(viewId, placed, null);
+		const unitIndex = new UnitIndex(app, { ...DEFAULT_SETTINGS }, [], {}, [], []);
+		const fake = { plugin: { app, settings: { ...DEFAULT_SETTINGS }, unitIndex, freeBlockTextCache: new Map() }, unitsByRefKey: new Map() };
+		const resolve = () => (proto.resolveRef as unknown as (this: unknown, ref: UnitRef) => Promise<{ missing: boolean; text: string }>).call(fake, placed);
+		return { app, viewsManager, viewId, resolve };
+	}
+
+	it("a placed ref under a source whose folder is gone resolves as missing (greyed row), and stays in the view", async () => {
+		const { viewsManager, viewId, resolve } = build(false);
+		expect(await resolve()).toMatchObject({ missing: true, text: "notes.md" });
+		expect(viewsManager.getViews().find((v) => v.id === viewId)!.root.map((n) => n.ref)).toEqual([placed]);
+	});
+
+	it("the vault deleting the source's links never removes the placed entry (PR-3 R3-4 is what keeps it; this is the render side)", async () => {
+		const { viewsManager, viewId, resolve } = build(false);
+		await resolve();
+		expect(viewsManager.getViews().find((v) => v.id === viewId)!.root).toHaveLength(1);
+	});
+
+	it("when the source comes back the same placed entry resolves as a live row, with no action from the user", async () => {
+		const gone = build(false);
+		expect((await gone.resolve()).missing).toBe(true);
+		gone.app.vault.seedFolder("Sources/gone");
+		gone.app.vault.seedFile(placed.path);
+		expect((await gone.resolve()).missing).toBe(false);
+		expect(gone.viewsManager.getViews().find((v) => v.id === gone.viewId)!.root).toHaveLength(1);
+	});
+
+	it("a source that is present resolves live from the start", async () => {
+		expect((await build(true).resolve()).missing).toBe(false);
 	});
 });

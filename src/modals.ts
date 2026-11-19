@@ -323,7 +323,10 @@ export class StatusesModal extends Modal {
 }
 
 export class ConfirmModal extends Modal {
-	constructor(app: App, private message: string, private confirmLabel: string, private onConfirm: () => void) {
+	private confirmed = false;
+
+	/** `onCancel` (PR-12) runs when the dialog closes without a confirm: Cancel, Escape, a click outside. */
+	constructor(app: App, private message: string, private confirmLabel: string, private onConfirm: () => void, private onCancel?: () => void) {
 		super(app);
 	}
 
@@ -337,6 +340,8 @@ export class ConfirmModal extends Modal {
 					.setWarning()
 					.setButtonText(this.confirmLabel)
 					.onClick(() => {
+						if (this.confirmed) return; // a second press of Confirm before the dialog is gone does nothing
+						this.confirmed = true;
 						this.close();
 						this.onConfirm();
 					})
@@ -345,7 +350,15 @@ export class ConfirmModal extends Modal {
 
 	onClose(): void {
 		this.contentEl.empty();
+		if (!this.confirmed) this.onCancel?.();
 	}
+}
+
+/** PR-12: a `ConfirmModal` as a Promise: true on Confirm, false on Cancel, Escape or a click outside. Settles once. */
+export function askConfirm(app: App, message: string, confirmLabel: string): Promise<boolean> {
+	return new Promise<boolean>((resolve) => {
+		new ConfirmModal(app, message, confirmLabel, () => resolve(true), () => resolve(false)).open();
+	});
 }
 
 /** G6b(ii): confirms deleting `count` row(s) before an Overwrite refresh applies. Unlike `ConfirmModal`,

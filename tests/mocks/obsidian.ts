@@ -1,15 +1,21 @@
 /** Hand-written stand-in for the `obsidian` package (vitest aliases it here): just enough of the
  * vault model, `Modal` (with a real jsdom DOM), `Notice` (recordable), `Setting` and `debounce`. */
 
+import { StateField } from "@codemirror/state";
+
 // --- Obsidian's HTMLElement helpers -------------------------------------------------------------
 interface CreateOpts {
 	text?: string;
 	cls?: string;
 	type?: string;
+	href?: string;
 	attr?: Record<string, string>;
 }
 
 declare global {
+	interface Node {
+		appendText(text: string): void;
+	}
 	interface HTMLElement {
 		createEl<K extends keyof HTMLElementTagNameMap>(tag: K, opts?: CreateOpts | string): HTMLElementTagNameMap[K];
 		createDiv(opts?: CreateOpts | string): HTMLDivElement;
@@ -31,6 +37,7 @@ function make(parent: HTMLElement, tag: string, opts?: CreateOpts | string): HTM
 	if (o.cls) el.className = o.cls;
 	if (o.text !== undefined) el.textContent = o.text;
 	if (o.type) el.setAttribute("type", o.type);
+	if (o.href) el.setAttribute("href", o.href);
 	for (const [k, v] of Object.entries(o.attr ?? {})) el.setAttribute(k, v);
 	parent.appendChild(el);
 	return el;
@@ -63,6 +70,10 @@ proto.hasClass = function (cls: string) {
 };
 proto.toggleClass = function (cls: string, on: boolean) {
 	this.classList.toggle(cls, on);
+};
+/** Obsidian adds `appendText` to every DOM node. */
+Node.prototype.appendText = function (text: string) {
+	this.appendChild(document.createTextNode(text));
 };
 proto.setAttr = function (name: string, value: string) {
 	this.setAttribute(name, value);
@@ -152,6 +163,10 @@ export class Vault {
 		if (!this.listeners.has(name)) this.listeners.set(name, new Set());
 		this.listeners.get(name)!.add(cb);
 		return { name, cb };
+	}
+
+	offref(ref: { name: VaultEvent; cb: (...args: any[]) => void }): void {
+		this.listeners.get(ref.name)?.delete(ref.cb);
 	}
 
 	private emit(name: VaultEvent, ...args: unknown[]): void {
@@ -246,6 +261,10 @@ export class Vault {
 	getConfig(key: string): unknown {
 		return this.config[key];
 	}
+	/** Like Obsidian's: stores the value; `userIgnoreFilters` is the Excluded files list. */
+	setConfig(key: string, value: unknown): void {
+		this.config[key] = value;
+	}
 }
 
 export class MetadataCache {
@@ -253,9 +272,13 @@ export class MetadataCache {
 	getFileCache(_file: TFile): null {
 		return null;
 	}
-	getFirstLinkpathDest(_link: string, _from: string): null {
+	/** Settable like Obsidian's own (a plain method that callers and the G9 hook can replace). */
+	getFirstLinkpathDest(_link: string, _from: string): TFile | null {
 		return null;
 	}
+	/** Same shapes as Obsidian's: source path -> target path -> link count. Tests fill them in. */
+	resolvedLinks: Record<string, Record<string, number>> = {};
+	unresolvedLinks: Record<string, Record<string, number>> = {};
 	on(name: string, cb: () => void): { name: string; cb: () => void } {
 		if (name === "resolved") this.listeners.add(cb);
 		return { name, cb };
@@ -292,7 +315,48 @@ export class App {
 	vault = new Vault();
 	metadataCache = new MetadataCache();
 	fileManager = new FileManager(this.vault);
-	workspace = { onLayoutReady: (cb: () => void) => cb(), getLeavesOfType: () => [] as unknown[] };
+	workspace = {
+		onLayoutReady: (cb: () => void) => cb(),
+		getLeavesOfType: () => [] as unknown[],
+		updateOptions: () => {},
+		/** Like Obsidian's: tests replace it to observe or to stand in for the real open. */
+		openLinkText: async (_linktext: string, _sourcePath: string, _newLeaf?: boolean): Promise<void> => {},
+	};
+
+	/** Like Obsidian's internal `app.setting` (not in the public typings): `open()` shows the settings window and
+	 * `openTabById(id)` selects a plugin's tab in it, which calls that tab's `display()` as Obsidian does. Tests
+	 * register tabs with `settingTabs`; `openedTabId` is what is showing, `null` while the window is closed. */
+	settingTabs = new Map<string, { display(): void; hide?(): void }>();
+	setting = {
+		openedTabId: null as string | null,
+		isOpen: false,
+		open: (): void => {
+			this.setting.isOpen = true;
+		},
+		close: (): void => {
+			this.setting.isOpen = false;
+			if (this.setting.openedTabId) this.settingTabs.get(this.setting.openedTabId)?.hide?.();
+			this.setting.openedTabId = null;
+		},
+		openTabById: (id: string): void => {
+			const tab = this.settingTabs.get(id);
+			if (!tab) return;
+			if (this.setting.openedTabId && this.setting.openedTabId !== id) this.settingTabs.get(this.setting.openedTabId)?.hide?.();
+			this.setting.openedTabId = id;
+			tab.display();
+		},
+	};
+
+	/** Like Obsidian's internal `app.viewRegistry`: file extension (lower-case, no dot) -> view type. Core types
+	 * only; a test adds what a plugin such as VS Code Workbench would register (`rs`, `ts`, `toml`, ...). */
+	viewRegistry: { typeByExtension: Record<string, string> } = {
+		typeByExtension: { md: "markdown", canvas: "canvas", pdf: "pdf", png: "image", jpg: "image", jpeg: "image", svg: "image", mp3: "audio", mp4: "video" },
+	};
+	/** Every path handed to Obsidian's open-in-default-app, in order (a test may also replace the method). */
+	defaultAppOpens: string[] = [];
+	openWithDefaultApp = async (path: string): Promise<void> => {
+		this.defaultAppOpens.push(path);
+	};
 
 	/** Real Obsidian's own per-device `localStorage` helpers (`App.loadLocalStorage`/
 	 * `saveLocalStorage`, added 1.8.7) — an in-memory stand-in so `McpTokenStore` (PR-1.S1/R5),
@@ -395,6 +459,8 @@ export class FuzzySuggestModal<T> extends SuggestModal<T> {
 }
 export class ItemView {}
 export class MenuItem {
+	/** Obsidian's real `MenuItem.dom`: the item's element, so a test can hover it. */
+	dom: HTMLElement = document.createElement("div");
 	title = "";
 	icon = "";
 	checked = false;
@@ -425,6 +491,14 @@ export class MenuItem {
 /** Recording `Menu`: `titles()` lists the item titles in order (separators excluded). */
 export class Menu {
 	items: MenuItem[] = [];
+	private hideCallbacks: Array<() => void> = [];
+	onHide(callback: () => void): void {
+		this.hideCallbacks.push(callback);
+	}
+	/** What Obsidian does when a menu closes: runs the `onHide` callbacks. */
+	hide(): void {
+		for (const callback of this.hideCallbacks) callback();
+	}
 	separators = 0;
 	addItem(cb: (item: MenuItem) => void): this {
 		const item = new MenuItem();
@@ -449,8 +523,25 @@ export class Menu {
 		return this.items.map((item) => item.title);
 	}
 }
-export class Plugin {}
-export class PluginSettingTab {}
+/** Obsidian's `Plugin`, to the extent tests need it. `addStatusBarItem()` returns a real element and records it
+ * (`statusBarItems`, in order, including ones since removed); items are fields set lazily because several tests
+ * build a plugin with `Object.create(AtlasPlugin.prototype)`, which runs no constructor. */
+export class Plugin {
+	manifest: { id: string } = { id: "atlas" };
+	statusBarItems?: HTMLElement[];
+	addStatusBarItem(): HTMLElement {
+		const item = document.createElement("div");
+		item.className = "status-bar-item plugin-atlas";
+		(this.statusBarItems ??= []).push(item);
+		return item;
+	}
+}
+export class PluginSettingTab {
+	containerEl: HTMLElement = document.createElement("div");
+	constructor(public app?: App, public plugin?: unknown) {}
+	display(): void {}
+	hide(): void {}
+}
 /** Minimal stand-in for Obsidian's `EditorSuggest` — just enough for `AtlasLinkSuggest` (and any
  * other test that merely needs to import `src/main.ts`) to extend it; no test here exercises the
  * actual suggester popup. */
@@ -467,8 +558,36 @@ export function renderResults(_el: HTMLElement, _text: string, _match: unknown):
 export class WorkspaceLeaf {}
 export class TextComponent {}
 export class ToggleComponent {}
+/** PR-12: just enough of Obsidian's `ButtonComponent` for a dialog's buttons to render and be clicked. */
+export class ButtonComponent {
+	buttonEl: HTMLButtonElement;
+	constructor(containerEl: HTMLElement) {
+		this.buttonEl = containerEl.createEl("button");
+	}
+	setButtonText(text: string): this {
+		this.buttonEl.setText(text);
+		return this;
+	}
+	setWarning(): this {
+		this.buttonEl.addClass("mod-warning");
+		return this;
+	}
+	setDisabled(disabled: boolean): this {
+		this.buttonEl.toggleAttribute("disabled", disabled);
+		return this;
+	}
+	onClick(callback: () => void): this {
+		this.buttonEl.addEventListener("click", () => callback());
+		return this;
+	}
+}
+
 export class Setting {
 	constructor(public containerEl: HTMLElement) {}
+	addButton(cb: (button: ButtonComponent) => void): this {
+		cb(new ButtonComponent(this.containerEl));
+		return this;
+	}
 }
 
 export const Platform = { isMobile: false, isDesktop: true };
@@ -512,3 +631,10 @@ export function debounce<A extends unknown[]>(fn: (...args: A) => void, wait = 0
 	};
 	return debounced;
 }
+
+/** Real CodeMirror field standing in for Obsidian's `editorLivePreviewField`: `true` = live preview.
+ * Tests must add it to the state's extensions (as Obsidian does); `editorLivePreviewField.init(() => false)` models source mode. */
+export const editorLivePreviewField = StateField.define<boolean>({
+	create: () => true,
+	update: (value) => value,
+});

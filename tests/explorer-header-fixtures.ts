@@ -74,7 +74,11 @@ function install(saved: Saved[], target: object, key: string, descriptor: Proper
 	Object.defineProperty(target, key, { configurable: true, ...descriptor });
 }
 
-export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: number } = {}): SectionHarness {
+/** `real`: the plugin's real members (`app`, `unitIndex`, `viewsManager`, `settings`, ... and whatever else the
+ * render reads). With it the bucket rows, the row lookups, the filter, the "+" modal and the header menu are the
+ * shipped code too (only the timers stay stubbed), and the bucket's height follows the rows it
+ * really drew. Without it the harness is the stubbed one every header test uses. */
+export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: number; real?: Record<string, unknown> } = {}): SectionHarness {
 	const inboxRows = options.inboxRows ?? INBOX_ROWS;
 	const state: SectionState = { units: fileUnits(inboxRows), labels: new Map(), bucketRows: options.bucketRows ?? BUCKET_ROWS, bucketStatus: "" };
 	let headerH = 28;
@@ -84,16 +88,51 @@ export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: n
 	const proto = HTMLElement.prototype;
 
 	const bodyEl = (): HTMLElement | null => document.querySelector<HTMLElement>(".atlas-explorer-scroll");
-	const isCollapsed = (sel: string) => document.querySelector(sel)?.classList.contains("is-collapsed") ?? false;
 
-	/** Geometry in scroll-body coordinates (content-space), derived from the rendered DOM. */
-	const geometry = () => {
-		const bucketContent = isCollapsed(".atlas-bucket > .atlas-meta-children") ? 0 : state.bucketRows * ROW;
-		const bucketH = headerH + bucketContent;
+	/** Geometry in scroll-body coordinates (content-space), derived from the rendered DOM. With `real` the sections
+	 * stack in document order (bucket, the vault's Inbox, then one per Tephra source), each a header plus its content. */
+	const sectionContent = (section: Element): number => {
+		if (section.querySelector(":scope > .atlas-meta-children")?.classList.contains("is-collapsed")) return 0;
+		if (section.classList.contains("atlas-bucket")) return (options.real ? section.querySelectorAll(".atlas-row").length : state.bucketRows) * ROW;
+		return parseFloat(section.querySelector<HTMLElement>(".atlas-inbox-spacer")?.style.height ?? "0") || 0;
+	};
+	const layout = (root: ParentNode = document) => {
+		const boxes = new Map<Element, { top: number; height: number; content: number }>();
+		let top = 0;
+		for (const section of root.querySelectorAll(".atlas-explorer-scroll > .atlas-bucket, .atlas-explorer-scroll > .atlas-inbox")) {
+			const content = sectionContent(section);
+			boxes.set(section, { top, height: headerH + content, content });
+			top += headerH + content;
+		}
+		return { boxes, scrollHeight: top };
+	};
+	const isCollapsed = (sel: string) => document.querySelector(sel)?.classList.contains("is-collapsed") ?? false;
+	/** The stubbed harness's fixed two-section geometry (bucket, one Inbox), kept exactly as the header tests rely on. */
+	const stubbedGeometry = () => {
+		const bucketH = headerH + (isCollapsed(".atlas-bucket > .atlas-meta-children") ? 0 : state.bucketRows * ROW);
 		const spacer = document.querySelector<HTMLElement>(".atlas-inbox-spacer");
 		const inboxContent = isCollapsed(".atlas-inbox > .atlas-meta-children") ? 0 : parseFloat(spacer?.style.height ?? "0") || 0;
-		const inboxH = headerH + inboxContent;
-		return { bucketH, inboxTop: bucketH, inboxH, spacerH: inboxContent, scrollHeight: bucketH + inboxH };
+		return { bucketH, inboxTop: bucketH, inboxH: headerH + inboxContent, spacerH: inboxContent, scrollHeight: bucketH + headerH + inboxContent };
+	};
+	const stubbedNatural = (el: HTMLElement): { top: number; height: number } => {
+		const g = stubbedGeometry();
+		if (el.classList.contains("atlas-explorer-scroll")) return { top: 0, height: viewH };
+		if (el.classList.contains("atlas-bucket")) return { top: 0, height: g.bucketH };
+		if (el.classList.contains("atlas-inbox")) return { top: g.inboxTop, height: g.inboxH };
+		if (el.classList.contains("atlas-section-header")) return { top: el.parentElement?.classList.contains("atlas-inbox") ? g.inboxTop : 0, height: headerH };
+		if (el.classList.contains("atlas-inbox-spacer")) return { top: g.inboxTop + headerH, height: g.spacerH };
+		if (el.classList.contains("atlas-meta-children")) return el.closest(".atlas-inbox") ? { top: g.inboxTop + headerH, height: g.spacerH } : { top: headerH, height: g.bucketH - headerH };
+		return { top: 0, height: 0 };
+	};
+	const geometry = () => ({ scrollHeight: (options.real ? layout() : stubbedGeometry()).scrollHeight });
+	/** A render builds its new pane detached before it swaps it in; its sections measure as the live pane's
+	 * matching section (same as the earlier fixed bucket/inbox numbers), which is what the swap replaces. */
+	const liveSection = (section: Element): Element | null => {
+		if (section.isConnected) return section;
+		const source = (section as HTMLElement).dataset.source;
+		if (section.classList.contains("atlas-bucket")) return document.querySelector(".atlas-explorer-scroll > .atlas-bucket");
+		if (source !== undefined) return document.querySelector(`.atlas-explorer-scroll > .atlas-inbox-source[data-source="${source}"]`);
+		return document.querySelector(".atlas-explorer-scroll > .atlas-inbox:not(.atlas-inbox-source)");
 	};
 
 	const bodyScrollTop = (): number => {
@@ -103,19 +142,18 @@ export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: n
 
 	/** Natural (un-transformed, un-scrolled) box for an element in the body. */
 	const natural = (el: HTMLElement): { top: number; height: number } => {
-		const g = geometry();
+		if (!options.real) return stubbedNatural(el);
 		if (el.classList.contains("atlas-explorer-scroll")) return { top: 0, height: viewH };
-		if (el.classList.contains("atlas-bucket")) return { top: 0, height: g.bucketH };
-		if (el.classList.contains("atlas-inbox")) return { top: g.inboxTop, height: g.inboxH };
-		if (el.classList.contains("atlas-section-header")) {
-			const sectionTop = el.parentElement?.classList.contains("atlas-inbox") ? g.inboxTop : 0;
-			return { top: sectionTop, height: headerH };
-		}
-		if (el.classList.contains("atlas-inbox-spacer")) return { top: g.inboxTop + headerH, height: g.spacerH };
-		if (el.classList.contains("atlas-meta-children")) {
-			if (el.closest(".atlas-inbox")) return { top: g.inboxTop + headerH, height: g.spacerH };
-			return { top: headerH, height: g.bucketH - headerH };
-		}
+		const own = el.closest(".atlas-bucket, .atlas-inbox");
+		if (!own) return { top: 0, height: 0 };
+		// No live counterpart yet (the very first render): the pane's own layout.
+		const live = liveSection(own);
+		const box = live ? layout().boxes.get(live) : layout(own.closest(".atlas-explorer-scroll")?.parentElement ?? document).boxes.get(own);
+		if (!box) return { top: 0, height: 0 };
+		const section = own;
+		if (el === section) return { top: box.top, height: box.height };
+		if (el.classList.contains("atlas-section-header")) return { top: box.top, height: headerH };
+		if (el.classList.contains("atlas-inbox-spacer") || el.classList.contains("atlas-meta-children")) return { top: box.top + headerH, height: box.content };
 		return { top: 0, height: 0 };
 	};
 
@@ -173,7 +211,7 @@ export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: n
 	const openAddFileModal = vi.fn();
 	const showInboxHeaderMenu = vi.fn();
 	const setInboxMode = vi.fn();
-	const plugin = {
+	const plugin = options.real ?? {
 		app: { workspace: { on: vi.fn(() => ({})) }, vault: { getAbstractFileByPath: () => null } },
 		unitIndex: { getUnits: () => state.units, onChange: vi.fn(() => () => {}) },
 		viewsManager: {
@@ -191,8 +229,17 @@ export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: n
 	document.body.appendChild(host);
 	(explorer as unknown as { containerEl: HTMLElement }).containerEl = host;
 
-	Object.assign(explorer, {
+	const shared = {
 		renderToolbar: (container: HTMLElement) => container.createDiv({ cls: "atlas-toolbar" }),
+		updateActiveHighlight: vi.fn(),
+		syncRefreshTimers: vi.fn(),
+		refreshApiSourcesOnViewLoad: vi.fn(),
+	};
+	// With `real` the toolbar is the shipped one too (its filter box and sort button drive the real render).
+	const { renderToolbar: _stubbedToolbar, ...timersOnly } = shared;
+	if (options.real) Object.assign(explorer, timersOnly);
+	else Object.assign(explorer, {
+		...shared,
 		// The 60 bucket rows; their content doesn't matter to the header behaviour under test.
 		renderNodeList: async (_nodes: unknown, container: HTMLElement) => {
 			for (let i = 0; i < state.bucketRows; i++) container.createDiv({ cls: "atlas-row atlas-row-unit", attr: { "data-status": state.bucketStatus } });
@@ -200,9 +247,6 @@ export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: n
 		resolveRef: async (ref: { path: string }) => ({ text: state.labels.get(ref.path) ?? ref.path, icon: "file" }),
 		matchesFilter: () => true,
 		setPlacementTooltip: vi.fn(),
-		updateActiveHighlight: vi.fn(),
-		syncRefreshTimers: vi.fn(),
-		refreshApiSourcesOnViewLoad: vi.fn(),
 		openAddFileModal,
 		showInboxHeaderMenu,
 	});

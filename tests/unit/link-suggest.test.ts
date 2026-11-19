@@ -6,6 +6,7 @@ import type AtlasPlugin from "../../src/main";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
 import { seedRoot } from "../helpers";
+import { buildRig, openAt, stubEditor, suggestionsFor, triggerFor } from "../link-suggest-harness";
 
 // The mock's fuzzy matcher never matches, so give the suggester a plain substring match to score against.
 vi.mock("obsidian", async (importOriginal) => {
@@ -184,5 +185,68 @@ describe("onTrigger steps aside for # / ^ headings and blocks (PR-1.B1)", () => 
 		const suggest = makeSuggester(app);
 		const cursor = { line: 0, ch: 2 };
 		expect(suggest.onTrigger(cursor, stubEditor("[["), null)).toBeNull();
+	});
+});
+
+describe("the same cases with the Tephra toggle on (G8)", () => {
+	const note = "Note.md";
+
+	it.each(["[[File#", "[[File^", "[[#", "[[^", "[[File##", "![[File#", "[[File#Heading"])("PR-1.B1: returns null for %j", async (line) => {
+		const rig = await buildRig({ paths: [note, "File.md"] });
+		expect(triggerFor(rig, line, note)).toBeNull();
+		rig.dispose();
+	});
+
+	it.each([
+		{ line: "[[Fi", query: "Fi" },
+		{ line: "[[", query: "" },
+		{ line: "[[A|b#c", query: "A|b#c" },
+		{ line: "[[A|b^c", query: "A|b^c" },
+		{ line: "[[A]] [[B", query: "B" },
+	])("still triggers for $line with query $query", async ({ line, query }) => {
+		const rig = await buildRig({ paths: [note] });
+		const cursor = { line: 0, ch: line.length };
+		const result = rig.suggest.onTrigger(cursor, stubEditor(line), rig.app.vault.getAbstractFileByPath(note) as never);
+		expect(result?.query).toBe(query);
+		expect(result?.end).toEqual(cursor);
+		rig.dispose();
+	});
+
+	it("F1 regression: trigger info for [[Fi is deep-equal to the pre-change shape", async () => {
+		const rig = await buildRig({ paths: [note] });
+		const cursor = { line: 2, ch: 6 };
+		const result = rig.suggest.onTrigger(cursor, stubEditor("[[Fi"), rig.app.vault.getAbstractFileByPath(note) as never);
+		expect(result).toEqual({ start: { line: 2, ch: cursor.ch - 4 }, end: cursor, query: "Fi" });
+		rig.dispose();
+	});
+
+	it("E4: a # right after [[File inside a code block still returns null", async () => {
+		const rig = await buildRig({ paths: [note] });
+		rig.app.metadataCache.getFileCache = (() => ({
+			sections: [{ type: "code", position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 2, col: 0, offset: 0 } } }],
+		})) as unknown as App["metadataCache"]["getFileCache"];
+		expect(triggerFor(rig, "[[File#", note)).toBeNull();
+		expect(triggerFor(rig, "[[Fi", note)).toBeNull();
+		rig.dispose();
+	});
+
+	it("a null file argument still returns null", async () => {
+		const rig = await buildRig({ paths: [note] });
+		expect(rig.suggest.onTrigger({ line: 0, ch: 2 }, stubEditor("[["), null)).toBeNull();
+		rig.dispose();
+	});
+
+	it("G13: an added folder is listed in a vault note and picking it creates its interface note, as with the toggle off", async () => {
+		const rig = await buildRig({ paths: [note, "Jobs/Acme/brief.md"], prepare: (app) => app.vault.seedFolder("Jobs") });
+		rig.index.markAdded({ kind: "folder", path: "Jobs/Acme" });
+		const items = await suggestionsFor(rig, "acme", note);
+		const folder = items.find((item) => item.kind === "folder-unit");
+		expect(folder).toMatchObject({ text: "Acme" });
+		const { replaceRange } = openAt(rig, "[[acme", note);
+		await rig.suggest.selectSuggestion(folder as never, {} as KeyboardEvent);
+		expect(rig.app.vault.getAbstractFileByPath("Jobs/Acme/Acme.md")).toBeInstanceOf(TFile);
+		expect(replaceRange).toHaveBeenCalledWith("[[TODAY:Jobs/Acme/Acme.md]]", expect.anything(), expect.anything());
+		expect(document.querySelectorAll(".modal")).toHaveLength(0);
+		rig.dispose();
 	});
 });

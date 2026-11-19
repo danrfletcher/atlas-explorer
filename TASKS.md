@@ -463,6 +463,47 @@ Two bugs Dan found post-release (v0.2.0): the truncation placeholder (PR 19) doe
 
 ---
 
+## Atlas-22 PR-3: E6 (the Sources link follows Tephra) and the Tephra change it depends on
+
+E6 is split by who is responsible (design review, provisional until Dan ratifies it). PR-3 owns two bounds and meets both. The 5 s bound against an unmodified Tephra is not a line of this PR.
+
+- [x] **E6, Atlas's half: 5 s from a `graph:changed` push.** When Tephra sends `graph:changed` after a `tephractl source add` or `remove`, Atlas creates or removes `Sources/<name>` within 5 s of the notification (in practice about a second: the push client in `tephra-ws-frames.ts`, `tephra-socket-node.ts` and `tephra-connection.ts` feeds `requestCheck()`, held to one check per second during a burst). If the notification is lost, the 10 s check or the next focus check catches it. `tests/integration/sources-folder.test.ts` covers it with a fake client that emits `graph:changed`.
+- [x] **E6, what Tephra does today (dev b04c1cf): no push on register/unregister.** `source.register` and `source.unregister` send no `graph:changed` (`crates/tephrad/src/main.rs` ~480-515 forwards only the registry's `DaemonEvent::SourceChanged`; `SourceRegistry::register` / `::unregister` in `crates/tephrad/src/registry.rs` send no event; the two RPC methods in `rpc/server.rs` only call `graph_refresh.refresh()`, which broadcasts nothing). So a source added or removed with `tephractl` while Obsidian is open gets or loses its link at the next 10 s check (`TEPHRA_CHECK_INTERVAL_MS`), within 12 s of `tephractl` returning, or within 2 s when the Obsidian window regains focus. That is the bound this PR meets and checks. `tests/integration/sources-folder.test.ts` covers add/remove with no push being caught by the 10 s tick.
+- **Tracked on the Tephra side, not here:** the 5 s bound for a `tephractl` add or remove against a real Tephra needs Tephra to broadcast `graph:changed` from `source.register` and `source.unregister`. Atlas adds no workaround (no faster polling, no watching Tephra's files).
+- [x] Confirmed live against a real `tephrad` built from Tephra b04c1cf (scratch port, scratch config and data dirs; real `TephraClient`, `openNodeWebSocket`, `TephraConnection` with its 10 s timer, and `SourcesFolder`, run from a throwaway vitest file, not in the suite):
+  - `Sources/` held exactly `tephra` and `whoop` (no link for `notes`); `Sources/tephra/README.md` read through the link; Excluded files held `Sources/tephra/.git/`, `…/target/`, `…/.DS_Store` and `Sources/whoop/.git/`; vault `.gitignore` was `Sources/`. Toggle off removed `Sources/`, the link records and the exclude entries.
+  - The push channel connects with the token and receives `graph:changed` for a `.md` write and for a `.gitignore` edit in a source, but for no `source add` or `source remove` (0 pushes in 8 s each, twice over). That is the "no push" fact above.
+  - With no push, a `source add` or `remove` was followed 9.9, 10.1, 10.0 and 10.0 s later (an earlier identical run saw one add at 0.2 s, consistent with the add landing just before a tick): inside the 12 s bound.
+  - With `Sources/tephra` and `Sources/whoop` as real symlinks in the notes source, Tephra's `unit.list` (`tephractl ls notes -r`) and `search` returned no `Sources/…` file path (G2 "nothing is indexed twice" holds). Tephra does list a `Sources` folder row with size 2 whose own listing is empty; that is a Tephra cosmetic quirk, not a double index.
+- [x] Checked live in Obsidian 1.14.4 by the tester (scratch Tephra via the loopback-only `tephraUrl` in `data.json`): GP1 (file explorer shows `Sources/tephra` and `Sources/whoop`, no `Sources` module in the Inbox), R3-4 (view entry missing on toggle-off, back with its status on toggle-on), E12 (Quick Switcher omits `Sources/tephra/target/` and finds `Sources/tephra/README`). Global search for E12 was re-checked by the coder with a symlinked scratch folder and the same `userIgnoreFilters` call: with `target/` excluded only `README.md` is found, without it both are. E6 with `tephractl` and no push showed the link 2.4, 3.9 and 5.1 s after `source add`: the 10 s check landing, inside the 12 s bound.
+- [x] Live E6 with the relay, coder, against a real `tephrad` built from b04c1cf (scratch ports, scratch config and data dirs), with the plugin's real `TephraClient`, `openNodeWebSocket`, `TephraConnection`, `TephraController` and `SourcesFolder` pointed at the relay as `tephraUrl` does (a throwaway vitest file, kept in `evidence/PR-3/`, not in the suite; the Obsidian container run is the tester's). Log: `evidence/PR-3/e6-relay-live.log`.
+  - Stand-in push (10 s timer parked so only the frame can trigger a check; the log says "stand-in push"): after `tephractl source add` nothing happened for 3 s; the frame was sent and `Sources/recipes` appeared 0.05 s later. Same for `source remove`. Two rounds each; limit 5 s.
+  - No push (the relay never signalled, real 10 s timer): `Sources/recipes` appeared 8.5, 10.0 and 10.0 s after `tephractl` returned, and went 10.0, 10.0 and 10.0 s after; limit 12 s.
+  - Focus (timer parked; the window `focus` handler in `main.ts` calls `requestCheck()`): the link appeared 0.05 s after the check and went 0.05 s after, in two rounds; limit 2 s. The in-Obsidian `window.dispatchEvent(new Event('focus'))` check is left to the tester.
+
+### Running the E6 relay (`scripts/tephra-relay.mjs`)
+
+A dev script, outside `src/` and not bundled into `main.js`. It sits between Obsidian and the real `tephrad`:
+
+- Plain HTTP calls (the JSON-RPC `POST /rpc`) are forwarded to `tephrad` and the reply returned as it came. Only `Host` is rewritten to name `tephrad`. Nothing in a body or header is read, changed or logged.
+- The push channel (the WebSocket upgrade on `GET /rpc`) is answered by the relay itself and never reaches `tephrad`. It sends nothing until it is signalled, then one `graph:changed` text frame to each connected push client. It only requires an `Authorization` header on that upgrade; `tephrad` still checks the token on every forwarded call.
+- It binds `127.0.0.1` only (relay port and the optional control port) and refuses a `--target` that isn't an `http://` loopback address with an explicit port.
+
+Run it (pick free scratch ports, not Tephra's default 4812):
+
+```
+node scripts/tephra-relay.mjs --target http://127.0.0.1:<tephrad-port> --port <relay-port> [--control-port <port>]
+```
+
+It prints its PID and ports. Set `"tephraUrl": "http://127.0.0.1:<relay-port>"` in `settings` in the plugin's `data.json` (see docs/settings.md) and reload the plugin. Send the frame with any of: `kill -USR1 <relay pid>`, a line `push` on the relay's stdin, or `curl -X POST http://127.0.0.1:<control-port>/push` (200 with the client count, 409 when no push client is connected). Every frame is logged with an ISO timestamp and the words "stand-in push": the frame is the one thing real Tephra doesn't send for a `source add` or `remove`, so keep that wording in any evidence log. Stop it with Ctrl-C or `kill <pid>` (only the PID you started).
+
+Live E6 checkpoints:
+
+1. Stand-in push: with the relay in front of a real `tephrad`, run `tephractl source add recipes ~/Documents/Recipes` (b04c1cf's syntax is `<name> <path>`), then signal the relay: `Sources/recipes` should appear within 5 s of the logged frame. Then `tephractl source remove recipes` and signal again: it should go within 5 s.
+2. No push: do not signal. `tephractl source add`, and `Sources/recipes` should appear within 12 s of `tephractl` returning; `tephractl source remove`, and it goes within 12 s. Then add again and fire the window `focus` event (for example `window.dispatchEvent(new Event('focus'))` through the container's DevTools protocol): the link should appear within 2 s.
+
+---
+
 ## Cross-cutting (verify at the end, not tied to one PR)
 
 - [x] Nothing in the plugin's DnD/promotion/placement code path ever calls `vault.rename` or `fileManager.renameFile` for the bucket/view mechanics (Part 7 — grep-verify across the whole codebase, not just F8) — grepped the entire `src/` tree for both calls: zero matches other than the code comment in `explorer-view.ts` documenting the constraint
@@ -479,3 +520,72 @@ Two bugs Dan found post-release (v0.2.0): the truncation placeholder (PR 19) doe
 - [ ] Run every edge case above
 - [ ] Scale test per F11
 - [ ] Rename/move/delete tests for F9 done from **outside** Obsidian (shell `mv`/`rm` while Obsidian is open), not just inside
+
+## Atlas-22 PR-4: one Inbox section per Tephra source (G1, E5, E12)
+
+Code-reviewed and unit/integration-tested only; the container run (screenshots) is the tester's.
+
+- [x] G1 `src/inbox-sections.ts` (pure): groups units into the vault section (`inbox`) then `source:<name>` sections A-Z (case-insensitive), the vault matched as `notes`, longest-root ownership of `Sources/<name>/…`, empty and missing sources kept, toggle off giving exactly one vault section. Also parses a `unit.list` answer (folders to `folder-unit`, files to `root-file`, vault path `Sources/<name>/<entry>`).
+- [x] G1 `explorer-view.ts`: `planInboxSections` asks Tephra once per listed source per render and keeps nothing between renders (F1); each section has its own virtual window (`InboxDrawGroup`), collapse state (not persisted), selection order and "+" (limited to `Sources/<name>/`; the vault's "+" never offers `Sources/`). Shift-click ranges never leave the anchor's section.
+- [x] G1 `source-promotion.ts` + `UnitIndex.sourcePromoted`: the pop-out rule per source; links from the vault or other sources are PR-8's (the single seam is `collectSourceLinks`).
+- [x] E5 A source Tephra reports gone (`source.list` status, or `unit.list` `offline`) keeps a grey `(missing)` header with no rows. Tephra's own `source.list` status `offline` means the source's folder is gone, so `mapSourceStatus` maps it to missing; unreachable Tephra shows no source section and no "(missing)" (PR-9 owns that).
+- [x] E12 `computeInboxWindow` is fed each list's own offset (the spacer's position); the sticky header stack and `stuckScrollTarget` handle N headers.
+- [x] F1/G16 toggle off: no Tephra calls; the Inbox DOM matches the pre-PR snapshots in `tests/fixtures/inbox-toggle-off-*.html`.
+- Not built here: Add/Remove source (PR-5), opening files (PR-6), cross-source and backlink promotion (PR-8), offline sections (PR-9).
+
+## Atlas-22 PR-5: Add source and Remove source (G3, G5, E2, E4, E9)
+
+Code-reviewed and unit/integration-tested only; the container run (real folder picker, real Tephra) is the tester's.
+
+- [x] G3 Inbox "+" with the toggle on is a menu (Add file… unchanged, Add source…); toggle off and mobile keep the direct modal. A source section's "+" is unchanged.
+- [x] G3 `pickFolder` (system picker), folder refusals (inside vault, vault itself, under `Sources/`, by real path), `NameDialog` with the source-name rules live, one `source.register`, Tephra's refusal shown in the dialog, no retry on timeout (`source.list` instead).
+- [x] G5 source header "Remove" (not on the vault's), confirm, one `source.unregister`, `SourcesFolder.removeSource` unlinks the link alone; real folders and foreign links left with a notice; "no source named" counts as done.
+- [x] E2 name rules (`src/source-name-rules.ts`, tested by row incl. 199/200-byte boundary, unicode, case). E9 nested/overlapping roots are Tephra's call, its message is shown.
+- Not live-checked here: the real Electron folder picker (`window.require("electron").remote.dialog`) and a real `tephrad` register/unregister. Tephra sends no `graph:changed` for either; Atlas asks for a check itself.
+- Not built here: Rename source (PR-11).
+
+## Atlas-22 PR-6: Open a source's files (G7, F2, F3, F8, E1, E5, GP3)
+
+Code-reviewed and unit/integration-tested only; the container run (real Obsidian, real VS Code Workbench, real Mac apps) is the tester's.
+
+- [x] G7 `src/source-open.ts`: `chooseOpener(file, registeredExtensions)` (pure) and `openSourceFile`; `ExplorerView.openRef` routes every `Sources/` file through it (click, middle-click, Open, Open in new tab, Enter, Module Contents `onOpenFile`, a module's interface note). Registered by Obsidian's live `app.viewRegistry.typeByExtension` plus a core floor.
+- [x] F8 deny-list (`doc`, `docx`, `ppt`, `pptx`, `xls`, `xlsx`, `gdoc`, `gsheet`) beats the registry; `.pdf` only ever opens in Obsidian's PDF view.
+- [x] G7 block refs in a source note open the exact TFile via `openFile` with an `eState` subpath (`openSourceBlock`), not `openLinkText`: live, `openLinkText` on a `Sources/` path created a stray note. See `docs/decisions.md`.
+- [x] G16 toggle off (or mobile): `openRef` takes the original `getLeaf(newTab).openFile` path for every file; so does a vault file outside `Sources/` with the toggle on.
+- [x] E5/E1/F2/F3 tests: missing and deleted-after-render rows do nothing and create nothing; no Tephra call from `openRef`; failed opens are caught and logged; no write API on any open; a real symlink in a temp dir stays a symlink with the file's mtime unchanged.
+- Not live-checked here: `app.viewRegistry` and `app.openWithDefaultApp` are undocumented Obsidian internals (checked against the mock only); real VS Code Workbench extensions; real Mac apps.
+
+## Atlas-22 PR-8: links across sources (G10, G12, E4, GP5)
+
+Code-reviewed and unit/integration-tested only (jsdom); the real Backlinks panel, the graph and a real `tephrad` are the tester's.
+
+- [x] G12 `topLevelFolderFor` is source-aware (`sourceModuleOf`); a link from a vault file or another source is from outside; same-module links never promote; subpath links promote the block only.
+- [x] G12 non-note links: `graph.get_edges` via `TephraGraphSync` (first online, debounced `graph:changed`), held in memory only, read only for origins with no Obsidian file cache.
+- [x] G10 "Also linked from (Tephra)" in `.backlink-pane` (`src/backlinks-section.ts`), request token, one section across re-renders; the Atlas Links pane fallback and command.
+- [x] E4 `scripts/report-case-mismatch.mjs` with `tests/fixtures/case-mismatch-vault/`.
+- Not live-checked: the `.backlink-pane` DOM shape, `eState.line` on a real open, the graph edge (GP5), a real `tephrad`. The report on a copy of Dan's vault has not been run (no copy was provided).
+
+## Atlas-22 PR-11: Rename source (G4, R3-4, R3-6, E6)
+
+- [x] G4 source header "Rename" (not on the vault's; disabled with an Atlas-owned "Tephra offline" tooltip while Tephra is down), name dialog with the Add rules minus the source's own name, one `source.rename { name, new_name }`.
+- [x] R3-4 the remap runs only after Tephra's answer: views (refs, API item notes, Folder/CSV/table source paths), manual promotions, dismissed/added, `noAutoPromoteFolders`, open module folders, per-source settings, Excluded entries. Whole path segments only (`Sources/whoop` never matches `Sources/whoopee`).
+- [x] R3-6 a refusal, timeout or lost connection changes nothing in Atlas; a timeout is not retried.
+- [x] E6 a rename announced on `graph:changed` (`sources_changed` kind `renamed`, `name` new, `old_name` old, from Tephra dev's `forward.rs`) runs the same remap and swap, once.
+- [x] Link swap by `SourcesFolder.swapSource` (new link first, then unlink the old; case-only rename via a temporary name); a failed swap after Tephra accepted keeps the remap and the next sync finishes it.
+- [x] Review 1 R1: `tests/integration/source-rename.test.ts` replays the swap's deletes (`Sources/whoop/…`) and creates (`Sources/gym/…`) through the real `onVaultDeleteEvent`/`onVaultCreateEvent` over a real `TephraRenameForwarder` and queue: nothing forwarded, queued or scheduled, no graduation, placeholder `noteRef`s unchanged, no Notice.
+- [x] Review 1 R2: Rename has no local byte cap (Add keeps 199); a 255+ byte name is sent to Tephra and its reason shows word for word. A too-long `Sources/<name>` `lstat` (ENAMETOOLONG) counts as "no such entry". Tested through the dialog and by rule.
+- [x] Review 1 R3: `remapSourcePaths` is async and flushes `data.json` (one `flushSave`, replacing the mid-way `saveSettings`) before the swap, so a failed or skipped swap, or an E6 rename, can't lose the remap to the 500 ms debounce. A failing write is logged and the swap goes on.
+- [x] Test 1 T1/T3: `tests/unit/source-header-menu.test.ts` (the spec's file): Rename present and enabled on `[whoop]`/`[tephra]`, absent on the vault header, disabled with the Atlas-owned "Tephra offline" tooltip while Tephra is down, and no Rename or Remove from a header menu when the toggle is off or on mobile (no source headers exist then; the handler's own guard is tested too). Add/Remove entry points stay in `tests/integration/explorer-source-actions.test.ts`.
+- [x] Test 1 T2 (E8): `SourceRenamer.dispose()`, called from `onunload`. A rename cut by an unload is neither rolled back nor finished: Tephra keeps what it did, a remap already written stays, and nothing that hadn't started starts (no tab flush, remap, swap, notice, re-render or new rename), so a dead instance never writes `data.json` over a reloaded one. The next load's sync creates `Sources/<new>` and removes `Sources/<old>`; entries left on the old path show missing and are not deleted. Tested with the real `onunload` at three points (before Tephra's answer, during the tab flush, during the remap's write) and a fresh `SourcesFolder` as the next load. A swap that returns "skipped" (toggle off, mobile) no longer reopens tabs at the new path, since the old link is still there.
+- [x] Test 1 T4: `tests/integration/source-rename.test.ts` ("Checkpoint 4") resolves `[[@gym:Workout Plan]]` from `Weekly Review.md` through the real `LinkResolutionHook` over a vault indexed as after the swap: it returns the `Sources/gym/Workout Plan.md` file, `[[@whoop:…]]` no longer resolves, and the plain `[[Leg Day]]` in the source still does. A real click in Obsidian was not run by the coder (the tester's live check).
+- Not live-checked here: a real `tephrad` rename, the real menu hover tooltip, and tabs reopening in a real Obsidian (the tester's checks); a real Tephra `source.rename` frame is covered by the shape in its `forward.rs` tests only.
+
+## Atlas-22 PR-12: Own source = longest root; Make its own source / Return to parent (G6)
+
+- [x] Own source is the longest matching root, on whole path segments (`ownSourceOf`, `locateInSource`, `SourceFileIndex`, the Inbox sections, the unit index, the `[[` popup, link text, Backlinks, the click boundary of the link hook). With no promoted roots the rule is the old `Sources/<name>` / `notes` one.
+- [x] A promoted source gets no `Sources/<name>` link: its vault path is derived from Tephra's absolute roots (`src/source-roots.ts`), held in memory (F1) and last-known kept in `settings.tephraPromotedRoots` for offline starts (R5), set from every source list by `bindPromotedRoots` before anything draws from it.
+- [x] `source.promote { name, root }` / `source.unpromote { name }` through `SourcePromoter` (`src/source-promote.ts`): one confirm, one call, nothing queued, a refusal in Tephra's words, a timeout not retried.
+- [x] "Make its own source" on a folder row (Inbox, Module Contents) and on a drag to the gap between Inbox sections; "Return to parent" on a promoted source's header; greyed out with the Atlas-owned "Tephra offline" tooltip while offline.
+- [x] Review fixes: deletes under a promoted folder classify as missing by its own absolute path, never as user deletes (R1, E5/R3-4; `tests/integration/promoted-source-delete.test.ts`); a promoted vault folder (`Projects/Atlas`) takes the per-source pop-out rule (R2); the fixture's `Sources/tephra` is a symlink to `tests/fixtures/tephra-tree` with `scan.rs` and the GP8 block link, and the nested promote/return flow is tested end to end with the real link controller (R3); load-sensitive timing tests have explicit timeouts, bounds unchanged (R4); promoted roots survive a start with Tephra down (R5; `tests/integration/promoted-roots-offline-start.test.ts`).
+- [x] Backlinks across a promote (T11/T12): when the promoted roots change, the Backlinks section for the open file asks Tephra again under its new id (`AtlasPlugin.onPromotedRootsChanged`), so `registry.rs` lists the same `scan.rs:41` row before, after and after Return to parent (`tests/integration/backlinks-promoted-source.test.ts`). Not live-checked: Obsidian in the container has no viewer for `.rs`, so the panel (and a hover or click on a `.rs` link, which is Obsidian's own) could not be shown there.
+- Not live-checked: a real `tephrad` answering `source.promote`; the fake daemon in `tests/integration/promote-source.test.ts` stands in for it. The drag onto the gap and the menu hover tooltip need a real Obsidian (the tester's).

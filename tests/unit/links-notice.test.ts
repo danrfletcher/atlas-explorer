@@ -35,6 +35,24 @@ describe("links notice", () => {
 		expect(Notice.instances).toHaveLength(0);
 	});
 
+	it("R3-6 a toggle-on predicate suppresses the notice even though the setting is off; a toggle-off predicate changes nothing", () => {
+		expect(noticeIfLinksNotUpdated(app, () => false, () => true)).toBe(false);
+		expect(Notice.instances).toHaveLength(0);
+		expect(noticeIfLinksNotUpdated(app, () => false, () => false)).toBe(true);
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toBe(LINKS_NOT_UPDATED_MESSAGE);
+		Notice.reset();
+		expect(noticeIfLinksNotUpdated(app, () => true, () => false)).toBe(false); // setting on, toggle off: still no notice
+		expect(noticeIfLinksNotUpdated(app, () => false, undefined)).toBe(true); // no predicate: today's behaviour
+	});
+
+	it("R3-6 the predicate is read at call time, so a toggle flipped between two moves is honoured", () => {
+		let toggleOn = true;
+		expect(noticeIfLinksNotUpdated(app, () => false, () => toggleOn)).toBe(false);
+		toggleOn = false;
+		expect(noticeIfLinksNotUpdated(app, () => false, () => toggleOn)).toBe(true);
+	});
+
 	it("the default reader uses the vault's alwaysUpdateLinks config", () => {
 		const a = new App();
 		expect(readAlwaysUpdateLinks(a)).toBeUndefined();

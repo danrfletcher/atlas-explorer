@@ -573,3 +573,21 @@ describe("atlas-15 PR-2 F3 — the staged render and the notify gating add no ti
 		expect(slice(code, "private renderConnectionDots(", "\n\t}\n")).not.toMatch(TIMER);
 	});
 });
+
+/** PR-10 F3: Atlas never edits a note's content for a rename. The rename-forwarding, queue and link-setting modules have no
+ * Vault or FileManager write call at all (comments stripped), and Atlas has no link-rewrite fallback: an error reply from Tephra
+ * only drops the entry with a Notice (behaviour: `tests/integration/tephra-rename-forwarding.test.ts`). */
+describe("PR-10 fence F3 — rename forwarding, its queue and the link setting never write a note", () => {
+	const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+	const FORBIDDEN = /(vault|app|adapter)\??\.(modify|process|append|create|createBinary|createFolder|delete|trash|rename|copy)\s*\(|\.(modify|process|append)\s*\(|processFrontMatter|renameFile\s*\(|fileManager\s*\./;
+	it.each(["src/tephra-rename-forwarder.ts", "src/tephra-rename-queue.ts", "src/tephra-rename-queue-fs.ts", "src/tephra-link-setting.ts"])("%s has no vault or file-manager write call", (rel) => {
+		const code = strip(read(rel));
+		// the queue's own storage uses Node's renameSync/writeFileSync on its own file, never the vault API
+		expect(code.match(FORBIDDEN)).toBeNull();
+		expect(code).not.toMatch(/from "obsidian"/);
+	});
+	it("the forwarder holds no link or content logic: it passes the two paths on and never reads a note", () => {
+		const code = strip(read("src/tephra-rename-forwarder.ts"));
+		expect(code).not.toMatch(/\.read\(|cachedRead|getFileCache|resolvedLinks/);
+	});
+});
