@@ -326,7 +326,7 @@ describe("N source headers stack and stick in order, and a title click lands eac
 	it("lays out bucket, Inbox and the three sources in order, each header stacked under the ones above and pinned above the ones below", async () => {
 		rig = await open();
 		const all = sections(rig);
-		expect(all.map((el) => el.querySelector(".atlas-section-title")!.textContent)).toEqual(["Bucket", "Inbox", "[alpha]", "[tephra]", "[whoop]"]);
+		expect(all.map((el) => el.querySelector(".atlas-section-title")!.textContent)).toEqual(["View", "Inbox", "[alpha]", "[tephra]", "[whoop]"]);
 		const sourceSections = all.slice(2);
 		expect(sourceSections.map((el) => el.style.getPropertyValue("--atlas-section-top"))).toEqual(["56px", "84px", "112px"]);
 		expect(sourceSections.map((el) => el.style.getPropertyValue("--atlas-section-bottom"))).toEqual(["56px", "28px", "0px"]);
